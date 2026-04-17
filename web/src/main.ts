@@ -6,11 +6,12 @@ import init, { Game } from '../wasm/prism.js';
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const status = document.getElementById('status') as HTMLDivElement;
-const ctx = canvas.getContext('2d', { alpha: false });
-if (!ctx) {
+const ctxOrNull = canvas.getContext('2d', { alpha: false });
+if (!ctxOrNull) {
   status.textContent = 'canvas 2d unavailable';
   throw new Error('canvas 2d unavailable');
 }
+const ctx = ctxOrNull;
 
 // Device-pixel-ratio-aware sizing. Capped at 2x to keep fill rate reasonable
 // on high-DPI phones.
