@@ -1,0 +1,19 @@
+# Rust
+/target
+
+# Node
+web/node_modules
+web/dist
+
+# wasm-pack output (regenerated on every build)
+web/wasm
+
+# Wrangler
+.wrangler
+.dev.vars
+
+# Editors / OS
+.DS_Store
+.vscode
+.idea
+*.swp
