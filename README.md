@@ -2,74 +2,67 @@
 
 Auto-firing light, refracted through shards you collect. A Vampire-Survivors-paced action game rendered as geometric light, built in Rust + WASM, deployed to Cloudflare Workers.
 
-**Current stage: step 1 — pipeline alive.** A WASM module ticks a clock, a canvas renders a pulsing point of light, and pushing to `main` deploys the whole thing.
+**Controls:** WASD or arrow keys. On touch devices, drag anywhere — it becomes a virtual analog stick. When a rank-up modal appears, click a card or press `1` / `2` / `3`.
 
 ## Stack
 
-- **Rust** → `wasm-pack` → WebAssembly (game state, simulation)
-- **TypeScript** + **Vite** (bootstrap, renderer, audio — later)
+- **Rust** → `wasm-pack` → WebAssembly (simulation, shard logic, collision)
+- **WebGL2** + **TypeScript** + **Vite** (renderer, HUD, bootstrap)
 - **Cloudflare Workers** static assets via **Wrangler**
-- **GitHub Actions** deploys on push
+- **GitHub Actions** deploys on push to `main`
+
+## Architecture
+
+Two passes. Pass one draws instanced SDF circles (player, enemies, particles, pulses) and SDF capsules (beams) into an offscreen RGBA8 framebuffer with additive blending. Pass two generates mipmaps on that framebuffer and runs a full-screen composite that samples mip levels 2/4/6 for cheap multi-scale bloom, applies radial chromatic aberration, a subtle vignette, Reinhard tonemap, and gamma correction.
+
+The WASM↔JS boundary is zero-copy. Rust packs each frame's draw calls into two flat `Vec<CircleInstance>` / `Vec<BeamInstance>` buffers with `#[repr(C)]`; JavaScript reads the pointers + lengths and creates `Float32Array` views directly over WASM linear memory. The GPU instance buffer is filled with the same bytes Rust wrote. No serialization, no marshalling.
 
 ## Prerequisites
 
-- Rust (stable) — the toolchain is pinned in `rust-toolchain.toml`
+- Rust stable (pinned in `rust-toolchain.toml`)
 - [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/)
 - Node 22+
 
 ## Local development
 
-Build the Rust module, then run Vite:
-
 ```bash
-# From the repo root. Rebuild this whenever src/*.rs changes.
+# Rebuild the WASM module whenever anything under src/ changes.
 wasm-pack build --target web --out-dir web/wasm --out-name prism --dev
 
-# Then, in another terminal:
+# In another terminal:
 cd web
 npm install
 npm run dev
 ```
 
-Open http://localhost:5173. You should see a faint violet vignette and a softly pulsing white dot in the center of the screen.
+Open http://localhost:5173.
 
 ## Deploy
 
-One-time setup — add two secrets in your GitHub repo settings:
-
-- `CLOUDFLARE_API_TOKEN` — a token with the **Workers Scripts: Edit** permission (create at https://dash.cloudflare.com/profile/api-tokens)
-- `CLOUDFLARE_ACCOUNT_ID` — from the right-hand sidebar of your Cloudflare dashboard
-
-Then:
-
-```bash
-git init
-git add .
-git commit -m "step 1: pipeline alive"
-git branch -M main
-git remote add origin <your-repo-url>
-git push -u origin main
-```
-
-The workflow in `.github/workflows/deploy.yml` runs, builds WASM + the web bundle, and deploys. First deploy takes ~2–3 minutes; subsequent deploys ~45s with caching. The game goes live at `https://prism.<your-subdomain>.workers.dev`.
-
-If you want a different Worker name, edit `name` in `wrangler.toml` before the first deploy.
+One-time: add `CLOUDFLARE_API_TOKEN` (Workers Scripts: Edit) and `CLOUDFLARE_ACCOUNT_ID` as GitHub repo secrets. Then push to `main`. The workflow in `.github/workflows/deploy.yml` builds and deploys.
 
 ## Layout
 
 ```
 prism/
 ├── Cargo.toml                      Rust package manifest
-├── rust-toolchain.toml             Pinned Rust channel
+├── rust-toolchain.toml             Pinned toolchain
 ├── src/
-│   └── lib.rs                      WASM entry + Game struct
+│   ├── lib.rs                      #[wasm_bindgen] surface
+│   ├── game.rs                     State, update loop
+│   ├── shards.rs                   The 10 shard operators
+│   ├── entities.rs                 Plain data structs
+│   └── math.rs                     Seeded xorshift RNG
 ├── web/
-│   ├── index.html                  Canvas host
+│   ├── index.html                  Canvas + HUD
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── vite.config.ts
 │   └── src/
-│       └── main.ts                 Bootstrap + RAF loop
+│       ├── main.ts                 Bootstrap + RAF loop + HUD/modal
+│       ├── renderer.ts             WebGL2 pipeline
+│       ├── shaders.ts              GLSL 300 ES sources
+│       └── input.ts                Keyboard + touch
 ├── wrangler.toml                   Cloudflare Workers config
 ├── .github/workflows/deploy.yml    CI
 └── .gitignore
@@ -77,8 +70,8 @@ prism/
 
 ## Roadmap
 
-1. ✅ Pipeline alive (this step)
-2. WebGL2 renderer — additive beams, bloom post-process, one enemy type, collision
-3. Shard system — all 10 operators, level-up UI, the compounding visuals
+1. ✅ Pipeline alive
+2. ✅ WebGL2 renderer — SDF circles + beams, additive blend, mip-based bloom, radial chromatic aberration, Reinhard tonemap
+3. ✅ Shard system — all 10 operators, level-up picker, HUD with rank / XP / shard tray
 4. Procedural audio — Web Audio synth voices locked to a music clock
 5. Waves, Nightfall boss, meta progression, polish

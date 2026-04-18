@@ -6,14 +6,23 @@
     <meta name="color-scheme" content="dark" />
     <title>Prism</title>
     <style>
+      :root {
+        --ink: #eaeaf5;
+        --dim: rgba(234, 234, 245, 0.45);
+        --faint: rgba(234, 234, 245, 0.18);
+        --bg: #000;
+      }
+
       html, body {
         margin: 0;
         padding: 0;
         height: 100%;
-        background: #000;
+        background: var(--bg);
         overflow: hidden;
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        color: #eee;
+        color: var(--ink);
+        -webkit-user-select: none;
+        user-select: none;
       }
       #canvas {
         display: block;
@@ -29,13 +38,181 @@
         letter-spacing: 0.5px;
         opacity: 0.45;
         pointer-events: none;
-        user-select: none;
+      }
+
+      /* HUD */
+      #hud {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+      }
+      #stats {
+        position: absolute;
+        top: 10px;
+        right: 14px;
+        text-align: right;
+        font-size: 12px;
+        letter-spacing: 1px;
+      }
+      #stats .rank {
+        font-size: 14px;
+        color: var(--ink);
+      }
+      #stats .kills {
+        color: var(--dim);
+        margin-top: 2px;
+      }
+
+      #xp-wrap {
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: 22px;
+        width: min(640px, 60vw);
+        height: 3px;
+        background: var(--faint);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      #xp-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #7fd3ff, #fff);
+        box-shadow: 0 0 12px #7fd3ff, 0 0 24px rgba(127, 211, 255, 0.5);
+        transition: width 120ms ease-out;
+      }
+
+      /* Shard tray: 10 circles at the bottom-left, filling with color as their level rises. */
+      #shards-tray {
+        position: absolute;
+        left: 14px;
+        bottom: 16px;
+        display: flex;
+        gap: 6px;
+      }
+      .shard-pip {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 1px solid var(--faint);
+        background: transparent;
+        position: relative;
+      }
+      .shard-pip[data-level="0"] { opacity: 0.35; }
+      .shard-pip::after {
+        content: attr(data-level);
+        position: absolute;
+        top: -14px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 8px;
+        color: var(--dim);
+      }
+      .shard-pip[data-level="0"]::after { content: ""; }
+
+      /* Level-up overlay */
+      #levelup {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 28px;
+        z-index: 10;
+        background: rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(14px) saturate(140%);
+        -webkit-backdrop-filter: blur(14px) saturate(140%);
+        animation: fade-in 220ms ease-out;
+      }
+      #levelup.shown { display: flex; }
+      @keyframes fade-in {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      #levelup-title {
+        font-size: 12px;
+        letter-spacing: 8px;
+        color: var(--dim);
+      }
+      #levelup-rank {
+        font-size: 34px;
+        font-weight: 200;
+        letter-spacing: 4px;
+      }
+      #levelup-cards {
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+        justify-content: center;
+        padding: 0 20px;
+      }
+      .shard-card {
+        width: 220px;
+        min-height: 240px;
+        padding: 22px 20px;
+        border: 1px solid var(--faint);
+        border-radius: 2px;
+        background: rgba(10, 8, 20, 0.55);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        cursor: pointer;
+        transition: transform 180ms ease, border-color 180ms ease, box-shadow 220ms ease;
+      }
+      .shard-card:hover, .shard-card:focus {
+        transform: translateY(-4px);
+        outline: none;
+      }
+      .shard-icon {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        box-shadow: 0 0 20px currentColor, 0 0 42px currentColor inset;
+        margin-bottom: 4px;
+      }
+      .shard-name {
+        font-size: 13px;
+        letter-spacing: 4px;
+        font-weight: 500;
+      }
+      .shard-level {
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: var(--dim);
+      }
+      .shard-desc {
+        font-size: 11px;
+        line-height: 1.6;
+        color: var(--dim);
+      }
+      .shard-hotkey {
+        margin-top: auto;
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: var(--faint);
       }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
     <div id="status">loading…</div>
+
+    <div id="hud">
+      <div id="stats">
+        <div class="rank" id="rank">rank 0</div>
+        <div class="kills" id="kills">0 kills</div>
+      </div>
+      <div id="xp-wrap"><div id="xp-fill"></div></div>
+      <div id="shards-tray"></div>
+    </div>
+
+    <div id="levelup">
+      <div id="levelup-title">RANK UP</div>
+      <div id="levelup-rank">—</div>
+      <div id="levelup-cards"></div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
