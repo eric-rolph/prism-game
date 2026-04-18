@@ -132,14 +132,14 @@ enum WaveShape {
 
 // Per-type enemy stats: (radius, hp, speed, contact_damage, color)
 fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
-    let hp_scale = (1.17_f32).powf(minute); // exponential 17% per minute
+    let hp_scale = (1.22_f32).powf(minute); // exponential 22% per minute
     match kind {
-        EnemyKind::Drone => (9.0, 125.0 * hp_scale, 86.0, 12.0, [0.35, 0.18, 0.55]),
-        EnemyKind::Brute => (22.0, 936.0 * hp_scale, 46.0, 24.0, [0.7, 0.15, 0.15]),
-        EnemyKind::Dasher => (7.0, 94.0 * hp_scale, 66.0, 18.0, [0.2, 0.8, 0.9]),
-        EnemyKind::Splitter => (14.0, 312.0 * hp_scale, 72.0, 14.0, [0.2, 0.7, 0.3]),
-        EnemyKind::Orbiter => (10.0, 234.0 * hp_scale, 108.0, 12.0, [0.9, 0.5, 0.15]),
-        EnemyKind::Emitter => (11.0, 195.0 * hp_scale, 55.0, 8.0, [0.7, 0.3, 0.8]),
+        EnemyKind::Drone => (9.0, 150.0 * hp_scale, 100.0, 14.0, [0.35, 0.18, 0.55]),
+        EnemyKind::Brute => (22.0, 1100.0 * hp_scale, 52.0, 28.0, [0.7, 0.15, 0.15]),
+        EnemyKind::Dasher => (7.0, 110.0 * hp_scale, 76.0, 20.0, [0.2, 0.8, 0.9]),
+        EnemyKind::Splitter => (14.0, 370.0 * hp_scale, 82.0, 16.0, [0.2, 0.7, 0.3]),
+        EnemyKind::Orbiter => (10.0, 280.0 * hp_scale, 124.0, 14.0, [0.9, 0.5, 0.15]),
+        EnemyKind::Emitter => (11.0, 230.0 * hp_scale, 64.0, 10.0, [0.7, 0.3, 0.8]),
     }
 }
 
@@ -153,6 +153,26 @@ const HALO_DPS: f32 = 38.0;
 
 const INTERFERENCE_DPS: f32 = 60.0;
 const INTERFERENCE_RING_THICKNESS: f32 = 12.0;
+
+// Siphon: HP healed per beam hit (scaled by level).
+const SIPHON_HEAL_PER_HIT: f32 = 1.5;
+
+// Frost: slow duration per level.
+const FROST_SLOW_DURATION: f32 = 1.2;
+const FROST_SLOW_FACTOR: f32 = 0.4; // speed multiplier when frozen
+
+// Barrier: shield HP per level, regen rate.
+const BARRIER_HP_PER_LEVEL: f32 = 25.0;
+const BARRIER_REGEN_PER_SEC: f32 = 4.0;
+const BARRIER_CONTACT_DPS: f32 = 50.0;
+const BARRIER_RADIUS: f32 = 50.0;
+
+// Thorns: beams fired when taking damage.
+const THORNS_BEAMS_PER_LEVEL: u8 = 3;
+const THORNS_BEAM_REACH: f32 = 200.0;
+const THORNS_BEAM_DAMAGE: f32 = 40.0;
+const THORNS_BEAM_THICKNESS: f32 = 2.0;
+const THORNS_BEAM_LIFETIME: f32 = 0.12;
 
 const ECHO_DELAY: f32 = 0.08;
 
@@ -181,6 +201,8 @@ impl Game {
                 dash_cooldown: 0.0,
                 dash_timer: 0.0,
                 dash_dir: Vec2::ZERO,
+                barrier_hp: 0.0,
+                barrier_max: 0.0,
             },
             enemies: Vec::with_capacity(256),
             beams: Vec::with_capacity(256),
@@ -282,6 +304,12 @@ impl Game {
     pub fn max_hp(&self) -> f32 {
         self.player.max_hp
     }
+    pub fn barrier_hp(&self) -> f32 {
+        self.player.barrier_hp
+    }
+    pub fn barrier_max(&self) -> f32 {
+        self.player.barrier_max
+    }
     pub fn score(&self) -> u32 {
         self.score
     }
@@ -320,6 +348,10 @@ impl Game {
             self.inventory.upgrade(kind);
             if kind == ShardKind::Halo {
                 self.rebuild_halos();
+            }
+            if kind == ShardKind::Barrier {
+                self.player.barrier_max = BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
+                self.player.barrier_hp = self.player.barrier_max; // full shield on upgrade
             }
             self.leveling_up = false;
             self.level_choices = [None; 3];
@@ -422,6 +454,11 @@ impl Game {
         let player_pos = self.player.pos;
         let _minute = self.time / 60.0;
         for e in &mut self.enemies {
+            // Frost slow decay.
+            if e.slow_timer > 0.0 {
+                e.slow_timer -= dt;
+            }
+            let speed_mult = if e.slow_timer > 0.0 { FROST_SLOW_FACTOR } else { 1.0 };
             match e.state {
                 EnemyState::Drifting => {
                     let to_player = player_pos - e.pos;
@@ -433,11 +470,11 @@ impl Game {
                                 e.state = EnemyState::Orbiting;
                                 e.state_timer = 0.0;
                             } else {
-                                e.pos += dir * e.speed * dt;
+                                e.pos += dir * e.speed * speed_mult * dt;
                             }
                         }
                         EnemyKind::Dasher => {
-                            e.pos += dir * e.speed * dt;
+                            e.pos += dir * e.speed * speed_mult * dt;
                             if to_player.length() < 250.0 {
                                 e.state = EnemyState::Telegraphing;
                                 // Telegraph shortens late-game: 0.45s base, 0.35s after wave 10.
@@ -447,14 +484,14 @@ impl Game {
                             }
                         }
                         EnemyKind::Emitter => {
-                            e.pos += dir * e.speed * dt;
+                            e.pos += dir * e.speed * speed_mult * dt;
                             if to_player.length() < EMITTER_RANGE {
                                 e.state = EnemyState::Shooting;
                                 e.state_timer = EMITTER_FIRE_INTERVAL;
                             }
                         }
                         _ => {
-                            e.pos += dir * e.speed * dt;
+                            e.pos += dir * e.speed * speed_mult * dt;
                         }
                     }
                 }
@@ -466,7 +503,7 @@ impl Game {
                     }
                 }
                 EnemyState::Charging => {
-                    e.pos += e.charge_dir * 320.0 * dt;
+                    e.pos += e.charge_dir * 320.0 * speed_mult * dt;
                     e.state_timer -= dt;
                     if e.state_timer <= 0.0 {
                         e.state = EnemyState::Drifting;
@@ -476,7 +513,7 @@ impl Game {
                     e.state_timer += dt;
                     // Orbit radius stored in charge_dir.x (set at spawn).
                     let orbit_radius = if e.charge_dir.x > 10.0 { e.charge_dir.x } else { 100.0 };
-                    let angle_speed = 1.8;
+                    let angle_speed = 1.8 * speed_mult;
                     let base_angle = (e.pos - player_pos).y.atan2((e.pos - player_pos).x);
                     let angle = base_angle + angle_speed * dt;
                     e.pos = player_pos + Vec2::new(angle.cos(), angle.sin()) * orbit_radius;
@@ -528,18 +565,19 @@ impl Game {
         }
         // Projectile-player collision.
         if self.player.iframe_timer <= 0.0 {
-            let mut hit = false;
+            let mut proj_damage = 0.0_f32;
             for p in &mut self.projectiles {
                 if p.life < PROJ_LIFETIME && (p.pos - self.player.pos).length() < PROJ_RADIUS + self.player.radius {
-                    self.player.hp -= p.damage;
-                    self.player.iframe_timer = IFRAME_DURATION;
-                    self.shake_amount += SHAKE_HIT_PX;
+                    proj_damage = p.damage;
                     p.life = PROJ_LIFETIME; // mark for removal
-                    hit = true;
                     break;
                 }
             }
-            let _ = hit;
+            if proj_damage > 0.0 {
+                self.apply_damage_to_player(proj_damage);
+                self.player.iframe_timer = IFRAME_DURATION;
+                self.shake_amount += SHAKE_HIT_PX;
+            }
         }
         // Projectile-crystal collision (projectiles die on crystals).
         for p in &mut self.projectiles {
@@ -600,17 +638,21 @@ impl Game {
         // Enemy contact damage to player (checked BEFORE beams fire so enemies that
         // reach the player aren't killed before they can deal damage).
         if self.player.iframe_timer <= 0.0 {
+            let mut contact_dmg = 0.0_f32;
             for e in &self.enemies {
                 if e.hp <= 0.0 {
                     continue;
                 }
                 let dist = (e.pos - self.player.pos).length();
                 if dist < e.radius + self.player.radius {
-                    self.player.hp -= e.contact_damage;
-                    self.player.iframe_timer = IFRAME_DURATION;
-                    self.shake_amount += SHAKE_HIT_PX;
+                    contact_dmg = e.contact_damage;
                     break;
                 }
+            }
+            if contact_dmg > 0.0 {
+                self.apply_damage_to_player(contact_dmg);
+                self.player.iframe_timer = IFRAME_DURATION;
+                self.shake_amount += SHAKE_HIT_PX;
             }
         }
 
@@ -652,6 +694,8 @@ impl Game {
         self.beams.retain(|b| b.life < b.max_life);
 
         // Halos: orbit + contact damage.
+        // Synergy: FROZEN ORBIT (Halo+Frost 3+) — halo beads slow enemies.
+        let frozen_orbit = self.inventory.has_synergy(ShardKind::Halo, ShardKind::Frost);
         for h in &mut self.halos {
             h.angle += h.angular_speed * dt;
         }
@@ -667,6 +711,24 @@ impl Game {
             for e in &mut self.enemies {
                 if (e.pos - *hpos).length() < hsize + e.radius {
                     e.hp -= HALO_DPS * dt;
+                    if frozen_orbit {
+                        e.slow_timer = e.slow_timer.max(FROST_SLOW_DURATION);
+                    }
+                }
+            }
+        }
+
+        // Barrier: shield regen + contact damage to nearby enemies.
+        let barrier_level = self.inventory.level(ShardKind::Barrier);
+        if barrier_level > 0 {
+            self.player.barrier_max = BARRIER_HP_PER_LEVEL * barrier_level as f32;
+            self.player.barrier_hp = (self.player.barrier_hp + BARRIER_REGEN_PER_SEC * dt)
+                .min(self.player.barrier_max);
+            // Contact damage to enemies within barrier radius.
+            for e in &mut self.enemies {
+                let dist = (e.pos - self.player.pos).length();
+                if dist < BARRIER_RADIUS + e.radius {
+                    e.hp -= BARRIER_CONTACT_DPS * dt;
                 }
             }
         }
@@ -806,7 +868,13 @@ impl Game {
 
     fn fire_beam(&mut self, req: BeamRequest) {
         let diffract = self.inventory.level(ShardKind::Diffract);
+        let siphon = self.inventory.level(ShardKind::Siphon);
+        let frost = self.inventory.level(ShardKind::Frost);
         let mut impacts: Vec<Vec2> = Vec::new();
+        let mut hit_count: u32 = 0;
+
+        // Synergy: BLIZZARD (Split+Frost 3+) — frozen enemies take +40% damage.
+        let blizzard = self.inventory.has_synergy(ShardKind::Split, ShardKind::Frost);
 
         // Primary damage pass.
         for e in &mut self.enemies {
@@ -817,12 +885,27 @@ impl Game {
                 e.pos,
                 e.radius,
             ) {
-                e.hp -= req.damage;
+                let mut dmg = req.damage;
+                if blizzard && e.slow_timer > 0.0 {
+                    dmg *= 1.4;
+                }
+                e.hp -= dmg;
+                hit_count += 1;
                 self.hit_flash_positions.push(e.pos);
                 if diffract > 0 {
                     impacts.push(e.pos);
                 }
+                // Frost: slow enemies on hit.
+                if frost > 0 {
+                    e.slow_timer = FROST_SLOW_DURATION * frost as f32;
+                }
             }
+        }
+
+        // Siphon: heal player per hit.
+        if siphon > 0 && hit_count > 0 {
+            let heal = SIPHON_HEAL_PER_HIT * siphon as f32 * hit_count as f32;
+            self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
         }
 
         // Primary visual.
@@ -836,17 +919,21 @@ impl Game {
         });
 
         // Diffract: each impact spawns L radial sub-beams (damage + visual).
+        // Synergy: SUPERNOVA (Mirror+Diffract 3+) — 2x burst reach and thickness.
+        let supernova = self.inventory.has_synergy(ShardKind::Mirror, ShardKind::Diffract);
+        let diffract_reach = if supernova { DIFFRACT_MINI_REACH * 2.0 } else { DIFFRACT_MINI_REACH };
+        let diffract_thick = if supernova { DIFFRACT_MINI_THICKNESS * 1.5 } else { DIFFRACT_MINI_THICKNESS };
         for impact in impacts {
             for _ in 0..diffract {
                 let a = self.rng.angle();
                 let dir = Vec2::new(a.cos(), a.sin());
-                let end = impact + dir * DIFFRACT_MINI_REACH;
+                let end = impact + dir * diffract_reach;
 
                 for e in &mut self.enemies {
                     if capsule_circle_intersect(
                         impact,
                         end,
-                        DIFFRACT_MINI_THICKNESS * 0.5,
+                        diffract_thick * 0.5,
                         e.pos,
                         e.radius,
                     ) {
@@ -859,7 +946,7 @@ impl Game {
                     end,
                     life: 0.0,
                     max_life: DIFFRACT_MINI_LIFETIME,
-                    thickness: DIFFRACT_MINI_THICKNESS,
+                    thickness: diffract_thick,
                     color: [0.6, 1.0, 0.7],
                 });
             }
@@ -903,6 +990,7 @@ impl Game {
                     charge_dir: Vec2::ZERO,
                     color,
                     contact_damage: 8.0,
+                    slow_timer: 0.0,
                 });
             }
         }
@@ -911,31 +999,44 @@ impl Game {
         self.shake_amount += SHAKE_DEATH_PX;
 
         // Cascade: short beams in random directions from the corpse.
+        // Synergy: CHAIN REACTION (Split+Cascade 3+) — cascade beams fan into 3.
         if cascade_depth < CASCADE_MAX_DEPTH {
             let cascade = self.inventory.level(ShardKind::Cascade);
+            let chain_reaction = self.inventory.has_synergy(ShardKind::Split, ShardKind::Cascade);
+            let fan_count = if chain_reaction { 3u32 } else { 1 };
+            let fan_spread = 0.3_f32; // radians
+
             for _ in 0..cascade {
-                let a = self.rng.angle();
-                let dir = Vec2::new(a.cos(), a.sin());
-                let end = pos + dir * CASCADE_REACH;
-                for e in &mut self.enemies {
-                    if capsule_circle_intersect(
-                        pos,
-                        end,
-                        CASCADE_THICKNESS * 0.5,
-                        e.pos,
-                        e.radius,
-                    ) {
-                        e.hp -= CASCADE_DAMAGE;
+                let base_a = self.rng.angle();
+                for f in 0..fan_count {
+                    let offset = if fan_count > 1 {
+                        (f as f32 - (fan_count - 1) as f32 * 0.5) * fan_spread
+                    } else {
+                        0.0
+                    };
+                    let a = base_a + offset;
+                    let dir = Vec2::new(a.cos(), a.sin());
+                    let end = pos + dir * CASCADE_REACH;
+                    for e in &mut self.enemies {
+                        if capsule_circle_intersect(
+                            pos,
+                            end,
+                            CASCADE_THICKNESS * 0.5,
+                            e.pos,
+                            e.radius,
+                        ) {
+                            e.hp -= CASCADE_DAMAGE;
+                        }
                     }
+                    self.beams.push(Beam {
+                        start: pos,
+                        end,
+                        life: 0.0,
+                        max_life: CASCADE_LIFETIME,
+                        thickness: CASCADE_THICKNESS,
+                        color: [1.0, 0.5, 0.3],
+                    });
                 }
-                self.beams.push(Beam {
-                    start: pos,
-                    end,
-                    life: 0.0,
-                    max_life: CASCADE_LIFETIME,
-                    thickness: CASCADE_THICKNESS,
-                    color: [1.0, 0.5, 0.3],
-                });
             }
         }
     }
@@ -973,14 +1074,121 @@ impl Game {
         }
     }
 
+    /// Damage the player, absorbing with Barrier first, then triggering Thorns.
+    fn apply_damage_to_player(&mut self, raw_damage: f32) {
+        let mut remaining = raw_damage;
+
+        // Barrier absorbs damage first.
+        if self.player.barrier_hp > 0.0 {
+            let absorbed = remaining.min(self.player.barrier_hp);
+            self.player.barrier_hp -= absorbed;
+            remaining -= absorbed;
+
+            // Synergy: RESONANCE (Barrier+Interference 3+) — emit a pulse when barrier absorbs.
+            if self.inventory.has_synergy(ShardKind::Barrier, ShardKind::Interference) {
+                self.pulses.push(InterferencePulse {
+                    pos: self.player.pos,
+                    life: 0.0,
+                    max_life: 0.6,
+                    max_radius: 200.0,
+                });
+            }
+        }
+
+        if remaining > 0.0 {
+            self.player.hp -= remaining;
+        }
+
+        // Thorns: fire retaliatory beams.
+        let thorns = self.inventory.level(ShardKind::Thorns);
+        if thorns > 0 {
+            self.fire_thorns(thorns);
+        }
+    }
+
+    /// Fire retaliatory beams in random directions (Thorns shard).
+    fn fire_thorns(&mut self, level: u8) {
+        let beam_count = THORNS_BEAMS_PER_LEVEL as u32 * level as u32;
+        let siphon_heal = if self.inventory.has_synergy(ShardKind::Siphon, ShardKind::Thorns) {
+            SIPHON_HEAL_PER_HIT * self.inventory.level(ShardKind::Siphon) as f32
+        } else {
+            0.0
+        };
+        // Synergy: MARTYRDOM (Thorns+Cascade 3+) — thorns kills trigger cascade.
+        let martyrdom = self.inventory.has_synergy(ShardKind::Thorns, ShardKind::Cascade);
+
+        for _ in 0..beam_count {
+            let a = self.rng.angle();
+            let dir = Vec2::new(a.cos(), a.sin());
+            let start = self.player.pos;
+            let end = start + dir * THORNS_BEAM_REACH;
+
+            for e in &mut self.enemies {
+                if capsule_circle_intersect(
+                    start,
+                    end,
+                    THORNS_BEAM_THICKNESS * 0.5,
+                    e.pos,
+                    e.radius,
+                ) {
+                    e.hp -= THORNS_BEAM_DAMAGE;
+                    if siphon_heal > 0.0 {
+                        self.player.hp = (self.player.hp + siphon_heal).min(self.player.max_hp);
+                    }
+                }
+            }
+
+            self.beams.push(Beam {
+                start,
+                end,
+                life: 0.0,
+                max_life: THORNS_BEAM_LIFETIME,
+                thickness: THORNS_BEAM_THICKNESS,
+                color: [1.0, 0.3, 0.3],
+            });
+        }
+
+        // Martyrdom: check for kills after thorns and trigger cascade.
+        if martyrdom {
+            let cascade_level = self.inventory.level(ShardKind::Cascade);
+            let mut thorn_kills: Vec<Vec2> = Vec::new();
+            for e in &self.enemies {
+                if e.hp <= 0.0 {
+                    thorn_kills.push(e.pos);
+                }
+            }
+            // Fire cascade beams from thorns kill positions.
+            for pos in thorn_kills {
+                for _ in 0..cascade_level {
+                    let a = self.rng.angle();
+                    let dir = Vec2::new(a.cos(), a.sin());
+                    let end = pos + dir * CASCADE_REACH;
+                    for e in &mut self.enemies {
+                        if capsule_circle_intersect(pos, end, CASCADE_THICKNESS * 0.5, e.pos, e.radius) {
+                            e.hp -= CASCADE_DAMAGE;
+                        }
+                    }
+                    self.beams.push(Beam {
+                        start: pos,
+                        end,
+                        life: 0.0,
+                        max_life: CASCADE_LIFETIME,
+                        thickness: CASCADE_THICKNESS,
+                        color: [1.0, 0.5, 0.3],
+                    });
+                }
+            }
+        }
+    }
+
     fn compute_score(&self) -> u32 {
         let time_bonus = (self.time / 10.0) as u32;
         self.kills_total + self.rank * 5 + time_bonus
     }
 
     fn spawn_rate_for_wave(&self) -> f32 {
-        let base = 0.396 - self.wave as f32 * 0.0234; // 10% faster spawns
-        let base = base.max(0.059);
+        let base = 0.36 - self.wave as f32 * 0.0234;
+        let base = base.max(0.045);
         // Shape multiplier: Surge/Swarm spawn faster, Steady is normal.
         let shape_mult = match self.wave_shape() {
             WaveShape::Surge => 0.6,
@@ -1024,6 +1232,7 @@ impl Game {
             charge_dir,
             color,
             contact_damage,
+            slow_timer: 0.0,
         });
     }
 
@@ -1207,6 +1416,21 @@ impl Game {
                 b: 0.7,
                 a: 1.0,
                 glow: 2.2,
+            });
+        }
+
+        // Barrier shield ring.
+        if self.player.barrier_max > 0.0 {
+            let fill = self.player.barrier_hp / self.player.barrier_max;
+            self.circle_buf.push(CircleInstance {
+                x: self.player.pos.x,
+                y: self.player.pos.y,
+                radius: BARRIER_RADIUS,
+                r: 0.3,
+                g: 0.7,
+                b: 1.0,
+                a: 0.12 * fill,
+                glow: 0.8 * fill,
             });
         }
 

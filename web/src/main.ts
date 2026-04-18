@@ -12,18 +12,22 @@ const CIRCLE_STRIDE_FLOATS = 8;
 const BEAM_STRIDE_FLOATS = 10;
 
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
-interface ShardMeta { name: string; color: string; desc: string }
+interface ShardMeta { name: string; color: string; desc: string; synergies: string[] }
 const SHARDS: ShardMeta[] = [
-  { name: 'SPLIT',        color: '#8effa3', desc: 'fan out more beams per volley' },
-  { name: 'REFRACT',      color: '#7fd3ff', desc: 'beams curve toward nearest enemy' },
-  { name: 'MIRROR',       color: '#c9a3ff', desc: 'fire in every direction' },
-  { name: 'CHROMATIC',    color: '#ffa3c9', desc: 'split into red / green / blue' },
-  { name: 'LENS',         color: '#ffe58e', desc: 'thicker, heavier beams' },
-  { name: 'DIFFRACT',     color: '#8efff4', desc: 'hits scatter into radial bursts' },
-  { name: 'ECHO',         color: '#ff9d6c', desc: 'second salvo after a short delay' },
-  { name: 'HALO',         color: '#f5f5bc', desc: 'orbital beads strike on contact' },
-  { name: 'CASCADE',      color: '#ff6f91', desc: 'kills fork into secondary beams' },
-  { name: 'INTERFERENCE', color: '#9a9dff', desc: 'standing-wave pulses ripple outward' },
+  { name: 'SPLIT',        color: '#8effa3', desc: 'fan out more beams per volley',       synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
+  { name: 'REFRACT',      color: '#7fd3ff', desc: 'beams curve toward nearest enemy',    synergies: ['ECHO → TRACKING ECHO'] },
+  { name: 'MIRROR',       color: '#c9a3ff', desc: 'fire in every direction',             synergies: ['DIFFRACT → SUPERNOVA'] },
+  { name: 'CHROMATIC',    color: '#ffa3c9', desc: 'split into red / green / blue',       synergies: ['LENS → PRISM CANNON'] },
+  { name: 'LENS',         color: '#ffe58e', desc: 'thicker, heavier beams',              synergies: ['CHROMATIC → PRISM CANNON'] },
+  { name: 'DIFFRACT',     color: '#8efff4', desc: 'hits scatter into radial bursts',     synergies: ['MIRROR → SUPERNOVA'] },
+  { name: 'ECHO',         color: '#ff9d6c', desc: 'second salvo after a short delay',    synergies: ['REFRACT → TRACKING ECHO'] },
+  { name: 'HALO',         color: '#f5f5bc', desc: 'orbital beads strike on contact',     synergies: ['FROST → FROZEN ORBIT'] },
+  { name: 'CASCADE',      color: '#ff6f91', desc: 'kills fork into secondary beams',     synergies: ['SPLIT → CHAIN REACTION'] },
+  { name: 'INTERFERENCE', color: '#9a9dff', desc: 'standing-wave pulses ripple outward', synergies: ['BARRIER → RESONANCE'] },
+  { name: 'SIPHON',       color: '#a3ffdb', desc: 'beams heal you on every hit',         synergies: ['THORNS → BLOOD PACT'] },
+  { name: 'FROST',        color: '#b3e5fc', desc: 'beams slow enemies on hit',           synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
+  { name: 'BARRIER',      color: '#64b5f6', desc: 'energy shield absorbs + deals damage',synergies: ['INTERFERENCE → RESONANCE'] },
+  { name: 'THORNS',       color: '#ef5350', desc: 'taking damage fires retaliatory beams',synergies: ['SIPHON → BLOOD PACT', 'CASCADE → MARTYRDOM'] },
 ];
 
 async function main(): Promise<void> {
@@ -96,10 +100,10 @@ async function main(): Promise<void> {
   const wasm = await init();
   const memory: WebAssembly.Memory = wasm.memory;
 
-  // Build the shard tray — 10 pips, one per shard. Filled in as levels rise.
+  // Build the shard tray — one pip per shard. Filled in as levels rise.
   trayEl.innerHTML = '';
   const pips: HTMLElement[] = [];
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < SHARDS.length; i++) {
     const pip = document.createElement('div');
     pip.className = 'shard-pip';
     pip.dataset['level'] = '0';
@@ -204,11 +208,19 @@ async function main(): Promise<void> {
       const card = document.createElement('button');
       card.className = 'shard-card';
       card.type = 'button';
+
+      // Build synergy hint for this shard.
+      let synergyHtml = '';
+      if (meta.synergies.length > 0) {
+        synergyHtml = `<div class="shard-synergy">${meta.synergies.map(s => `<span>⚡ ${s}</span>`).join('')}</div>`;
+      }
+
       card.innerHTML =
         `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
         `<div class="shard-name">${meta.name}</div>` +
         `<div class="shard-level">LVL ${currentLevel} → ${nextLevel}</div>` +
         `<div class="shard-desc">${meta.desc}</div>` +
+        synergyHtml +
         `<div class="shard-hotkey">${slot + 1}</div>`;
       // `slot` captured per-card via the const.
       card.addEventListener('click', () => {

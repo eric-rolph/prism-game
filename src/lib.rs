@@ -111,12 +111,12 @@ impl Game {
         self.inner.is_leveling_up()
     }
 
-    /// Shard kind index (0..10) for the given choice slot (0..3), or -1 if empty.
+    /// Shard kind index (0..14) for the given choice slot (0..3), or -1 if empty.
     pub fn level_choice(&self, slot: u8) -> i32 {
         self.inner.level_choice(slot)
     }
 
-    /// The current level (0..5) of the given shard kind index (0..10).
+    /// The current level (0..5) of the given shard kind index (0..14).
     pub fn inventory_level(&self, kind: u8) -> u8 {
         self.inner.inventory_level(kind)
     }
@@ -133,6 +133,12 @@ impl Game {
     }
     pub fn max_hp(&self) -> f32 {
         self.inner.max_hp()
+    }
+    pub fn barrier_hp(&self) -> f32 {
+        self.inner.barrier_hp()
+    }
+    pub fn barrier_max(&self) -> f32 {
+        self.inner.barrier_max()
     }
     pub fn is_dead(&self) -> bool {
         self.inner.is_dead()

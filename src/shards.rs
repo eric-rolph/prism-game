@@ -1,13 +1,14 @@
-//! Shard system: the 10 light-operator upgrades the player collects.
+//! Shard system: the 14 light-operator upgrades the player collects.
 //!
-//! Shards fall into four trigger categories:
+//! Shards fall into five trigger categories:
 //!  - Fire-time modifiers (Split, Refract, Mirror, Chromatic, Lens) — the
 //!    `compose_salvo` pipeline below threads through these in order.
-//!  - Hit-time effect (Diffract) — applied in game.rs when a beam damages
-//!    an enemy, producing secondary radial sub-beams.
+//!  - Hit-time effects (Diffract, Siphon, Frost) — applied in game.rs when
+//!    a beam damages an enemy.
 //!  - Timing modifier (Echo) — queues delayed re-fires; handled in game.rs.
 //!  - Passive / triggered effects (Halo, Cascade, Interference) — their own
 //!    update code in game.rs.
+//!  - Defensive effects (Barrier, Thorns) — handled in game.rs.
 
 use crate::entities::Enemy;
 use crate::math::Rng;
@@ -25,9 +26,13 @@ pub enum ShardKind {
     Halo = 7,
     Cascade = 8,
     Interference = 9,
+    Siphon = 10,
+    Frost = 11,
+    Barrier = 12,
+    Thorns = 13,
 }
 
-pub const SHARD_COUNT: usize = 10;
+pub const SHARD_COUNT: usize = 14;
 pub const MAX_SHARD_LEVEL: u8 = 5;
 
 impl ShardKind {
@@ -43,6 +48,10 @@ impl ShardKind {
             7 => Some(Self::Halo),
             8 => Some(Self::Cascade),
             9 => Some(Self::Interference),
+            10 => Some(Self::Siphon),
+            11 => Some(Self::Frost),
+            12 => Some(Self::Barrier),
+            13 => Some(Self::Thorns),
             _ => None,
         }
     }
@@ -93,6 +102,65 @@ impl Inventory {
             *slot = Some(candidates.swap_remove(pick));
         }
         result
+    }
+
+    /// Check if a synergy pair is active (both shards at level 3+).
+    pub fn has_synergy(&self, a: ShardKind, b: ShardKind) -> bool {
+        self.levels[a.as_index()] >= 3 && self.levels[b.as_index()] >= 3
+    }
+}
+
+/// Named synergy combos. Each pair of shards at level 3+ unlocks a bonus.
+/// Returns (name, description) for the synergy if the second shard would
+/// complete a new synergy pair.
+#[allow(dead_code)]
+pub fn synergy_for(kind: ShardKind) -> &'static [(ShardKind, &'static str, &'static str)] {
+    match kind {
+        ShardKind::Split => &[
+            (ShardKind::Cascade, "CHAIN REACTION", "cascade beams also fan out"),
+            (ShardKind::Frost, "BLIZZARD", "frozen enemies take +40% beam damage"),
+        ],
+        ShardKind::Cascade => &[
+            (ShardKind::Split, "CHAIN REACTION", "cascade beams also fan out"),
+        ],
+        ShardKind::Mirror => &[
+            (ShardKind::Diffract, "SUPERNOVA", "diffract bursts are 2x larger"),
+        ],
+        ShardKind::Diffract => &[
+            (ShardKind::Mirror, "SUPERNOVA", "diffract bursts are 2x larger"),
+        ],
+        ShardKind::Lens => &[
+            (ShardKind::Chromatic, "PRISM CANNON", "RGB beams deal +50% damage"),
+        ],
+        ShardKind::Chromatic => &[
+            (ShardKind::Lens, "PRISM CANNON", "RGB beams deal +50% damage"),
+        ],
+        ShardKind::Refract => &[
+            (ShardKind::Echo, "TRACKING ECHO", "echo salvos home 2x harder"),
+        ],
+        ShardKind::Echo => &[
+            (ShardKind::Refract, "TRACKING ECHO", "echo salvos home 2x harder"),
+        ],
+        ShardKind::Halo => &[
+            (ShardKind::Frost, "FROZEN ORBIT", "halo beads slow enemies"),
+        ],
+        ShardKind::Frost => &[
+            (ShardKind::Halo, "FROZEN ORBIT", "halo beads slow enemies"),
+            (ShardKind::Split, "BLIZZARD", "frozen enemies take +40% beam damage"),
+        ],
+        ShardKind::Siphon => &[
+            (ShardKind::Thorns, "BLOOD PACT", "thorns shots also heal"),
+        ],
+        ShardKind::Thorns => &[
+            (ShardKind::Siphon, "BLOOD PACT", "thorns shots also heal"),
+            (ShardKind::Cascade, "MARTYRDOM", "thorns kills trigger cascade"),
+        ],
+        ShardKind::Barrier => &[
+            (ShardKind::Interference, "RESONANCE", "barrier pulses on hit"),
+        ],
+        ShardKind::Interference => &[
+            (ShardKind::Barrier, "RESONANCE", "barrier pulses on hit"),
+        ],
     }
 }
 
@@ -151,8 +219,17 @@ pub fn compose_salvo(
     apply_lens(&mut beams, inventory.level(ShardKind::Lens));
     apply_chromatic(&mut beams, inventory.level(ShardKind::Chromatic));
 
+    // Synergy: PRISM CANNON (Lens+Chromatic 3+) — RGB beams deal +50% damage.
+    if inventory.has_synergy(ShardKind::Lens, ShardKind::Chromatic) {
+        for b in beams.iter_mut() {
+            b.damage *= 1.5;
+        }
+    }
+
     // Stage 4: curve-fit each straight beam into a homing polyline.
-    beams = apply_refract(&beams, enemies, inventory.level(ShardKind::Refract));
+    // Synergy: TRACKING ECHO (Refract+Echo 3+) — double homing blend.
+    let homing_boost = inventory.has_synergy(ShardKind::Refract, ShardKind::Echo);
+    beams = apply_refract(&beams, enemies, inventory.level(ShardKind::Refract), homing_boost);
 
     // Final hard cap.
     beams.truncate(MAX_SALVO_BEAMS);
@@ -243,11 +320,12 @@ fn apply_chromatic(beams: &mut Vec<BeamRequest>, level: u8) {
     }
 }
 
-fn apply_refract(beams: &[BeamRequest], enemies: &[Enemy], level: u8) -> Vec<BeamRequest> {
+fn apply_refract(beams: &[BeamRequest], enemies: &[Enemy], level: u8, homing_boost: bool) -> Vec<BeamRequest> {
     if level == 0 {
         return beams.to_vec();
     }
     let segments = level as usize * 2; // 2, 4, 6, 8, 10
+    let blend = if homing_boost { 0.65 } else { 0.35 };
     let mut out = Vec::with_capacity(beams.len() * segments);
     for b in beams {
         let delta = b.end - b.start;
@@ -264,7 +342,6 @@ fn apply_refract(beams: &[BeamRequest], enemies: &[Enemy], level: u8) -> Vec<Bea
             if let Some(nearest) = nearest_enemy_pos(pos, enemies) {
                 let to_enemy = (nearest - pos).normalize_or_zero();
                 if to_enemy.length_squared() > 0.0 {
-                    let blend = 0.35;
                     let mixed = dir * (1.0 - blend) + to_enemy * blend;
                     if mixed.length_squared() > 1e-6 {
                         dir = mixed.normalize();

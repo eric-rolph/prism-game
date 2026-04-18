@@ -12,6 +12,8 @@ pub struct Player {
     pub dash_cooldown: f32,
     pub dash_timer: f32,
     pub dash_dir: Vec2,
+    pub barrier_hp: f32,
+    pub barrier_max: f32,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -48,6 +50,7 @@ pub struct Enemy {
     pub charge_dir: Vec2,
     pub color: [f32; 3],
     pub contact_damage: f32,
+    pub slow_timer: f32,
 }
 
 pub struct XpGem {
