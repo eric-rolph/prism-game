@@ -132,14 +132,14 @@ enum WaveShape {
 
 // Per-type enemy stats: (radius, hp, speed, contact_damage, color)
 fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
-    let hp_scale = (1.17_f32).powf(minute); // exponential 17% per minute (10% above 15% review target)
+    let hp_scale = (1.17_f32).powf(minute); // exponential 17% per minute
     match kind {
-        EnemyKind::Drone => (9.0, 96.0 * hp_scale, 86.0, 12.0, [0.35, 0.18, 0.55]),
-        EnemyKind::Brute => (22.0, 720.0 * hp_scale, 46.0, 24.0, [0.7, 0.15, 0.15]),
-        EnemyKind::Dasher => (7.0, 72.0 * hp_scale, 66.0, 18.0, [0.2, 0.8, 0.9]),
-        EnemyKind::Splitter => (14.0, 240.0 * hp_scale, 72.0, 14.0, [0.2, 0.7, 0.3]),
-        EnemyKind::Orbiter => (10.0, 180.0 * hp_scale, 108.0, 12.0, [0.9, 0.5, 0.15]),
-        EnemyKind::Emitter => (11.0, 150.0 * hp_scale, 55.0, 8.0, [0.7, 0.3, 0.8]),
+        EnemyKind::Drone => (9.0, 125.0 * hp_scale, 86.0, 12.0, [0.35, 0.18, 0.55]),
+        EnemyKind::Brute => (22.0, 936.0 * hp_scale, 46.0, 24.0, [0.7, 0.15, 0.15]),
+        EnemyKind::Dasher => (7.0, 94.0 * hp_scale, 66.0, 18.0, [0.2, 0.8, 0.9]),
+        EnemyKind::Splitter => (14.0, 312.0 * hp_scale, 72.0, 14.0, [0.2, 0.7, 0.3]),
+        EnemyKind::Orbiter => (10.0, 234.0 * hp_scale, 108.0, 12.0, [0.9, 0.5, 0.15]),
+        EnemyKind::Emitter => (11.0, 195.0 * hp_scale, 55.0, 8.0, [0.7, 0.3, 0.8]),
     }
 }
 
@@ -975,8 +975,8 @@ impl Game {
     }
 
     fn spawn_rate_for_wave(&self) -> f32 {
-        let base = 0.44 - self.wave as f32 * 0.026;
-        let base = base.max(0.065);
+        let base = 0.396 - self.wave as f32 * 0.0234; // 10% faster spawns
+        let base = base.max(0.059);
         // Shape multiplier: Surge/Swarm spawn faster, Steady is normal.
         let shape_mult = match self.wave_shape() {
             WaveShape::Surge => 0.6,
