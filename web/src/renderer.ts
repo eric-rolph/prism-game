@@ -53,8 +53,8 @@ export class Renderer {
     if (!gl) throw new Error('WebGL2 not available');
     this.gl = gl;
 
-    this.circleProg = this.makeProgram(CIRCLE_VERT, CIRCLE_FRAG, ['u_viewport', 'u_camera']);
-    this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera']);
+    this.circleProg = this.makeProgram(CIRCLE_VERT, CIRCLE_FRAG, ['u_viewport', 'u_camera', 'u_shake']);
+    this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera', 'u_shake']);
     this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene']);
 
     this.setupBuffers();
@@ -204,7 +204,10 @@ export class Renderer {
     if (!tex) throw new Error('createTexture failed');
     this.fboTex = tex;
     gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    // Use RGBA16F for HDR bloom — RGBA8 clips bright glow values before mip
+    // averaging, losing bloom energy. EXT_color_buffer_float is implied in
+    // WebGL2 for render targets.
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -234,6 +237,7 @@ export class Renderer {
     circleCount: number,
     beamData: Float32Array,
     beamCount: number,
+    shake: [number, number] = [0, 0],
   ) {
     const gl = this.gl;
     this.resize(pixelWidth, pixelHeight);
@@ -268,6 +272,7 @@ export class Renderer {
       gl.useProgram(this.beamProg.prog);
       gl.uniform2f(this.beamProg.uniforms['u_viewport']!, viewWidth, viewHeight);
       gl.uniform2f(this.beamProg.uniforms['u_camera']!, camera[0], camera[1]);
+      gl.uniform2f(this.beamProg.uniforms['u_shake']!, shake[0], shake[1]);
       gl.bindVertexArray(this.beamVao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, beamCount);
     }
@@ -276,6 +281,7 @@ export class Renderer {
       gl.useProgram(this.circleProg.prog);
       gl.uniform2f(this.circleProg.uniforms['u_viewport']!, viewWidth, viewHeight);
       gl.uniform2f(this.circleProg.uniforms['u_camera']!, camera[0], camera[1]);
+      gl.uniform2f(this.circleProg.uniforms['u_shake']!, shake[0], shake[1]);
       gl.bindVertexArray(this.circleVao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, circleCount);
     }

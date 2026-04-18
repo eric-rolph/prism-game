@@ -41,6 +41,17 @@ pub struct Game {
     leveling_up: bool,
     level_choices: [Option<ShardKind>; 3],
 
+    // Death / game-over state.
+    dead: bool,
+    score: u32,
+
+    // Screen shake (accumulated amplitude, decays per frame).
+    shake_amount: f32,
+    shake_offset: Vec2,
+
+    // Hit-flash: list of enemy indices that were hit this frame (used by draw).
+    hit_flash_positions: Vec<Vec2>,
+
     // Draw buffers, rebuilt every frame.
     circle_buf: Vec<CircleInstance>,
     beam_buf: Vec<BeamInstance>,
@@ -65,6 +76,19 @@ const SPAWN_RATE_DECAY: f32 = 0.004;
 const PARTICLE_COUNT_PER_DEATH: usize = 10;
 
 const XP_PER_KILL: u32 = 1;
+
+// Player health.
+const PLAYER_MAX_HP: f32 = 100.0;
+const ENEMY_CONTACT_DAMAGE: f32 = 10.0;
+const IFRAME_DURATION: f32 = 0.5;
+
+// Screen shake.
+const SHAKE_DEATH_PX: f32 = 3.5;
+const SHAKE_HIT_PX: f32 = 5.0;
+const SHAKE_DECAY: f32 = 12.0;
+
+// Cascade chain-kill depth cap.
+const CASCADE_MAX_DEPTH: u32 = 10;
 fn xp_for_rank(rank: u32) -> u32 {
     // Rank N costs 8 + 6·(N-1) XP. Early ranks arrive quickly; the curve
     // slopes up so late-game upgrades feel earned.
@@ -99,6 +123,9 @@ impl Game {
                 pos: Vec2::ZERO,
                 radius: PLAYER_RADIUS,
                 speed: PLAYER_SPEED,
+                hp: PLAYER_MAX_HP,
+                max_hp: PLAYER_MAX_HP,
+                iframe_timer: 0.0,
             },
             enemies: Vec::with_capacity(256),
             beams: Vec::with_capacity(256),
@@ -118,6 +145,11 @@ impl Game {
             interference_timer: 0.0,
             leveling_up: false,
             level_choices: [None; 3],
+            dead: false,
+            score: 0,
+            shake_amount: 0.0,
+            shake_offset: Vec2::ZERO,
+            hit_flash_positions: Vec::new(),
             circle_buf: Vec::with_capacity(1024),
             beam_buf: Vec::with_capacity(256),
         }
@@ -162,6 +194,24 @@ impl Game {
     pub fn is_leveling_up(&self) -> bool {
         self.leveling_up
     }
+    pub fn is_dead(&self) -> bool {
+        self.dead
+    }
+    pub fn hp(&self) -> f32 {
+        self.player.hp
+    }
+    pub fn max_hp(&self) -> f32 {
+        self.player.max_hp
+    }
+    pub fn score(&self) -> u32 {
+        self.score
+    }
+    pub fn shake_x(&self) -> f32 {
+        self.shake_offset.x
+    }
+    pub fn shake_y(&self) -> f32 {
+        self.shake_offset.y
+    }
     pub fn inventory_level(&self, kind_idx: u8) -> u8 {
         ShardKind::from_index(kind_idx)
             .map(|k| self.inventory.level(k))
@@ -186,21 +236,46 @@ impl Game {
             if kind == ShardKind::Halo {
                 self.rebuild_halos();
             }
+            self.leveling_up = false;
+            self.level_choices = [None; 3];
+            // A single on_death can earn multiple ranks' worth of XP.
+            self.check_for_level_up();
         }
-        self.leveling_up = false;
-        self.level_choices = [None; 3];
-        // A single on_death can earn multiple ranks' worth of XP.
-        self.check_for_level_up();
+        // If slot was None (empty), do nothing — don't close the modal.
+    }
+
+    pub fn restart(&mut self) {
+        let w = self.screen_size.x;
+        let h = self.screen_size.y;
+        let seed = self.rng.next_u32();
+        *self = Self::new(w, h, seed);
     }
 
     // --- Main update ----------------------------------------------------
 
     pub fn update(&mut self, dt: f32) {
-        if self.leveling_up {
+        if self.leveling_up || self.dead {
             return;
         }
 
         self.time += dt;
+        self.hit_flash_positions.clear();
+
+        // i-frame cooldown.
+        if self.player.iframe_timer > 0.0 {
+            self.player.iframe_timer -= dt;
+        }
+
+        // Screen shake decay.
+        self.shake_amount *= (1.0 - SHAKE_DECAY * dt).max(0.0);
+        if self.shake_amount > 0.1 {
+            let ax = self.rng.range(-1.0, 1.0) * self.shake_amount;
+            let ay = self.rng.range(-1.0, 1.0) * self.shake_amount;
+            self.shake_offset = Vec2::new(ax, ay);
+        } else {
+            self.shake_amount = 0.0;
+            self.shake_offset = Vec2::ZERO;
+        }
 
         // Movement + camera.
         self.player.pos += self.input * self.player.speed * dt;
@@ -231,13 +306,13 @@ impl Game {
             }
         }
 
-        // Echo: scheduled re-fires.
+        // Echo: scheduled re-fires (no recursive echo scheduling).
         let now = self.time;
         let mut i = 0;
         while i < self.pending_echoes.len() {
             if self.pending_echoes[i] <= now {
                 self.pending_echoes.swap_remove(i);
-                self.fire_primary();
+                self.fire_primary_inner(false);
             } else {
                 i += 1;
             }
@@ -298,7 +373,30 @@ impl Game {
         }
         self.pulses.retain(|p| p.life < p.max_life);
 
+        // Enemy contact damage to player.
+        if self.player.iframe_timer <= 0.0 {
+            for e in &self.enemies {
+                let dist = (e.pos - self.player.pos).length();
+                if dist < e.radius + self.player.radius {
+                    self.player.hp -= ENEMY_CONTACT_DAMAGE;
+                    self.player.iframe_timer = IFRAME_DURATION;
+                    self.shake_amount += SHAKE_HIT_PX;
+                    break; // one hit per frame
+                }
+            }
+        }
+
+        // Player death check.
+        if self.player.hp <= 0.0 {
+            self.player.hp = 0.0;
+            self.dead = true;
+            self.score = self.compute_score();
+            self.build_draw_buffers();
+            return;
+        }
+
         // Death resolution — loop so that Cascade chain-kills propagate.
+        let mut cascade_depth: u32 = 0;
         loop {
             let mut dying: Vec<usize> = (0..self.enemies.len())
                 .filter(|&i| self.enemies[i].hp <= 0.0)
@@ -313,8 +411,14 @@ impl Game {
                 let dead = self.enemies.swap_remove(i);
                 dead_positions.push(dead.pos);
             }
-            for pos in dead_positions {
-                self.on_enemy_death(pos);
+            for pos in &dead_positions {
+                self.on_enemy_death(*pos, cascade_depth);
+            }
+            cascade_depth += 1;
+            if cascade_depth >= CASCADE_MAX_DEPTH {
+                // Force-kill remaining dying enemies without further cascades.
+                self.enemies.retain(|e| e.hp > 0.0);
+                break;
             }
         }
 
@@ -332,6 +436,10 @@ impl Game {
     // --- Firing ---------------------------------------------------------
 
     fn fire_primary(&mut self) -> bool {
+        self.fire_primary_inner(true)
+    }
+
+    fn fire_primary_inner(&mut self, schedule_echo: bool) -> bool {
         let target = match self.find_nearest_enemy_pos() {
             Some(t) => t,
             None => return false,
@@ -345,11 +453,13 @@ impl Game {
             self.fire_beam(req.clone());
         }
 
-        // Echo: queue L delayed salvos.
-        let echo = self.inventory.level(ShardKind::Echo);
-        for step in 1..=echo {
-            self.pending_echoes
-                .push(self.time + ECHO_DELAY * step as f32);
+        // Echo: queue L delayed salvos (only from primary fire, not from echoes).
+        if schedule_echo {
+            let echo = self.inventory.level(ShardKind::Echo);
+            for step in 1..=echo {
+                self.pending_echoes
+                    .push(self.time + ECHO_DELAY * step as f32);
+            }
         }
 
         true
@@ -416,38 +526,44 @@ impl Game {
         }
     }
 
-    fn on_enemy_death(&mut self, pos: Vec2) {
+    fn on_enemy_death(&mut self, pos: Vec2, cascade_depth: u32) {
         self.kills_total += 1;
         self.xp += XP_PER_KILL;
         self.check_for_level_up();
 
         self.spawn_death_particles(pos);
 
+        // Subtle screen shake on kills.
+        self.shake_amount += SHAKE_DEATH_PX;
+
         // Cascade: short beams in random directions from the corpse.
-        let cascade = self.inventory.level(ShardKind::Cascade);
-        for _ in 0..cascade {
-            let a = self.rng.angle();
-            let dir = Vec2::new(a.cos(), a.sin());
-            let end = pos + dir * CASCADE_REACH;
-            for e in &mut self.enemies {
-                if capsule_circle_intersect(
-                    pos,
-                    end,
-                    CASCADE_THICKNESS * 0.5,
-                    e.pos,
-                    e.radius,
-                ) {
-                    e.hp -= CASCADE_DAMAGE;
+        // Only cascade if below depth cap.
+        if cascade_depth < CASCADE_MAX_DEPTH {
+            let cascade = self.inventory.level(ShardKind::Cascade);
+            for _ in 0..cascade {
+                let a = self.rng.angle();
+                let dir = Vec2::new(a.cos(), a.sin());
+                let end = pos + dir * CASCADE_REACH;
+                for e in &mut self.enemies {
+                    if capsule_circle_intersect(
+                        pos,
+                        end,
+                        CASCADE_THICKNESS * 0.5,
+                        e.pos,
+                        e.radius,
+                    ) {
+                        e.hp -= CASCADE_DAMAGE;
+                    }
                 }
+                self.beams.push(Beam {
+                    start: pos,
+                    end,
+                    life: 0.0,
+                    max_life: CASCADE_LIFETIME,
+                    thickness: CASCADE_THICKNESS,
+                    color: [1.0, 0.5, 0.3],
+                });
             }
-            self.beams.push(Beam {
-                start: pos,
-                end,
-                life: 0.0,
-                max_life: CASCADE_LIFETIME,
-                thickness: CASCADE_THICKNESS,
-                color: [1.0, 0.5, 0.3],
-            });
         }
     }
 
@@ -480,6 +596,10 @@ impl Game {
                 angular_speed: if even { 1.8 } else { -1.4 },
             });
         }
+    }
+
+    fn compute_score(&self) -> u32 {
+        self.kills_total + self.rank * 5
     }
 
     fn spawn_enemy(&mut self) {
@@ -541,17 +661,37 @@ impl Game {
             });
         }
 
-        // Player.
-        self.circle_buf.push(CircleInstance {
-            x: self.player.pos.x,
-            y: self.player.pos.y,
-            radius: self.player.radius,
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 1.0,
-            glow: 3.0,
-        });
+        // Player (blink during i-frames).
+        let visible = self.player.iframe_timer <= 0.0
+            || ((self.player.iframe_timer * 16.0) as u32 % 2 == 0);
+        if visible {
+            self.circle_buf.push(CircleInstance {
+                x: self.player.pos.x,
+                y: self.player.pos.y,
+                radius: self.player.radius,
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+                glow: 3.0,
+            });
+        }
+
+        // HP ring around player.
+        let hp_frac = self.player.hp / self.player.max_hp;
+        if hp_frac < 1.0 {
+            // Red-tinged ring, dimmer as health decreases.
+            self.circle_buf.push(CircleInstance {
+                x: self.player.pos.x,
+                y: self.player.pos.y,
+                radius: self.player.radius + 4.0,
+                r: 1.0 - hp_frac * 0.5,
+                g: hp_frac * 0.8,
+                b: hp_frac * 0.5,
+                a: 0.3 + (1.0 - hp_frac) * 0.3,
+                glow: 1.0 + (1.0 - hp_frac) * 1.5,
+            });
+        }
 
         // Halos.
         for h in &self.halos {

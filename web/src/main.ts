@@ -55,6 +55,22 @@ async function main(): Promise<void> {
   const levelupRankEl: HTMLElement = levelupRankRaw;
   const levelupCardsEl: HTMLElement = levelupCardsRaw;
 
+  // Death screen elements.
+  const deathScreenRaw = document.getElementById('death-screen');
+  const deathScoreRaw = document.getElementById('death-score');
+  const deathStatsRaw = document.getElementById('death-stats');
+  const deathRestartRaw = document.getElementById('death-restart');
+  const hpFillRaw = document.getElementById('hp-fill');
+
+  if (!deathScreenRaw || !deathScoreRaw || !deathStatsRaw || !deathRestartRaw || !hpFillRaw) {
+    throw new Error('Death-screen or HP elements missing from index.html');
+  }
+  const deathScreenEl: HTMLElement = deathScreenRaw;
+  const deathScoreEl: HTMLElement = deathScoreRaw;
+  const deathStatsEl: HTMLElement = deathStatsRaw;
+  const deathRestartEl: HTMLElement = deathRestartRaw;
+  const hpFillEl: HTMLElement = hpFillRaw;
+
   // Boot WASM. `wasm.memory.buffer` is the ArrayBuffer we re-view as typed
   // arrays every frame — it can grow, so we must check for buffer identity.
   const wasm = await init();
@@ -145,6 +161,7 @@ async function main(): Promise<void> {
   let lastRank = -1;
   let lastKills = -1;
   let lastXpPct = -1;
+  let lastHpPct = -1;
   const lastPipLevels: number[] = new Array(10).fill(-1);
 
   // --- Level-up modal ----------------------------------------------------
@@ -197,6 +214,50 @@ async function main(): Promise<void> {
     }
   });
 
+  // --- Death screen ------------------------------------------------------
+
+  let deathShown = false;
+
+  const showDeathScreen = (): void => {
+    deathScoreEl.textContent = String(game.score());
+    deathStatsEl.innerHTML =
+      `RANK ${game.rank()}<br>${game.kills_total()} KILLS`;
+    deathScreenEl.classList.add('shown');
+    deathShown = true;
+  };
+
+  const hideDeathScreen = (): void => {
+    deathScreenEl.classList.remove('shown');
+    deathShown = false;
+    // Reset HUD change-detection so everything redraws.
+    lastRank = -1;
+    lastKills = -1;
+    lastXpPct = -1;
+    lastHpPct = -1;
+    lastPipLevels.fill(-1);
+  };
+
+  const doRestart = (): void => {
+    if (!deathShown) return;
+    game.restart();
+    hideDeathScreen();
+  };
+
+  deathRestartEl.addEventListener('click', doRestart);
+  window.addEventListener('keydown', (e) => {
+    if (deathShown && (e.key === ' ' || e.key === 'Enter')) {
+      doRestart();
+      e.preventDefault();
+    }
+  });
+  // Tap-to-restart on touch devices.
+  deathScreenEl.addEventListener('touchstart', (e) => {
+    if (deathShown) {
+      doRestart();
+      e.preventDefault();
+    }
+  }, { passive: false });
+
   // --- Main loop ---------------------------------------------------------
 
   let last = performance.now();
@@ -210,6 +271,10 @@ async function main(): Promise<void> {
     const [ix, iy] = input.direction();
     game.set_input(ix, iy);
     game.update(dt);
+
+    // Death screen edges.
+    const isDead = game.is_dead();
+    if (isDead && !deathShown) showDeathScreen();
 
     // Modal open/close by state edges.
     const isLeveling = game.is_leveling_up();
@@ -236,6 +301,14 @@ async function main(): Promise<void> {
       xpFillEl.style.width = xpPct + '%';
       lastXpPct = xpPct;
     }
+    // HP bar.
+    const hp = game.hp();
+    const maxHp = game.max_hp();
+    const hpPct = maxHp > 0 ? Math.round((hp / maxHp) * 100) : 100;
+    if (hpPct !== lastHpPct) {
+      hpFillEl.style.width = hpPct + '%';
+      lastHpPct = hpPct;
+    }
     for (let i = 0; i < 10; i++) {
       const lvl = game.inventory_level(i);
       if (lvl !== lastPipLevels[i]) {
@@ -259,6 +332,7 @@ async function main(): Promise<void> {
       [game.camera_x(), game.camera_y()],
       circlesView, circlesLen,
       beamsView, beamsLen,
+      [game.shake_x(), game.shake_y()],
     );
 
     // FPS readout ~2×/s.

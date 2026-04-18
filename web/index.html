@@ -192,6 +192,81 @@
         letter-spacing: 2px;
         color: var(--faint);
       }
+
+      /* Death / game-over overlay */
+      #death-screen {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 18px;
+        z-index: 20;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(16px) saturate(120%);
+        -webkit-backdrop-filter: blur(16px) saturate(120%);
+        animation: fade-in 400ms ease-out;
+      }
+      #death-screen.shown { display: flex; }
+      #death-title {
+        font-size: 18px;
+        letter-spacing: 10px;
+        color: #ff6e6e;
+      }
+      #death-score {
+        font-size: 36px;
+        font-weight: 200;
+        letter-spacing: 3px;
+      }
+      #death-stats {
+        font-size: 11px;
+        letter-spacing: 2px;
+        color: var(--dim);
+        text-align: center;
+        line-height: 1.8;
+      }
+      #death-restart {
+        margin-top: 12px;
+        padding: 10px 32px;
+        border: 1px solid var(--faint);
+        border-radius: 2px;
+        background: rgba(10, 8, 20, 0.55);
+        color: var(--ink);
+        font-family: inherit;
+        font-size: 12px;
+        letter-spacing: 4px;
+        cursor: pointer;
+        transition: transform 180ms ease, border-color 180ms ease;
+        pointer-events: auto;
+      }
+      #death-restart:hover {
+        transform: translateY(-2px);
+        border-color: var(--dim);
+      }
+      #death-hint {
+        font-size: 9px;
+        letter-spacing: 2px;
+        color: var(--faint);
+      }
+
+      /* HP bar */
+      #hp-wrap {
+        position: absolute;
+        left: 14px;
+        top: 10px;
+        width: 120px;
+        height: 4px;
+        background: var(--faint);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      #hp-fill {
+        height: 100%;
+        width: 100%;
+        background: linear-gradient(90deg, #ff4444, #ff9966, #66ff88);
+        transition: width 120ms ease-out;
+      }
     </style>
   </head>
   <body>
@@ -199,6 +274,7 @@
     <div id="status">loading…</div>
 
     <div id="hud">
+      <div id="hp-wrap"><div id="hp-fill"></div></div>
       <div id="stats">
         <div class="rank" id="rank">rank 0</div>
         <div class="kills" id="kills">0 kills</div>
@@ -211,6 +287,14 @@
       <div id="levelup-title">RANK UP</div>
       <div id="levelup-rank">—</div>
       <div id="levelup-cards"></div>
+    </div>
+
+    <div id="death-screen">
+      <div id="death-title">SHATTERED</div>
+      <div id="death-score">0</div>
+      <div id="death-stats"></div>
+      <button id="death-restart">PLAY AGAIN</button>
+      <div id="death-hint">SPACE / TAP</div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

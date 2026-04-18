@@ -19,6 +19,7 @@ layout(location=4) in float a_glow;
 
 uniform vec2 u_viewport;
 uniform vec2 u_camera;
+uniform vec2 u_shake;
 
 out vec2 v_local;   // -QUAD_EXPAND..+QUAD_EXPAND; edge of circle at ±1
 out vec4 v_color;
@@ -31,7 +32,7 @@ void main() {
   v_glow = a_glow;
 
   vec2 world = a_pos + a_quad * a_radius * EXPAND;
-  vec2 screen = world - u_camera + u_viewport * 0.5;
+  vec2 screen = world - u_camera + u_viewport * 0.5 + u_shake;
   vec2 clip = (screen / u_viewport) * 2.0 - 1.0;
   clip.y = -clip.y;
 
@@ -78,6 +79,7 @@ layout(location=5) in float a_glow;
 
 uniform vec2 u_viewport;
 uniform vec2 u_camera;
+uniform vec2 u_shake;
 
 out vec2 v_world;
 out vec2 v_p0;
@@ -107,7 +109,7 @@ void main() {
   v_color = a_color;
   v_glow = a_glow;
 
-  vec2 screen = world - u_camera + u_viewport * 0.5;
+  vec2 screen = world - u_camera + u_viewport * 0.5 + u_shake;
   vec2 clip = (screen / u_viewport) * 2.0 - 1.0;
   clip.y = -clip.y;
 

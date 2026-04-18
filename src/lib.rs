@@ -121,4 +121,31 @@ impl Game {
     pub fn select_shard(&mut self, slot: u8) {
         self.inner.select_shard(slot);
     }
+
+    // --- Health / death ---
+
+    pub fn hp(&self) -> f32 {
+        self.inner.hp()
+    }
+    pub fn max_hp(&self) -> f32 {
+        self.inner.max_hp()
+    }
+    pub fn is_dead(&self) -> bool {
+        self.inner.is_dead()
+    }
+    pub fn score(&self) -> u32 {
+        self.inner.score()
+    }
+    pub fn restart(&mut self) {
+        self.inner.restart();
+    }
+
+    // --- Screen shake ---
+
+    pub fn shake_x(&self) -> f32 {
+        self.inner.shake_x()
+    }
+    pub fn shake_y(&self) -> f32 {
+        self.inner.shake_y()
+    }
 }
