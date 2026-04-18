@@ -100,13 +100,13 @@ const CASCADE_MAX_DEPTH: u32 = 10;
 
 // Per-type enemy stats: (radius, hp, speed, contact_damage, color)
 fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
-    let hp_scale = 1.0 + minute * 0.15; // HP grows 15% per minute
+    let hp_scale = 1.0 + minute * 0.18; // HP grows 18% per minute (+20% from 15%)
     match kind {
-        EnemyKind::Drone => (9.0, 80.0 * hp_scale, 72.0, 10.0, [0.35, 0.18, 0.55]),
-        EnemyKind::Brute => (22.0, 600.0 * hp_scale, 38.0, 20.0, [0.7, 0.15, 0.15]),
-        EnemyKind::Dasher => (7.0, 60.0 * hp_scale, 55.0, 15.0, [0.2, 0.8, 0.9]),
-        EnemyKind::Splitter => (14.0, 200.0 * hp_scale, 60.0, 12.0, [0.2, 0.7, 0.3]),
-        EnemyKind::Orbiter => (10.0, 150.0 * hp_scale, 90.0, 10.0, [0.9, 0.5, 0.15]),
+        EnemyKind::Drone => (9.0, 96.0 * hp_scale, 86.0, 12.0, [0.35, 0.18, 0.55]),
+        EnemyKind::Brute => (22.0, 720.0 * hp_scale, 46.0, 24.0, [0.7, 0.15, 0.15]),
+        EnemyKind::Dasher => (7.0, 72.0 * hp_scale, 66.0, 18.0, [0.2, 0.8, 0.9]),
+        EnemyKind::Splitter => (14.0, 240.0 * hp_scale, 72.0, 14.0, [0.2, 0.7, 0.3]),
+        EnemyKind::Orbiter => (10.0, 180.0 * hp_scale, 108.0, 12.0, [0.9, 0.5, 0.15]),
     }
 }
 
@@ -764,8 +764,9 @@ impl Game {
 
     fn spawn_rate_for_wave(&self) -> f32 {
         // Spawn rate decreases (faster spawning) as waves progress.
-        let base = 0.55 - self.wave as f32 * 0.022;
-        base.max(0.08)
+        // 20% faster than before (0.55→0.44 base, 0.022→0.026 ramp).
+        let base = 0.44 - self.wave as f32 * 0.026;
+        base.max(0.065)
     }
 
     fn spawn_wave_enemy(&mut self) {
