@@ -597,6 +597,32 @@ impl Game {
             }
         }
 
+        // Enemy contact damage to player (checked BEFORE beams fire so enemies that
+        // reach the player aren't killed before they can deal damage).
+        if self.player.iframe_timer <= 0.0 {
+            for e in &self.enemies {
+                if e.hp <= 0.0 {
+                    continue;
+                }
+                let dist = (e.pos - self.player.pos).length();
+                if dist < e.radius + self.player.radius {
+                    self.player.hp -= e.contact_damage;
+                    self.player.iframe_timer = IFRAME_DURATION;
+                    self.shake_amount += SHAKE_HIT_PX;
+                    break;
+                }
+            }
+        }
+
+        // Player death check (early, before beams fire).
+        if self.player.hp <= 0.0 {
+            self.player.hp = 0.0;
+            self.dead = true;
+            self.score = self.compute_score();
+            self.build_draw_buffers();
+            return;
+        }
+
         // Fire.
         self.fire_timer -= dt;
         if self.fire_timer <= 0.0 {
@@ -702,36 +728,6 @@ impl Game {
             self.check_for_level_up();
         }
 
-        // Enemy contact damage to player.
-        if self.player.iframe_timer <= 0.0 {
-            for e in &self.enemies {
-                let dist = (e.pos - self.player.pos).length();
-                if dist < e.radius + self.player.radius {
-                    self.player.hp -= e.contact_damage;
-                    self.player.iframe_timer = IFRAME_DURATION;
-                    self.shake_amount += SHAKE_HIT_PX;
-                    break;
-                }
-            }
-        }
-
-        // Player death check.
-        if self.player.hp <= 0.0 {
-            self.player.hp = 0.0;
-            self.dead = true;
-            self.score = self.compute_score();
-            self.build_draw_buffers();
-            return;
-        }
-
-        // Session victory (survived 10 minutes).
-        if self.time >= SESSION_LENGTH && !self.dead {
-            self.dead = true;
-            self.score = self.compute_score() + 500; // survival bonus
-            self.build_draw_buffers();
-            return;
-        }
-
         // Death resolution — loop so that Cascade chain-kills propagate.
         let mut cascade_depth: u32 = 0;
         loop {
@@ -755,6 +751,14 @@ impl Game {
                 self.enemies.retain(|e| e.hp > 0.0);
                 break;
             }
+        }
+
+        // Session victory (survived 10 minutes).
+        if self.time >= SESSION_LENGTH && !self.dead {
+            self.dead = true;
+            self.score = self.compute_score() + 500; // survival bonus
+            self.build_draw_buffers();
+            return;
         }
 
         // Particles.
