@@ -43,6 +43,7 @@ export class Renderer {
   private fboTex!: WebGLTexture;
   private fboW = 0;
   private fboH = 0;
+  private hasColorBufferFloat = false;
 
   constructor(canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -52,6 +53,11 @@ export class Renderer {
     });
     if (!gl) throw new Error('WebGL2 not available');
     this.gl = gl;
+
+    // EXT_color_buffer_float is required for RGBA16F render targets in WebGL2.
+    // The extension object itself is unused — calling getExtension() is the
+    // activation step.  If it's missing we fall back to RGBA8 in resize().
+    this.hasColorBufferFloat = !!gl.getExtension('EXT_color_buffer_float');
 
     this.circleProg = this.makeProgram(CIRCLE_VERT, CIRCLE_FRAG, ['u_viewport', 'u_camera', 'u_shake']);
     this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera', 'u_shake']);
@@ -204,10 +210,12 @@ export class Renderer {
     if (!tex) throw new Error('createTexture failed');
     this.fboTex = tex;
     gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
-    // Use RGBA16F for HDR bloom — RGBA8 clips bright glow values before mip
-    // averaging, losing bloom energy. EXT_color_buffer_float is implied in
-    // WebGL2 for render targets.
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    // RGBA16F gives proper HDR bloom; RGBA8 is the safe fallback.
+    if (this.hasColorBufferFloat) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
