@@ -55,6 +55,15 @@ async function main(): Promise<void> {
   const levelupRankEl: HTMLElement = levelupRankRaw;
   const levelupCardsEl: HTMLElement = levelupCardsRaw;
 
+  // Timer + wave elements.
+  const timerRaw = document.getElementById('timer');
+  const waveLabelRaw = document.getElementById('wave-label');
+  if (!timerRaw || !waveLabelRaw) {
+    throw new Error('Timer elements missing from index.html');
+  }
+  const timerEl: HTMLElement = timerRaw;
+  const waveLabelEl: HTMLElement = waveLabelRaw;
+
   // Death screen elements.
   const deathScreenRaw = document.getElementById('death-screen');
   const deathScoreRaw = document.getElementById('death-score');
@@ -162,6 +171,8 @@ async function main(): Promise<void> {
   let lastKills = -1;
   let lastXpPct = -1;
   let lastHpPct = -1;
+  let lastTimerStr = '';
+  let lastWave = -1;
   const lastPipLevels: number[] = new Array(10).fill(-1);
 
   // --- Level-up modal ----------------------------------------------------
@@ -220,8 +231,11 @@ async function main(): Promise<void> {
 
   const showDeathScreen = (): void => {
     deathScoreEl.textContent = String(game.score());
+    const t = game.timer();
+    const mins = Math.floor(t / 60);
+    const secs = Math.floor(t % 60);
     deathStatsEl.innerHTML =
-      `RANK ${game.rank()}<br>${game.kills_total()} KILLS`;
+      `RANK ${game.rank()}<br>${game.kills_total()} KILLS<br>${mins}:${secs < 10 ? '0' : ''}${secs} SURVIVED`;
     deathScreenEl.classList.add('shown');
     deathShown = true;
   };
@@ -234,6 +248,8 @@ async function main(): Promise<void> {
     lastKills = -1;
     lastXpPct = -1;
     lastHpPct = -1;
+    lastTimerStr = '';
+    lastWave = -1;
     lastPipLevels.fill(-1);
   };
 
@@ -308,6 +324,21 @@ async function main(): Promise<void> {
     if (hpPct !== lastHpPct) {
       hpFillEl.style.width = hpPct + '%';
       lastHpPct = hpPct;
+    }
+    // Timer.
+    const t = game.timer();
+    const mins = Math.floor(t / 60);
+    const secs = Math.floor(t % 60);
+    const timerStr = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    if (timerStr !== lastTimerStr) {
+      timerEl.textContent = timerStr;
+      lastTimerStr = timerStr;
+    }
+    // Wave.
+    const wave = game.wave();
+    if (wave !== lastWave) {
+      waveLabelEl.textContent = `WAVE ${wave + 1}`;
+      lastWave = wave;
     }
     for (let i = 0; i < 10; i++) {
       const lvl = game.inventory_level(i);

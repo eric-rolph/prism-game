@@ -4,7 +4,7 @@
 //! when the player is in the middle of a level-up choice (pause), so the
 //! JS side can show a picker UI in response to `is_leveling_up()`.
 
-use crate::entities::{Beam, Enemy, Halo, InterferencePulse, Particle, Player};
+use crate::entities::{Beam, Enemy, EnemyKind, EnemyState, Halo, InterferencePulse, Particle, Player, XpGem};
 use crate::math::Rng;
 use crate::shards::{compose_salvo, BeamRequest, Inventory, ShardKind};
 use crate::{BeamInstance, CircleInstance};
@@ -20,13 +20,18 @@ pub struct Game {
     particles: Vec<Particle>,
     halos: Vec<Halo>,
     pulses: Vec<InterferencePulse>,
+    gems: Vec<XpGem>,
 
     input: Vec2,
     rng: Rng,
 
-    spawn_timer: f32,
     fire_timer: f32,
     camera: Vec2,
+
+    // Wave system.
+    wave: u32,
+    wave_timer: f32,
+    spawn_timer: f32,
 
     // Progression.
     inventory: Inventory,
@@ -62,25 +67,28 @@ pub struct Game {
 const PLAYER_SPEED: f32 = 340.0;
 const PLAYER_RADIUS: f32 = 6.0;
 
-const ENEMY_SPEED_BASE: f32 = 72.0;
-const ENEMY_RADIUS: f32 = 9.0;
-const ENEMY_HP: f32 = 100.0;
-
 const BEAM_LIFETIME: f32 = 0.14;
 const BEAM_COOLDOWN: f32 = 0.20;
 
-const SPAWN_RATE_INITIAL: f32 = 0.55;
-const SPAWN_RATE_MIN: f32 = 0.09;
-const SPAWN_RATE_DECAY: f32 = 0.004;
+// Wave system.
+const WAVE_DURATION: f32 = 30.0;
+const WAVE_BREATHER: f32 = 2.0;
+const MAX_ENEMIES: usize = 200;
+const SESSION_LENGTH: f32 = 600.0; // 10 minutes
 
 const PARTICLE_COUNT_PER_DEATH: usize = 10;
 
-const XP_PER_KILL: u32 = 1;
+// XP gems.
+const GEM_MAGNET_RADIUS: f32 = 100.0;
+const GEM_COLLECT_RADIUS: f32 = 16.0;
+const GEM_MAGNET_SPEED: f32 = 400.0;
+const GEM_LIFETIME: f32 = 15.0;
+const GEM_RADIUS: f32 = 4.0;
 
 // Player health.
 const PLAYER_MAX_HP: f32 = 100.0;
-const ENEMY_CONTACT_DAMAGE: f32 = 10.0;
 const IFRAME_DURATION: f32 = 0.5;
+const HEAL_ON_LEVELUP: f32 = 20.0;
 
 // Screen shake.
 const SHAKE_DEATH_PX: f32 = 3.5;
@@ -89,9 +97,20 @@ const SHAKE_DECAY: f32 = 12.0;
 
 // Cascade chain-kill depth cap.
 const CASCADE_MAX_DEPTH: u32 = 10;
+
+// Per-type enemy stats: (radius, hp, speed, contact_damage, color)
+fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
+    let hp_scale = 1.0 + minute * 0.15; // HP grows 15% per minute
+    match kind {
+        EnemyKind::Drone => (9.0, 80.0 * hp_scale, 72.0, 10.0, [0.35, 0.18, 0.55]),
+        EnemyKind::Brute => (22.0, 600.0 * hp_scale, 38.0, 20.0, [0.7, 0.15, 0.15]),
+        EnemyKind::Dasher => (7.0, 60.0 * hp_scale, 55.0, 15.0, [0.2, 0.8, 0.9]),
+        EnemyKind::Splitter => (14.0, 200.0 * hp_scale, 60.0, 12.0, [0.2, 0.7, 0.3]),
+        EnemyKind::Orbiter => (10.0, 150.0 * hp_scale, 90.0, 10.0, [0.9, 0.5, 0.15]),
+    }
+}
+
 fn xp_for_rank(rank: u32) -> u32 {
-    // Rank N costs 8 + 6·(N-1) XP. Early ranks arrive quickly; the curve
-    // slopes up so late-game upgrades feel earned.
     8 + rank.saturating_sub(1) * 6
 }
 
@@ -132,11 +151,14 @@ impl Game {
             particles: Vec::with_capacity(1024),
             halos: Vec::new(),
             pulses: Vec::with_capacity(16),
+            gems: Vec::with_capacity(256),
             input: Vec2::ZERO,
             rng: Rng::new(seed),
-            spawn_timer: 0.8,
             fire_timer: 0.0,
             camera: Vec2::ZERO,
+            wave: 0,
+            wave_timer: 0.0,
+            spawn_timer: 0.5,
             inventory: Inventory::default(),
             xp: 0,
             rank: 0,
@@ -212,6 +234,12 @@ impl Game {
     pub fn shake_y(&self) -> f32 {
         self.shake_offset.y
     }
+    pub fn timer(&self) -> f32 {
+        self.time
+    }
+    pub fn wave(&self) -> u32 {
+        self.wave
+    }
     pub fn inventory_level(&self, kind_idx: u8) -> u8 {
         ShardKind::from_index(kind_idx)
             .map(|k| self.inventory.level(k))
@@ -281,19 +309,82 @@ impl Game {
         self.player.pos += self.input * self.player.speed * dt;
         self.camera = self.player.pos;
 
-        // Spawn.
-        self.spawn_timer -= dt;
-        if self.spawn_timer <= 0.0 {
-            self.spawn_enemy();
-            let rate = (SPAWN_RATE_INITIAL - self.time * SPAWN_RATE_DECAY).max(SPAWN_RATE_MIN);
-            self.spawn_timer += rate;
+        // Wave system.
+        self.wave_timer += dt;
+        if self.wave_timer >= WAVE_DURATION + WAVE_BREATHER {
+            self.wave_timer = 0.0;
+            self.wave += 1;
+        }
+        let in_breather = self.wave_timer > WAVE_DURATION;
+
+        // Spawn enemies (wave-based).
+        if !in_breather && self.enemies.len() < MAX_ENEMIES {
+            self.spawn_timer -= dt;
+            if self.spawn_timer <= 0.0 {
+                self.spawn_wave_enemy();
+                let rate = self.spawn_rate_for_wave();
+                self.spawn_timer += rate;
+            }
         }
 
-        // Enemies drift toward player.
+        // Enemy AI.
+        let player_pos = self.player.pos;
         for e in &mut self.enemies {
-            let to_player = self.player.pos - e.pos;
-            let dir = to_player.normalize_or_zero();
-            e.pos += dir * e.speed * dt;
+            match e.state {
+                EnemyState::Drifting => {
+                    let to_player = player_pos - e.pos;
+                    let dir = to_player.normalize_or_zero();
+
+                    match e.kind {
+                        EnemyKind::Orbiter => {
+                            // Once close enough, lock into orbit.
+                            if to_player.length() < 120.0 {
+                                e.state = EnemyState::Orbiting;
+                                e.state_timer = 0.0;
+                            } else {
+                                e.pos += dir * e.speed * dt;
+                            }
+                        }
+                        EnemyKind::Dasher => {
+                            e.pos += dir * e.speed * dt;
+                            // Start telegraph when within range.
+                            if to_player.length() < 250.0 {
+                                e.state = EnemyState::Telegraphing;
+                                e.state_timer = 0.6; // telegraph duration
+                                e.charge_dir = dir;
+                            }
+                        }
+                        _ => {
+                            e.pos += dir * e.speed * dt;
+                        }
+                    }
+                }
+                EnemyState::Telegraphing => {
+                    // Dasher: freeze in place, flash, then charge.
+                    e.state_timer -= dt;
+                    if e.state_timer <= 0.0 {
+                        e.state = EnemyState::Charging;
+                        e.state_timer = 0.4; // charge duration
+                    }
+                }
+                EnemyState::Charging => {
+                    // Dasher: fast charge in locked direction.
+                    e.pos += e.charge_dir * 320.0 * dt;
+                    e.state_timer -= dt;
+                    if e.state_timer <= 0.0 {
+                        e.state = EnemyState::Drifting;
+                    }
+                }
+                EnemyState::Orbiting => {
+                    // Circle around the player.
+                    e.state_timer += dt;
+                    let orbit_radius = 100.0;
+                    let angle_speed = 1.8;
+                    let base_angle = (e.pos - player_pos).y.atan2((e.pos - player_pos).x);
+                    let angle = base_angle + angle_speed * dt;
+                    e.pos = player_pos + Vec2::new(angle.cos(), angle.sin()) * orbit_radius;
+                }
+            }
         }
 
         // Fire.
@@ -306,7 +397,7 @@ impl Game {
             }
         }
 
-        // Echo: scheduled re-fires (no recursive echo scheduling).
+        // Echo: scheduled re-fires.
         let now = self.time;
         let mut i = 0;
         while i < self.pending_echoes.len() {
@@ -373,15 +464,43 @@ impl Game {
         }
         self.pulses.retain(|p| p.life < p.max_life);
 
+        // XP gem collection — magnetize nearby gems, collect touching ones.
+        for g in &mut self.gems {
+            g.life += dt;
+            let to_player = self.player.pos - g.pos;
+            let dist = to_player.length();
+            if dist < GEM_MAGNET_RADIUS {
+                let dir = to_player.normalize_or_zero();
+                g.pos += dir * GEM_MAGNET_SPEED * dt;
+            }
+        }
+        // Collect gems touching player.
+        let mut collected_xp: u32 = 0;
+        self.gems.retain(|g| {
+            let dist = (g.pos - self.player.pos).length();
+            if dist < GEM_COLLECT_RADIUS + self.player.radius {
+                collected_xp += g.value;
+                false
+            } else if g.life >= GEM_LIFETIME {
+                false // expired
+            } else {
+                true
+            }
+        });
+        if collected_xp > 0 {
+            self.xp += collected_xp;
+            self.check_for_level_up();
+        }
+
         // Enemy contact damage to player.
         if self.player.iframe_timer <= 0.0 {
             for e in &self.enemies {
                 let dist = (e.pos - self.player.pos).length();
                 if dist < e.radius + self.player.radius {
-                    self.player.hp -= ENEMY_CONTACT_DAMAGE;
+                    self.player.hp -= e.contact_damage;
                     self.player.iframe_timer = IFRAME_DURATION;
                     self.shake_amount += SHAKE_HIT_PX;
-                    break; // one hit per frame
+                    break;
                 }
             }
         }
@@ -395,6 +514,14 @@ impl Game {
             return;
         }
 
+        // Session victory (survived 10 minutes).
+        if self.time >= SESSION_LENGTH && !self.dead {
+            self.dead = true;
+            self.score = self.compute_score() + 500; // survival bonus
+            self.build_draw_buffers();
+            return;
+        }
+
         // Death resolution — loop so that Cascade chain-kills propagate.
         let mut cascade_depth: u32 = 0;
         loop {
@@ -404,19 +531,17 @@ impl Game {
             if dying.is_empty() {
                 break;
             }
-            // Remove in reverse index order so earlier indices stay valid.
             dying.sort_unstable_by(|a, b| b.cmp(a));
-            let mut dead_positions = Vec::with_capacity(dying.len());
+            let mut dead_enemies = Vec::with_capacity(dying.len());
             for i in dying {
                 let dead = self.enemies.swap_remove(i);
-                dead_positions.push(dead.pos);
+                dead_enemies.push(dead);
             }
-            for pos in &dead_positions {
-                self.on_enemy_death(*pos, cascade_depth);
+            for dead in &dead_enemies {
+                self.on_enemy_death(dead.pos, dead.kind, cascade_depth);
             }
             cascade_depth += 1;
             if cascade_depth >= CASCADE_MAX_DEPTH {
-                // Force-kill remaining dying enemies without further cascades.
                 self.enemies.retain(|e| e.hp > 0.0);
                 break;
             }
@@ -526,18 +651,50 @@ impl Game {
         }
     }
 
-    fn on_enemy_death(&mut self, pos: Vec2, cascade_depth: u32) {
+    fn on_enemy_death(&mut self, pos: Vec2, kind: EnemyKind, cascade_depth: u32) {
         self.kills_total += 1;
-        self.xp += XP_PER_KILL;
-        self.check_for_level_up();
+        self.spawn_death_particles(pos, kind);
 
-        self.spawn_death_particles(pos);
+        // Drop XP gem instead of instant XP.
+        let gem_value = match kind {
+            EnemyKind::Drone => 1,
+            EnemyKind::Brute => 5,
+            EnemyKind::Dasher => 2,
+            EnemyKind::Splitter => 3,
+            EnemyKind::Orbiter => 2,
+        };
+        self.gems.push(XpGem {
+            pos,
+            value: gem_value,
+            life: 0.0,
+        });
+
+        // Splitter: spawn 3 mini drones on death.
+        if kind == EnemyKind::Splitter {
+            let minute = self.time / 60.0;
+            for i in 0..3 {
+                let angle = (i as f32) * std::f32::consts::TAU / 3.0 + self.rng.angle() * 0.3;
+                let offset = Vec2::new(angle.cos(), angle.sin()) * 20.0;
+                let (_, _, _, _, color) = enemy_stats(EnemyKind::Drone, minute);
+                self.enemies.push(Enemy {
+                    pos: pos + offset,
+                    radius: 6.0,
+                    hp: 40.0,
+                    speed: 90.0,
+                    kind: EnemyKind::Drone,
+                    state: EnemyState::Drifting,
+                    state_timer: 0.0,
+                    charge_dir: Vec2::ZERO,
+                    color,
+                    contact_damage: 8.0,
+                });
+            }
+        }
 
         // Subtle screen shake on kills.
         self.shake_amount += SHAKE_DEATH_PX;
 
         // Cascade: short beams in random directions from the corpse.
-        // Only cascade if below depth cap.
         if cascade_depth < CASCADE_MAX_DEPTH {
             let cascade = self.inventory.level(ShardKind::Cascade);
             for _ in 0..cascade {
@@ -575,6 +732,8 @@ impl Game {
         if self.xp >= needed {
             self.xp -= needed;
             self.rank += 1;
+            // Heal on level up.
+            self.player.hp = (self.player.hp + HEAL_ON_LEVELUP).min(self.player.max_hp);
             self.level_choices = self.inventory.roll_choices(&mut self.rng);
             // If every shard is maxed, silently skip the picker.
             if self.level_choices.iter().any(|c| c.is_some()) {
@@ -599,21 +758,71 @@ impl Game {
     }
 
     fn compute_score(&self) -> u32 {
-        self.kills_total + self.rank * 5
+        let time_bonus = (self.time / 10.0) as u32;
+        self.kills_total + self.rank * 5 + time_bonus
     }
 
-    fn spawn_enemy(&mut self) {
-        let radius = self.screen_size.length() * 0.55;
+    fn spawn_rate_for_wave(&self) -> f32 {
+        // Spawn rate decreases (faster spawning) as waves progress.
+        let base = 0.55 - self.wave as f32 * 0.022;
+        base.max(0.08)
+    }
+
+    fn spawn_wave_enemy(&mut self) {
+        let minute = self.time / 60.0;
+        let kind = self.pick_enemy_kind();
+        let (radius, hp, speed, contact_damage, color) = enemy_stats(kind, minute);
+
+        let spawn_radius = self.screen_size.length() * 0.55;
         let angle = self.rng.angle();
         let dir = Vec2::new(angle.cos(), angle.sin());
-        let pos = self.player.pos + dir * radius;
-        let speed = ENEMY_SPEED_BASE * self.rng.range(0.85, 1.15);
+        let pos = self.player.pos + dir * spawn_radius;
+        let speed = speed * self.rng.range(0.85, 1.15);
+
         self.enemies.push(Enemy {
             pos,
-            radius: ENEMY_RADIUS,
-            hp: ENEMY_HP,
+            radius,
+            hp,
             speed,
+            kind,
+            state: EnemyState::Drifting,
+            state_timer: 0.0,
+            charge_dir: Vec2::ZERO,
+            color,
+            contact_damage,
         });
+    }
+
+    fn pick_enemy_kind(&mut self) -> EnemyKind {
+        let minute = self.time / 60.0;
+        // Build weighted pool based on what's unlocked by time.
+        let mut pool: Vec<(EnemyKind, u32)> = vec![(EnemyKind::Drone, 10)];
+        if minute >= 1.5 {
+            pool.push((EnemyKind::Brute, 3));
+        }
+        if minute >= 2.0 {
+            pool.push((EnemyKind::Dasher, 4));
+        }
+        if minute >= 3.0 {
+            pool.push((EnemyKind::Splitter, 3));
+        }
+        if minute >= 4.0 {
+            pool.push((EnemyKind::Orbiter, 3));
+        }
+        // Reduce drone weight over time.
+        if minute >= 5.0 {
+            pool[0].1 = 6;
+        }
+
+        let total: u32 = pool.iter().map(|p| p.1).sum();
+        let mut roll = self.rng.next_u32() % total;
+        for (kind, weight) in &pool {
+            if roll < *weight {
+                return *kind;
+            }
+            roll -= weight;
+        }
+        EnemyKind::Drone
     }
 
     fn find_nearest_enemy_pos(&self) -> Option<Vec2> {
@@ -624,8 +833,14 @@ impl Game {
             .map(|(p, _)| p)
     }
 
-    fn spawn_death_particles(&mut self, pos: Vec2) {
-        for _ in 0..PARTICLE_COUNT_PER_DEATH {
+    fn spawn_death_particles(&mut self, pos: Vec2, kind: EnemyKind) {
+        let (_, _, _, _, color) = enemy_stats(kind, self.time / 60.0);
+        let count = match kind {
+            EnemyKind::Brute => 18,
+            EnemyKind::Splitter => 14,
+            _ => PARTICLE_COUNT_PER_DEATH,
+        };
+        for _ in 0..count {
             let angle = self.rng.angle();
             let speed = self.rng.range(120.0, 280.0);
             self.particles.push(Particle {
@@ -633,7 +848,7 @@ impl Game {
                 vel: Vec2::new(angle.cos(), angle.sin()) * speed,
                 life: 0.0,
                 max_life: self.rng.range(0.45, 0.85),
-                color: [0.65, 0.35, 1.0],
+                color,
                 size: self.rng.range(1.5, 3.0),
             });
         }
@@ -708,17 +923,45 @@ impl Game {
             });
         }
 
-        // Enemies.
+        // Enemies — colored per-type.
         for e in &self.enemies {
+            let (glow, alpha) = match e.state {
+                EnemyState::Telegraphing => {
+                    // Flash during telegraph.
+                    let flash = if (e.state_timer * 12.0) as u32 % 2 == 0 { 2.0 } else { 0.8 };
+                    (flash, 1.0)
+                }
+                _ => (0.6, 1.0),
+            };
             self.circle_buf.push(CircleInstance {
                 x: e.pos.x,
                 y: e.pos.y,
                 radius: e.radius,
-                r: 0.35,
-                g: 0.18,
-                b: 0.55,
-                a: 1.0,
-                glow: 0.6,
+                r: e.color[0],
+                g: e.color[1],
+                b: e.color[2],
+                a: alpha,
+                glow,
+            });
+        }
+
+        // XP gems — bright cyan/green, small, pulsing glow.
+        for g in &self.gems {
+            let pulse = 1.0 + (g.life * 6.0).sin() * 0.3;
+            let fade = if g.life > GEM_LIFETIME - 2.0 {
+                (GEM_LIFETIME - g.life) / 2.0
+            } else {
+                1.0
+            };
+            self.circle_buf.push(CircleInstance {
+                x: g.pos.x,
+                y: g.pos.y,
+                radius: GEM_RADIUS,
+                r: 0.3,
+                g: 1.0,
+                b: 0.7,
+                a: fade,
+                glow: 2.5 * pulse * fade,
             });
         }
 

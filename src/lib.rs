@@ -148,4 +148,13 @@ impl Game {
     pub fn shake_y(&self) -> f32 {
         self.inner.shake_y()
     }
+
+    // --- Timer / wave ---
+
+    pub fn timer(&self) -> f32 {
+        self.inner.timer()
+    }
+    pub fn wave(&self) -> u32 {
+        self.inner.wave()
+    }
 }

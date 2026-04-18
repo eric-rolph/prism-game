@@ -106,9 +106,9 @@ pub struct BeamRequest {
     pub color: [f32; 3],
 }
 
-const BEAM_REACH: f32 = 650.0;
+const BEAM_REACH: f32 = 450.0;
 const BEAM_THICKNESS: f32 = 2.8;
-const BEAM_DAMAGE: f32 = 100.0;
+const BEAM_DAMAGE: f32 = 50.0;
 const BEAM_COLOR: [f32; 3] = [0.55, 1.0, 1.0];
 
 /// Build the full set of beams to fire this tick, given the player's position,

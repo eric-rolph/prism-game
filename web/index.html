@@ -267,6 +267,28 @@
         background: linear-gradient(90deg, #ff4444, #ff9966, #66ff88);
         transition: width 120ms ease-out;
       }
+
+      /* Timer + wave */
+      #timer-wrap {
+        position: absolute;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        text-align: center;
+        pointer-events: none;
+      }
+      #timer {
+        font-size: 16px;
+        letter-spacing: 3px;
+        font-weight: 200;
+        opacity: 0.7;
+      }
+      #wave-label {
+        font-size: 9px;
+        letter-spacing: 2px;
+        color: var(--dim);
+        margin-top: 2px;
+      }
     </style>
   </head>
   <body>
@@ -275,6 +297,10 @@
 
     <div id="hud">
       <div id="hp-wrap"><div id="hp-fill"></div></div>
+      <div id="timer-wrap">
+        <div id="timer">0:00</div>
+        <div id="wave-label">WAVE 1</div>
+      </div>
       <div id="stats">
         <div class="rank" id="rank">rank 0</div>
         <div class="kills" id="kills">0 kills</div>

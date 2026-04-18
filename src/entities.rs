@@ -11,11 +11,43 @@ pub struct Player {
     pub iframe_timer: f32,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EnemyKind {
+    Drone,
+    Brute,
+    Dasher,
+    Splitter,
+    Orbiter,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EnemyState {
+    Drifting,
+    /// Dasher telegraph before charge (countdown timer stored in `state_timer`).
+    Telegraphing,
+    /// Dasher charging in `charge_dir`.
+    Charging,
+    /// Orbiter locked into orbit ring.
+    Orbiting,
+}
+
 pub struct Enemy {
     pub pos: Vec2,
     pub radius: f32,
     pub hp: f32,
     pub speed: f32,
+    pub kind: EnemyKind,
+    pub state: EnemyState,
+    pub state_timer: f32,
+    pub charge_dir: Vec2,
+    pub color: [f32; 3],
+    pub contact_damage: f32,
+}
+
+pub struct XpGem {
+    pub pos: Vec2,
+    pub value: u32,
+    pub life: f32,
 }
 
 pub struct Beam {
