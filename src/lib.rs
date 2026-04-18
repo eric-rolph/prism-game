@@ -64,6 +64,10 @@ impl Game {
         self.inner.set_input(x, y);
     }
 
+    pub fn set_dash_input(&mut self, pressed: bool) {
+        self.inner.set_dash_input(pressed);
+    }
+
     pub fn update(&mut self, dt: f32) {
         self.inner.update(dt);
     }
@@ -156,5 +160,17 @@ impl Game {
     }
     pub fn wave(&self) -> u32 {
         self.inner.wave()
+    }
+
+    pub fn dash_cooldown_pct(&self) -> f32 {
+        self.inner.dash_cooldown_pct()
+    }
+
+    pub fn wave_clear_timer(&self) -> f32 {
+        self.inner.wave_clear_timer()
+    }
+
+    pub fn is_victory(&self) -> bool {
+        self.inner.is_victory()
     }
 }

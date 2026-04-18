@@ -289,6 +289,54 @@
         color: var(--dim);
         margin-top: 2px;
       }
+
+      /* Dash cooldown indicator */
+      #dash-wrap {
+        position: absolute;
+        left: 14px;
+        top: 20px;
+        width: 120px;
+        height: 3px;
+        background: var(--faint);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      #dash-fill {
+        height: 100%;
+        width: 100%;
+        background: linear-gradient(90deg, #9a9dff, #c9a3ff);
+        transition: width 80ms linear;
+      }
+      #dash-label {
+        position: absolute;
+        left: 14px;
+        top: 26px;
+        font-size: 8px;
+        letter-spacing: 2px;
+        color: var(--faint);
+      }
+
+      /* Wave clear banner */
+      #wave-clear {
+        position: fixed;
+        top: 40%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 22px;
+        letter-spacing: 8px;
+        font-weight: 200;
+        color: var(--ink);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 300ms ease-out;
+        text-shadow: 0 0 20px rgba(127, 211, 255, 0.5);
+      }
+      #wave-clear.shown { opacity: 0.85; }
+
+      /* Victory title override */
+      .victory-title {
+        color: #66ff88 !important;
+      }
     </style>
   </head>
   <body>
@@ -297,6 +345,8 @@
 
     <div id="hud">
       <div id="hp-wrap"><div id="hp-fill"></div></div>
+      <div id="dash-wrap"><div id="dash-fill"></div></div>
+      <div id="dash-label">DASH [SPACE]</div>
       <div id="timer-wrap">
         <div id="timer">0:00</div>
         <div id="wave-label">WAVE 1</div>
@@ -308,6 +358,8 @@
       <div id="xp-wrap"><div id="xp-fill"></div></div>
       <div id="shards-tray"></div>
     </div>
+
+    <div id="wave-clear">WAVE CLEAR</div>
 
     <div id="levelup">
       <div id="levelup-title">RANK UP</div>

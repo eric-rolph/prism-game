@@ -80,6 +80,17 @@ async function main(): Promise<void> {
   const deathRestartEl: HTMLElement = deathRestartRaw;
   const hpFillEl: HTMLElement = hpFillRaw;
 
+  // Dash + wave clear elements.
+  const dashFillRaw = document.getElementById('dash-fill');
+  const waveClearRaw = document.getElementById('wave-clear');
+  const deathTitleRaw = document.getElementById('death-title');
+  if (!dashFillRaw || !waveClearRaw || !deathTitleRaw) {
+    throw new Error('Dash/wave-clear elements missing from index.html');
+  }
+  const dashFillEl: HTMLElement = dashFillRaw;
+  const waveClearEl: HTMLElement = waveClearRaw;
+  const deathTitleEl: HTMLElement = deathTitleRaw;
+
   // Boot WASM. `wasm.memory.buffer` is the ArrayBuffer we re-view as typed
   // arrays every frame — it can grow, so we must check for buffer identity.
   const wasm = await init();
@@ -229,7 +240,14 @@ async function main(): Promise<void> {
 
   let deathShown = false;
 
-  const showDeathScreen = (): void => {
+  const showDeathScreen = (victory: boolean = false): void => {
+    if (victory) {
+      deathTitleEl.textContent = 'VICTORY';
+      deathTitleEl.classList.add('victory-title');
+    } else {
+      deathTitleEl.textContent = 'SHATTERED';
+      deathTitleEl.classList.remove('victory-title');
+    }
     deathScoreEl.textContent = String(game.score());
     const t = game.timer();
     const mins = Math.floor(t / 60);
@@ -286,11 +304,22 @@ async function main(): Promise<void> {
 
     const [ix, iy] = input.direction();
     game.set_input(ix, iy);
+    game.set_dash_input(input.consumeDash());
     game.update(dt);
 
-    // Death screen edges.
+    // Death / victory screen edges.
     const isDead = game.is_dead();
-    if (isDead && !deathShown) showDeathScreen();
+    const isVictory = game.is_victory();
+    if ((isDead || isVictory) && !deathShown) showDeathScreen(isVictory);
+
+    // Dash cooldown indicator.
+    const dashPct = game.dash_cooldown_pct();
+    dashFillEl.style.width = ((1 - dashPct) * 100) + '%';
+
+    // Wave clear banner.
+    const wcTimer = game.wave_clear_timer();
+    if (wcTimer > 0) waveClearEl.classList.add('shown');
+    else waveClearEl.classList.remove('shown');
 
     // Modal open/close by state edges.
     const isLeveling = game.is_leveling_up();

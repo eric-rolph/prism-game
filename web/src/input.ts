@@ -11,12 +11,17 @@ export class Input {
   private pressed = new Set<string>();
   private touchStart: { x: number; y: number } | null = null;
   private touchCurrent: { x: number; y: number } | null = null;
+  private _dashPressed = false;
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
+      if (e.key === ' ' || e.key === 'Shift') {
+        this._dashPressed = true;
+        e.preventDefault();
+        return;
+      }
       if (this.isTracked(e.key)) {
         this.pressed.add(e.key);
-        // Prevent browser scrolling on arrow keys.
         e.preventDefault();
       }
     });
@@ -83,5 +88,11 @@ export class Input {
       y /= len;
     }
     return [x, y];
+  }
+
+  consumeDash(): boolean {
+    const v = this._dashPressed;
+    this._dashPressed = false;
+    return v;
   }
 }

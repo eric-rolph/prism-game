@@ -111,6 +111,9 @@ const BEAM_THICKNESS: f32 = 2.8;
 const BEAM_DAMAGE: f32 = 50.0;
 const BEAM_COLOR: [f32; 3] = [0.55, 1.0, 1.0];
 
+/// Hard cap on beams per salvo to prevent combinatorial explosion.
+const MAX_SALVO_BEAMS: usize = 64;
+
 /// Build the full set of beams to fire this tick, given the player's position,
 /// a target direction, the world (for refraction homing), and the inventory.
 pub fn compose_salvo(
@@ -128,6 +131,9 @@ pub fn compose_salvo(
     let mut directions = vec![base_dir];
     directions = apply_mirror(&directions, inventory.level(ShardKind::Mirror));
     directions = apply_split(&directions, inventory.level(ShardKind::Split));
+
+    // Cap directions before generating full beams.
+    directions.truncate(MAX_SALVO_BEAMS);
 
     // Stage 2: concrete base beams.
     let mut beams: Vec<BeamRequest> = directions
@@ -147,6 +153,9 @@ pub fn compose_salvo(
 
     // Stage 4: curve-fit each straight beam into a homing polyline.
     beams = apply_refract(&beams, enemies, inventory.level(ShardKind::Refract));
+
+    // Final hard cap.
+    beams.truncate(MAX_SALVO_BEAMS);
 
     beams
 }

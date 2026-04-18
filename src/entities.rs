@@ -9,6 +9,9 @@ pub struct Player {
     pub hp: f32,
     pub max_hp: f32,
     pub iframe_timer: f32,
+    pub dash_cooldown: f32,
+    pub dash_timer: f32,
+    pub dash_dir: Vec2,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -18,6 +21,7 @@ pub enum EnemyKind {
     Dasher,
     Splitter,
     Orbiter,
+    Emitter,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -29,6 +33,8 @@ pub enum EnemyState {
     Charging,
     /// Orbiter locked into orbit ring.
     Orbiting,
+    /// Emitter: stationary, firing projectiles.
+    Shooting,
 }
 
 pub struct Enemy {
@@ -48,6 +54,20 @@ pub struct XpGem {
     pub pos: Vec2,
     pub value: u32,
     pub life: f32,
+}
+
+pub struct Projectile {
+    pub pos: Vec2,
+    pub vel: Vec2,
+    pub life: f32,
+    pub damage: f32,
+    pub radius: f32,
+}
+
+pub struct Crystal {
+    pub pos: Vec2,
+    pub radius: f32,
+    pub drift_vel: Vec2,
 }
 
 pub struct Beam {
