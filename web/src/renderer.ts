@@ -58,7 +58,9 @@ export class Renderer {
   private prevTex!: WebGLTexture;
 
   // Bloom FBO chain — progressively halved resolutions.
-  private static readonly BLOOM_LEVELS = 5;
+  // 3 levels = 1/2, 1/4, 1/8 res. Coarsest texel = 8×8 screen px at 1280×720.
+  // (5 levels caused 1/32 res = 40×22px, producing 32×32px rectangular blobs.)
+  private static readonly BLOOM_LEVELS = 3;
   private bloomFbos: WebGLFramebuffer[] = [];
   private bloomTexs: WebGLTexture[] = [];
   private bloomSizes: [number, number][] = [];
