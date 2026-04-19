@@ -338,7 +338,10 @@ void main() {
 }
 `;
 
-// Upsample: 9-tap 3x3 tent filter. u_texel is 1/source_resolution.
+// Upsample: Bicubic B-spline filter (4 optimized bilinear taps).
+// Eliminates blocky/staircase artifacts from bilinear-only upsampling.
+// Ported from Unity URP SampleTexture2DBicubic (Filtering.hlsl).
+// u_texel is 1/source_resolution.
 export const BLOOM_UP_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 
@@ -349,21 +352,36 @@ in vec2 v_uv;
 out vec4 fragColor;
 
 void main() {
-  vec3 a = texture(u_src, v_uv + vec2(-1.0, -1.0) * u_texel).rgb;
-  vec3 b = texture(u_src, v_uv + vec2( 0.0, -1.0) * u_texel).rgb;
-  vec3 c = texture(u_src, v_uv + vec2( 1.0, -1.0) * u_texel).rgb;
-  vec3 d = texture(u_src, v_uv + vec2(-1.0,  0.0) * u_texel).rgb;
-  vec3 e = texture(u_src, v_uv).rgb;
-  vec3 f = texture(u_src, v_uv + vec2( 1.0,  0.0) * u_texel).rgb;
-  vec3 g = texture(u_src, v_uv + vec2(-1.0,  1.0) * u_texel).rgb;
-  vec3 h = texture(u_src, v_uv + vec2( 0.0,  1.0) * u_texel).rgb;
-  vec3 i = texture(u_src, v_uv + vec2( 1.0,  1.0) * u_texel).rgb;
+  // Convert UV to texel-space (cell-centered, shifted +0.5)
+  vec2 texSize = 1.0 / u_texel;
+  vec2 xy = v_uv * texSize + 0.5;
+  vec2 ic = floor(xy);
+  vec2 fc = xy - ic;
 
-  vec3 col = e * 4.0
-           + (b + d + f + h) * 2.0
-           + (a + c + g + i);
+  // Cubic B-spline basis weights at fractional position fc
+  vec2 r  = 0.16666667 + fc * (-0.5 + fc * (0.5 - fc * 0.16666667));
+  vec2 mr = 0.66666667 + fc * (-1.0 + 0.5 * fc) * fc;
+  vec2 ml = 0.16666667 + fc * (0.5 + fc * (0.5 - fc * 0.5));
+  vec2 l  = 1.0 - mr - ml - r;
 
-  fragColor = vec4(col / 16.0, 1.0);
+  // Pair weights for 4 bilinear taps (collapse 4x4 to 2x2)
+  vec2 w0 = r + mr;
+  vec2 w1 = ml + l;
+  vec2 o0 = -1.0 + mr / w0;
+  vec2 o1 =  1.0 + l  / w1;
+
+  // 4 bilinear taps at optimized positions
+  vec2 uv00 = (ic + vec2(o0.x, o0.y) - 0.5) * u_texel;
+  vec2 uv10 = (ic + vec2(o1.x, o0.y) - 0.5) * u_texel;
+  vec2 uv01 = (ic + vec2(o0.x, o1.y) - 0.5) * u_texel;
+  vec2 uv11 = (ic + vec2(o1.x, o1.y) - 0.5) * u_texel;
+
+  vec3 col = w0.y * (w0.x * texture(u_src, uv00).rgb +
+                      w1.x * texture(u_src, uv10).rgb) +
+             w1.y * (w0.x * texture(u_src, uv01).rgb +
+                      w1.x * texture(u_src, uv11).rgb);
+
+  fragColor = vec4(col, 1.0);
 }
 `;
 
