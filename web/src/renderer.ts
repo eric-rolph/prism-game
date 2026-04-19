@@ -1,7 +1,7 @@
 // WebGL2 renderer for Prism. Multi-pass pipeline:
 //   1. Background grid (parallax hex grid + arena boundary)
 //   2. Geometry pass: beams (spectral fringe + energy ripple) + circles → HDR FBO
-//   3. Mipmap bloom generation
+//   3. Dual-filter bloom: downsample chain → upsample chain → full-res output
 //   4. Composite: chromatic aberration + temporal persistence + bloom + vignette + tonemap
 
 import {
@@ -62,6 +62,11 @@ export class Renderer {
   private bloomFbos: WebGLFramebuffer[] = [];
   private bloomTexs: WebGLTexture[] = [];
   private bloomSizes: [number, number][] = [];
+
+  // Full-resolution bloom output — final upsample target to avoid
+  // magnification artifacts from reading the half-res bloom[0].
+  private bloomOutFbo!: WebGLFramebuffer;
+  private bloomOutTex!: WebGLTexture;
 
   private fboW = 0;
   private fboH = 0;
@@ -263,6 +268,8 @@ export class Renderer {
     if (this.fbo) gl.deleteFramebuffer(this.fbo);
     if (this.prevTex) gl.deleteTexture(this.prevTex);
     if (this.prevFbo) gl.deleteFramebuffer(this.prevFbo);
+    if (this.bloomOutTex) gl.deleteTexture(this.bloomOutTex);
+    if (this.bloomOutFbo) gl.deleteFramebuffer(this.bloomOutFbo);
     for (const tex of this.bloomTexs) gl.deleteTexture(tex);
     for (const fbo of this.bloomFbos) gl.deleteFramebuffer(fbo);
 
@@ -289,6 +296,10 @@ export class Renderer {
       bw = Math.max(1, bw >> 1);
       bh = Math.max(1, bh >> 1);
     }
+
+    // Full-resolution bloom output FBO.
+    this.bloomOutTex = this.makeTexture(width, height, false);
+    this.bloomOutFbo = this.makeFbo(this.bloomOutTex);
 
     // Clear the persistence buffer to black.
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.prevFbo);
@@ -408,6 +419,20 @@ export class Renderer {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
+    // Final upsample: bloom[0] (half-res) → bloomOut (full-res).
+    // This eliminates magnification artifacts from reading half-res in composite.
+    gl.disable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomOutFbo);
+    gl.viewport(0, 0, pixelWidth, pixelHeight);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(this.bloomUpProg.prog);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.bloomTexs[0]);
+    gl.uniform1i(this.bloomUpProg.uniforms['u_src']!, 0);
+    gl.uniform2f(this.bloomUpProg.uniforms['u_texel']!, 1.0 / this.bloomSizes[0][0], 1.0 / this.bloomSizes[0][1]);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
     gl.bindVertexArray(null);
 
     // ── Pass 2: composite to screen with bloom + temporal persistence ──
@@ -422,7 +447,7 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
     gl.uniform1i(this.compositeProg.uniforms['u_scene']!, 0);
     gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.bloomTexs[0]);
+    gl.bindTexture(gl.TEXTURE_2D, this.bloomOutTex);
     gl.uniform1i(this.compositeProg.uniforms['u_bloom']!, 1);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.prevTex);
