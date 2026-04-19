@@ -85,12 +85,24 @@ impl Inventory {
         self.levels[kind.as_index()] >= MAX_SHARD_LEVEL
     }
 
-    /// Three random shard kinds to offer at the next level-up. Each returned
-    /// slot is `None` if fewer than three upgradable shards remain.
+    /// Three random shard kinds to offer at the next level-up. Defensive
+    /// shards (Siphon, Barrier) are offered less frequently after level 2.
+    /// At least one offensive shard is always included if possible.
     pub fn roll_choices(&self, rng: &mut Rng) -> [Option<ShardKind>; 3] {
-        let mut candidates: Vec<ShardKind> = (0..SHARD_COUNT as u8)
+        let defensive = [ShardKind::Siphon, ShardKind::Barrier, ShardKind::Frost, ShardKind::Thorns];
+
+        let mut candidates: Vec<(ShardKind, f32)> = (0..SHARD_COUNT as u8)
             .filter_map(ShardKind::from_index)
             .filter(|s| !self.is_maxed(*s))
+            .map(|s| {
+                let weight = match s {
+                    ShardKind::Siphon | ShardKind::Barrier => {
+                        if self.levels[s.as_index()] >= 2 { 0.4 } else { 1.0 }
+                    }
+                    _ => 1.0,
+                };
+                (s, weight)
+            })
             .collect();
 
         let mut result = [None, None, None];
@@ -98,9 +110,32 @@ impl Inventory {
             if candidates.is_empty() {
                 break;
             }
-            let pick = (rng.next_u32() as usize) % candidates.len();
-            *slot = Some(candidates.swap_remove(pick));
+            let total: f32 = candidates.iter().map(|(_, w)| w).sum();
+            if total <= 0.0 { break; }
+            let mut roll = (rng.next_u32() as f64 / u32::MAX as f64) as f32 * total;
+            let mut pick = 0;
+            for (i, (_, w)) in candidates.iter().enumerate() {
+                roll -= w;
+                if roll <= 0.0 {
+                    pick = i;
+                    break;
+                }
+            }
+            *slot = Some(candidates.swap_remove(pick).0);
         }
+
+        // Guarantee at least one offensive option if all 3 are defensive.
+        if result.iter().filter_map(|r| *r).all(|s| defensive.contains(&s)) {
+            let offensive: Vec<ShardKind> = (0..SHARD_COUNT as u8)
+                .filter_map(ShardKind::from_index)
+                .filter(|s| !self.is_maxed(*s) && !defensive.contains(s))
+                .collect();
+            if !offensive.is_empty() {
+                let pick = (rng.next_u32() as usize) % offensive.len();
+                result[0] = Some(offensive[pick]);
+            }
+        }
+
         result
     }
 
@@ -176,11 +211,11 @@ pub struct BeamRequest {
 
 const BEAM_REACH: f32 = 450.0;
 const BEAM_THICKNESS: f32 = 2.8;
-const BEAM_DAMAGE: f32 = 50.0;
+const BEAM_DAMAGE: f32 = 40.0;
 const BEAM_COLOR: [f32; 3] = [0.55, 1.0, 1.0];
 
 /// Hard cap on beams per salvo to prevent combinatorial explosion.
-const MAX_SALVO_BEAMS: usize = 64;
+const MAX_SALVO_BEAMS: usize = 48;
 
 /// Build the full set of beams to fire this tick, given the player's position,
 /// a target direction, the world (for refraction homing), and the inventory.
@@ -280,7 +315,7 @@ fn apply_lens(beams: &mut [BeamRequest], level: u8) {
         return;
     }
     let thick_mult = 1.0 + 0.4 * level as f32;
-    let dmg_mult = 1.0 + 0.3 * level as f32;
+    let dmg_mult = 1.0 + 0.2 * level as f32;
     for b in beams.iter_mut() {
         b.thickness *= thick_mult;
         b.damage *= dmg_mult;

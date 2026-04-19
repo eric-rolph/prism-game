@@ -51,6 +51,7 @@ pub struct Enemy {
     pub color: [f32; 3],
     pub contact_damage: f32,
     pub slow_timer: f32,
+    pub no_xp: bool,
 }
 
 pub struct XpGem {

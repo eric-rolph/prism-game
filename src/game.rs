@@ -78,11 +78,11 @@ const BEAM_COOLDOWN: f32 = 0.20;
 // Dash.
 const DASH_DISTANCE: f32 = 120.0;
 const DASH_DURATION: f32 = 0.10;
-const DASH_COOLDOWN: f32 = 2.0;
+const DASH_COOLDOWN: f32 = 3.0;
 
 // Wave system.
 const WAVE_DURATION: f32 = 30.0;
-const MAX_ENEMIES: usize = 200;
+const MAX_ENEMIES: usize = 280;
 const SESSION_LENGTH: f32 = 600.0; // 10 minutes
 const WAVE_CLEAR_BANNER_DURATION: f32 = 1.5;
 
@@ -97,8 +97,7 @@ const GEM_RADIUS: f32 = 4.0;
 
 // Player health.
 const PLAYER_MAX_HP: f32 = 100.0;
-const IFRAME_DURATION: f32 = 0.5;
-const HEAL_ON_LEVELUP: f32 = 20.0;
+const IFRAME_DURATION: f32 = 0.33;
 
 // Screen shake.
 const SHAKE_DEATH_PX: f32 = 3.5;
@@ -106,12 +105,12 @@ const SHAKE_HIT_PX: f32 = 5.0;
 const SHAKE_DECAY: f32 = 12.0;
 
 // Cascade chain-kill depth cap.
-const CASCADE_MAX_DEPTH: u32 = 10;
+const CASCADE_MAX_DEPTH: u32 = 6;
 
 // Emitter projectile.
 const EMITTER_RANGE: f32 = 300.0;
-const EMITTER_FIRE_INTERVAL: f32 = 2.0;
-const PROJ_SPEED: f32 = 200.0;
+const EMITTER_FIRE_INTERVAL: f32 = 1.6;
+const PROJ_SPEED: f32 = 240.0;
 const PROJ_DAMAGE: f32 = 10.0;
 const PROJ_RADIUS: f32 = 4.0;
 const PROJ_LIFETIME: f32 = 4.0;
@@ -132,19 +131,21 @@ enum WaveShape {
 
 // Per-type enemy stats: (radius, hp, speed, contact_damage, color)
 fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
-    let hp_scale = (1.22_f32).powf(minute); // exponential 22% per minute
+    let hp_scale = (1.30_f32).powf(minute);
+    let dmg_scale = 1.0 + minute * 0.08;
+    let spd_scale = 1.0 + minute * 0.03;
     match kind {
-        EnemyKind::Drone => (9.0, 150.0 * hp_scale, 100.0, 14.0, [0.35, 0.18, 0.55]),
-        EnemyKind::Brute => (22.0, 1100.0 * hp_scale, 52.0, 28.0, [0.7, 0.15, 0.15]),
-        EnemyKind::Dasher => (7.0, 110.0 * hp_scale, 76.0, 20.0, [0.2, 0.8, 0.9]),
-        EnemyKind::Splitter => (14.0, 370.0 * hp_scale, 82.0, 16.0, [0.2, 0.7, 0.3]),
-        EnemyKind::Orbiter => (10.0, 280.0 * hp_scale, 124.0, 14.0, [0.9, 0.5, 0.15]),
-        EnemyKind::Emitter => (11.0, 230.0 * hp_scale, 64.0, 10.0, [0.7, 0.3, 0.8]),
+        EnemyKind::Drone => (9.0, 150.0 * hp_scale, 100.0 * spd_scale, 14.0 * dmg_scale, [0.35, 0.18, 0.55]),
+        EnemyKind::Brute => (22.0, 1100.0 * hp_scale, 52.0 * spd_scale, 28.0 * dmg_scale, [0.7, 0.15, 0.15]),
+        EnemyKind::Dasher => (7.0, 110.0 * hp_scale, 76.0 * spd_scale, 20.0 * dmg_scale, [0.2, 0.8, 0.9]),
+        EnemyKind::Splitter => (14.0, 370.0 * hp_scale, 82.0 * spd_scale, 16.0 * dmg_scale, [0.2, 0.7, 0.3]),
+        EnemyKind::Orbiter => (10.0, 280.0 * hp_scale, 124.0 * spd_scale, 14.0 * dmg_scale, [0.9, 0.5, 0.15]),
+        EnemyKind::Emitter => (11.0, 230.0 * hp_scale, 64.0 * spd_scale, 10.0 * dmg_scale, [0.7, 0.3, 0.8]),
     }
 }
 
 fn xp_for_rank(rank: u32) -> u32 {
-    8 + rank.saturating_sub(1) * 6
+    8 + rank * 6 + rank * rank * 2
 }
 
 // Shard-specific constants. Split / Mirror / Chromatic / Lens / Refract
@@ -155,15 +156,16 @@ const INTERFERENCE_DPS: f32 = 60.0;
 const INTERFERENCE_RING_THICKNESS: f32 = 12.0;
 
 // Siphon: HP healed per beam hit (scaled by level).
-const SIPHON_HEAL_PER_HIT: f32 = 1.5;
+const SIPHON_HEAL_PER_HIT: f32 = 1.0;
+const SIPHON_MAX_HEAL_PER_SALVO: f32 = 8.0;
 
 // Frost: slow duration per level.
 const FROST_SLOW_DURATION: f32 = 1.2;
 const FROST_SLOW_FACTOR: f32 = 0.4; // speed multiplier when frozen
 
 // Barrier: shield HP per level, regen rate.
-const BARRIER_HP_PER_LEVEL: f32 = 25.0;
-const BARRIER_REGEN_PER_SEC: f32 = 4.0;
+const BARRIER_HP_PER_LEVEL: f32 = 18.0;
+const BARRIER_REGEN_PER_SEC: f32 = 2.0;
 const BARRIER_CONTACT_DPS: f32 = 50.0;
 const BARRIER_RADIUS: f32 = 50.0;
 
@@ -181,7 +183,7 @@ const DIFFRACT_MINI_REACH: f32 = 95.0;
 const DIFFRACT_MINI_THICKNESS: f32 = 1.7;
 const DIFFRACT_MINI_LIFETIME: f32 = 0.10;
 
-const CASCADE_DAMAGE: f32 = 55.0;
+const CASCADE_DAMAGE: f32 = 40.0;
 const CASCADE_REACH: f32 = 130.0;
 const CASCADE_THICKNESS: f32 = 2.0;
 const CASCADE_LIFETIME: f32 = 0.14;
@@ -351,7 +353,8 @@ impl Game {
             }
             if kind == ShardKind::Barrier {
                 self.player.barrier_max = BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
-                self.player.barrier_hp = self.player.barrier_max; // full shield on upgrade
+                self.player.barrier_hp = (self.player.barrier_hp + self.player.barrier_max * 0.5)
+                    .min(self.player.barrier_max);
             }
             self.leveling_up = false;
             self.level_choices = [None; 3];
@@ -806,7 +809,7 @@ impl Game {
                 dead_enemies.push(dead);
             }
             for dead in &dead_enemies {
-                self.on_enemy_death(dead.pos, dead.kind, cascade_depth);
+                self.on_enemy_death(dead.pos, dead.kind, cascade_depth, dead.no_xp);
             }
             cascade_depth += 1;
             if cascade_depth >= CASCADE_MAX_DEPTH {
@@ -902,9 +905,10 @@ impl Game {
             }
         }
 
-        // Siphon: heal player per hit.
+        // Siphon: heal player per hit (capped per salvo to prevent god-mode).
         if siphon > 0 && hit_count > 0 {
-            let heal = SIPHON_HEAL_PER_HIT * siphon as f32 * hit_count as f32;
+            let heal = (SIPHON_HEAL_PER_HIT * siphon as f32 * hit_count as f32)
+                .min(SIPHON_MAX_HEAL_PER_SALVO);
             self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
         }
 
@@ -953,24 +957,26 @@ impl Game {
         }
     }
 
-    fn on_enemy_death(&mut self, pos: Vec2, kind: EnemyKind, cascade_depth: u32) {
+    fn on_enemy_death(&mut self, pos: Vec2, kind: EnemyKind, cascade_depth: u32, no_xp: bool) {
         self.kills_total += 1;
         self.spawn_death_particles(pos, kind);
 
-        // Drop XP gem instead of instant XP.
-        let gem_value = match kind {
-            EnemyKind::Drone => 1,
-            EnemyKind::Brute => 5,
-            EnemyKind::Dasher => 2,
-            EnemyKind::Splitter => 3,
-            EnemyKind::Orbiter => 2,
-            EnemyKind::Emitter => 3,
-        };
-        self.gems.push(XpGem {
-            pos,
-            value: gem_value,
-            life: 0.0,
-        });
+        // Drop XP gem unless this is a mini-drone (Splitter offspring).
+        if !no_xp {
+            let gem_value = match kind {
+                EnemyKind::Drone => 1,
+                EnemyKind::Brute => 5,
+                EnemyKind::Dasher => 2,
+                EnemyKind::Splitter => 3,
+                EnemyKind::Orbiter => 2,
+                EnemyKind::Emitter => 3,
+            };
+            self.gems.push(XpGem {
+                pos,
+                value: gem_value,
+                life: 0.0,
+            });
+        }
 
         // Splitter: spawn 3 mini drones on death.
         if kind == EnemyKind::Splitter {
@@ -991,6 +997,7 @@ impl Game {
                     color,
                     contact_damage: 8.0,
                     slow_timer: 0.0,
+                    no_xp: true,
                 });
             }
         }
@@ -1049,8 +1056,9 @@ impl Game {
         if self.xp >= needed {
             self.xp -= needed;
             self.rank += 1;
-            // Heal on level up.
-            self.player.hp = (self.player.hp + HEAL_ON_LEVELUP).min(self.player.max_hp);
+            // Heal on level up — diminishing with rank.
+            let heal = (20.0 - self.rank as f32 * 1.0).max(5.0);
+            self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
             self.level_choices = self.inventory.roll_choices(&mut self.rng);
             // If every shard is maxed, silently skip the picker.
             if self.level_choices.iter().any(|c| c.is_some()) {
@@ -1233,6 +1241,7 @@ impl Game {
             color,
             contact_damage,
             slow_timer: 0.0,
+            no_xp: false,
         });
     }
 
