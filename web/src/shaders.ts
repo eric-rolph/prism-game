@@ -304,10 +304,72 @@ void main() {
 }
 `;
 
+// ─── Bloom downsample / upsample ─────────────────────────────────────────
+// Proper multi-pass dual-filter bloom: downsample through a chain of
+// progressively smaller FBOs, then upsample back up with additive blending.
+// Eliminates the blocky artifacts of single-sample mipmap-based bloom.
+
+// Downsample: 9-tap tent filter. u_texel is 1/source_resolution.
+export const BLOOM_DOWN_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+
+uniform sampler2D u_src;
+uniform vec2 u_texel;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+  vec3 a = texture(u_src, v_uv + vec2(-1.0, -1.0) * u_texel).rgb;
+  vec3 b = texture(u_src, v_uv + vec2( 0.0, -1.0) * u_texel).rgb;
+  vec3 c = texture(u_src, v_uv + vec2( 1.0, -1.0) * u_texel).rgb;
+  vec3 d = texture(u_src, v_uv + vec2(-1.0,  0.0) * u_texel).rgb;
+  vec3 e = texture(u_src, v_uv).rgb;
+  vec3 f = texture(u_src, v_uv + vec2( 1.0,  0.0) * u_texel).rgb;
+  vec3 g = texture(u_src, v_uv + vec2(-1.0,  1.0) * u_texel).rgb;
+  vec3 h = texture(u_src, v_uv + vec2( 0.0,  1.0) * u_texel).rgb;
+  vec3 i = texture(u_src, v_uv + vec2( 1.0,  1.0) * u_texel).rgb;
+
+  vec3 col = e * 0.25
+           + (b + d + f + h) * 0.125
+           + (a + c + g + i) * 0.0625;
+
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+// Upsample: 9-tap 3x3 tent filter. u_texel is 1/source_resolution.
+export const BLOOM_UP_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+
+uniform sampler2D u_src;
+uniform vec2 u_texel;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+  vec3 a = texture(u_src, v_uv + vec2(-1.0, -1.0) * u_texel).rgb;
+  vec3 b = texture(u_src, v_uv + vec2( 0.0, -1.0) * u_texel).rgb;
+  vec3 c = texture(u_src, v_uv + vec2( 1.0, -1.0) * u_texel).rgb;
+  vec3 d = texture(u_src, v_uv + vec2(-1.0,  0.0) * u_texel).rgb;
+  vec3 e = texture(u_src, v_uv).rgb;
+  vec3 f = texture(u_src, v_uv + vec2( 1.0,  0.0) * u_texel).rgb;
+  vec3 g = texture(u_src, v_uv + vec2(-1.0,  1.0) * u_texel).rgb;
+  vec3 h = texture(u_src, v_uv + vec2( 0.0,  1.0) * u_texel).rgb;
+  vec3 i = texture(u_src, v_uv + vec2( 1.0,  1.0) * u_texel).rgb;
+
+  vec3 col = e * 4.0
+           + (b + d + f + h) * 2.0
+           + (a + c + g + i);
+
+  fragColor = vec4(col / 16.0, 1.0);
+}
+`;
+
 // ─── Full-screen composite ───────────────────────────────────────────────
-// Samples the HDR framebuffer at the base mip for color, and at higher mips
-// for multi-scale bloom. Applies chromatic aberration, vignette, and
-// Reinhard tonemap. Uses temporal persistence from a previous frame texture.
+// Reads base scene + bloom result from dual-filter chain. Applies
+// chromatic aberration, temporal persistence, vignette, and Reinhard tonemap.
 
 export const FULLSCREEN_VERT = /* glsl */ `#version 300 es
 layout(location=0) in vec2 a_quad;
@@ -322,22 +384,12 @@ export const COMPOSITE_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 
 uniform sampler2D u_scene;
+uniform sampler2D u_bloom;
 uniform sampler2D u_prev;
 uniform float u_persistence;
 
 in vec2 v_uv;
 out vec4 fragColor;
-
-// 5-tap cross filter at a given mip level to smooth out block boundaries.
-vec3 bloomTap(sampler2D tex, vec2 uv, float lod, vec2 off) {
-  return (
-    textureLod(tex, uv, lod).rgb * 4.0 +
-    textureLod(tex, uv + vec2(off.x, 0.0), lod).rgb +
-    textureLod(tex, uv - vec2(off.x, 0.0), lod).rgb +
-    textureLod(tex, uv + vec2(0.0, off.y), lod).rgb +
-    textureLod(tex, uv - vec2(0.0, off.y), lod).rgb
-  ) / 8.0;
-}
 
 void main() {
   vec2 dir = v_uv - 0.5;
@@ -346,22 +398,16 @@ void main() {
   float aberr = 0.002 + length(dir) * 0.005;
 
   vec3 base;
-  base.r = textureLod(u_scene, v_uv + dir * aberr, 0.0).r;
-  base.g = textureLod(u_scene, v_uv, 0.0).g;
-  base.b = textureLod(u_scene, v_uv - dir * aberr, 0.0).b;
+  base.r = texture(u_scene, v_uv + dir * aberr).r;
+  base.g = texture(u_scene, v_uv).g;
+  base.b = texture(u_scene, v_uv - dir * aberr).b;
 
   // Temporal persistence — blend previous frame for light trails.
   vec3 prev = texture(u_prev, v_uv).rgb;
   base = max(base, prev * u_persistence);
 
-  // Multi-tap bloom — 5-tap cross per mip level to eliminate blocky artifacts.
-  // Offset scales with mip level so the blur grows proportionally.
-  vec2 texel = 1.0 / vec2(textureSize(u_scene, 0));
-  vec3 bloom = bloomTap(u_scene, v_uv, 1.0, texel * 2.0)  * 0.10
-             + bloomTap(u_scene, v_uv, 2.0, texel * 4.0)  * 0.20
-             + bloomTap(u_scene, v_uv, 3.0, texel * 8.0)  * 0.30
-             + bloomTap(u_scene, v_uv, 4.0, texel * 16.0) * 0.25
-             + bloomTap(u_scene, v_uv, 5.0, texel * 32.0) * 0.15;
+  // Bloom from multi-pass dual-filter chain.
+  vec3 bloom = texture(u_bloom, v_uv).rgb;
 
   vec3 col = base + bloom * 0.7;
 

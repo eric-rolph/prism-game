@@ -7,6 +7,8 @@
 import {
   BEAM_FRAG,
   BEAM_VERT,
+  BLOOM_DOWN_FRAG,
+  BLOOM_UP_FRAG,
   CIRCLE_FRAG,
   CIRCLE_VERT,
   COMPOSITE_FRAG,
@@ -34,6 +36,8 @@ export class Renderer {
   private circleProg!: Program;
   private beamProg!: Program;
   private gridProg!: Program;
+  private bloomDownProg!: Program;
+  private bloomUpProg!: Program;
   private compositeProg!: Program;
   private copyProg!: Program;
 
@@ -45,13 +49,19 @@ export class Renderer {
   private beamVao!: WebGLVertexArrayObject;
   private fullscreenVao!: WebGLVertexArrayObject;
 
-  // Main scene FBO (HDR, mipmapped for bloom).
+  // Main scene FBO (HDR).
   private fbo!: WebGLFramebuffer;
   private fboTex!: WebGLTexture;
 
   // Persistence FBO — stores previous frame for light trails.
   private prevFbo!: WebGLFramebuffer;
   private prevTex!: WebGLTexture;
+
+  // Bloom FBO chain — progressively halved resolutions.
+  private static readonly BLOOM_LEVELS = 5;
+  private bloomFbos: WebGLFramebuffer[] = [];
+  private bloomTexs: WebGLTexture[] = [];
+  private bloomSizes: [number, number][] = [];
 
   private fboW = 0;
   private fboH = 0;
@@ -72,7 +82,9 @@ export class Renderer {
     this.circleProg = this.makeProgram(CIRCLE_VERT, CIRCLE_FRAG, ['u_viewport', 'u_camera', 'u_shake']);
     this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera', 'u_shake', 'u_time']);
     this.gridProg = this.makeProgram(GRID_VERT, GRID_FRAG, ['u_viewport', 'u_camera', 'u_time', 'u_arena_radius']);
-    this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene', 'u_prev', 'u_persistence']);
+    this.bloomDownProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_DOWN_FRAG, ['u_src', 'u_texel']);
+    this.bloomUpProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_UP_FRAG, ['u_src', 'u_texel']);
+    this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene', 'u_bloom', 'u_prev', 'u_persistence']);
     this.copyProg = this.makeProgram(FULLSCREEN_VERT, COPY_FRAG, ['u_src']);
 
     this.setupBuffers();
@@ -251,14 +263,32 @@ export class Renderer {
     if (this.fbo) gl.deleteFramebuffer(this.fbo);
     if (this.prevTex) gl.deleteTexture(this.prevTex);
     if (this.prevFbo) gl.deleteFramebuffer(this.prevFbo);
+    for (const tex of this.bloomTexs) gl.deleteTexture(tex);
+    for (const fbo of this.bloomFbos) gl.deleteFramebuffer(fbo);
 
-    // Main scene FBO — mipmapped for bloom.
-    this.fboTex = this.makeTexture(width, height, true);
+    // Main scene FBO — no mipmaps needed (bloom uses FBO chain now).
+    this.fboTex = this.makeTexture(width, height, false);
     this.fbo = this.makeFbo(this.fboTex);
 
-    // Persistence FBO — non-mipmapped, just stores previous frame.
+    // Persistence FBO — stores previous frame for light trails.
     this.prevTex = this.makeTexture(width, height, false);
     this.prevFbo = this.makeFbo(this.prevTex);
+
+    // Bloom FBO chain at 1/2, 1/4, 1/8, 1/16, 1/32 resolution.
+    this.bloomFbos = [];
+    this.bloomTexs = [];
+    this.bloomSizes = [];
+    let bw = Math.max(1, width >> 1);
+    let bh = Math.max(1, height >> 1);
+    for (let i = 0; i < Renderer.BLOOM_LEVELS; i++) {
+      const tex = this.makeTexture(bw, bh, false);
+      const fbo = this.makeFbo(tex);
+      this.bloomTexs.push(tex);
+      this.bloomFbos.push(fbo);
+      this.bloomSizes.push([bw, bh]);
+      bw = Math.max(1, bw >> 1);
+      bh = Math.max(1, bh >> 1);
+    }
 
     // Clear the persistence buffer to black.
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.prevFbo);
@@ -342,11 +372,45 @@ export class Renderer {
 
     gl.bindVertexArray(null);
 
-    // ── Generate mipmaps for mip-based bloom ──
-    gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
-    gl.generateMipmap(gl.TEXTURE_2D);
+    // ── Bloom: multi-pass downsample → upsample chain ──
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(this.fullscreenVao);
 
-    // ── Pass 2: composite to screen with temporal persistence ──
+    // Downsample: scene → bloom[0] → bloom[1] → ... → bloom[N-1]
+    gl.useProgram(this.bloomDownProg.prog);
+    for (let i = 0; i < Renderer.BLOOM_LEVELS; i++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFbos[i]);
+      gl.viewport(0, 0, this.bloomSizes[i][0], this.bloomSizes[i][1]);
+      const srcTex = i === 0 ? this.fboTex : this.bloomTexs[i - 1];
+      const srcW = i === 0 ? pixelWidth : this.bloomSizes[i - 1][0];
+      const srcH = i === 0 ? pixelHeight : this.bloomSizes[i - 1][1];
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.uniform1i(this.bloomDownProg.uniforms['u_src']!, 0);
+      gl.uniform2f(this.bloomDownProg.uniforms['u_texel']!, 1.0 / srcW, 1.0 / srcH);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+
+    // Upsample: bloom[N-1] → bloom[N-2] → ... → bloom[0] (additive)
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(this.bloomUpProg.prog);
+    for (let i = Renderer.BLOOM_LEVELS - 2; i >= 0; i--) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFbos[i]);
+      gl.viewport(0, 0, this.bloomSizes[i][0], this.bloomSizes[i][1]);
+      const srcTex = this.bloomTexs[i + 1];
+      const srcW = this.bloomSizes[i + 1][0];
+      const srcH = this.bloomSizes[i + 1][1];
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.uniform1i(this.bloomUpProg.uniforms['u_src']!, 0);
+      gl.uniform2f(this.bloomUpProg.uniforms['u_texel']!, 1.0 / srcW, 1.0 / srcH);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+
+    gl.bindVertexArray(null);
+
+    // ── Pass 2: composite to screen with bloom + temporal persistence ──
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, pixelWidth, pixelHeight);
     gl.disable(gl.BLEND);
@@ -358,14 +422,17 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
     gl.uniform1i(this.compositeProg.uniforms['u_scene']!, 0);
     gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.bloomTexs[0]);
+    gl.uniform1i(this.compositeProg.uniforms['u_bloom']!, 1);
+    gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.prevTex);
-    gl.uniform1i(this.compositeProg.uniforms['u_prev']!, 1);
+    gl.uniform1i(this.compositeProg.uniforms['u_prev']!, 2);
     gl.uniform1f(this.compositeProg.uniforms['u_persistence']!, 0.82);
     gl.bindVertexArray(this.fullscreenVao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
 
-    // ── Copy composited scene → prev texture for next frame's persistence ──
+    // ── Copy scene → prev texture for next frame's persistence ──
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.prevFbo);
     gl.blitFramebuffer(0, 0, pixelWidth, pixelHeight, 0, 0, pixelWidth, pixelHeight, gl.COLOR_BUFFER_BIT, gl.LINEAR);
