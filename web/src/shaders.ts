@@ -304,14 +304,17 @@ void main() {
 }
 `;
 
-// ─── Bloom downsample / upsample ─────────────────────────────────────────
-// Proper multi-pass dual-filter bloom: downsample through a chain of
-// progressively smaller FBOs, then upsample back up with additive blending.
-// Eliminates the blocky artifacts of single-sample mipmap-based bloom.
+// ─── Bloom: separable Gaussian ───────────────────────────────────────────
+// Architecture: scene→half-res (box downsample) → H→V × 2 cycles (Gaussian)
+//               → full-res (bilinear upsample) → composite.
+//
+// WHY separable: 2D Gaussian = G1D_H × G1D_V, which is radially symmetric.
+// A single-pass 2D grid kernel (tent/box) is a separable BOX filter, which
+// produces SQUARE bloom. Doing H then V with Gaussian weights produces
+// circular bloom with zero staircase/block artifacts regardless of resolution.
 
-// Downsample: 9-tap tent filter at ±2 texel offsets (wider kernel).
-// Wider offset compensates for fewer levels so total bloom spread is preserved.
-// u_texel is 1/source_resolution.
+// Downsample: 4-tap box filter. Maps 2×2 source pixels → 1 output pixel.
+// u_texel = 1/source_resolution.
 export const BLOOM_DOWN_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 
@@ -322,28 +325,77 @@ in vec2 v_uv;
 out vec4 fragColor;
 
 void main() {
-  vec3 a = texture(u_src, v_uv + vec2(-2.0, -2.0) * u_texel).rgb;
-  vec3 b = texture(u_src, v_uv + vec2( 0.0, -2.0) * u_texel).rgb;
-  vec3 c = texture(u_src, v_uv + vec2( 2.0, -2.0) * u_texel).rgb;
-  vec3 d = texture(u_src, v_uv + vec2(-2.0,  0.0) * u_texel).rgb;
-  vec3 e = texture(u_src, v_uv).rgb;
-  vec3 f = texture(u_src, v_uv + vec2( 2.0,  0.0) * u_texel).rgb;
-  vec3 g = texture(u_src, v_uv + vec2(-2.0,  2.0) * u_texel).rgb;
-  vec3 h = texture(u_src, v_uv + vec2( 0.0,  2.0) * u_texel).rgb;
-  vec3 i = texture(u_src, v_uv + vec2( 2.0,  2.0) * u_texel).rgb;
+  // Sample at ±0.5 texel — each bilinear tap averages a 2×2 source block.
+  vec3 a = texture(u_src, v_uv + vec2(-0.5, -0.5) * u_texel).rgb;
+  vec3 b = texture(u_src, v_uv + vec2( 0.5, -0.5) * u_texel).rgb;
+  vec3 c = texture(u_src, v_uv + vec2(-0.5,  0.5) * u_texel).rgb;
+  vec3 d = texture(u_src, v_uv + vec2( 0.5,  0.5) * u_texel).rgb;
+  fragColor = vec4((a + b + c + d) * 0.25, 1.0);
+}
+`;
 
-  vec3 col = e * 0.25
-           + (b + d + f + h) * 0.125
-           + (a + c + g + i) * 0.0625;
+// Horizontal 13-tap Gaussian pass (σ=2.0 in half-res texels = σ=4 screen px).
+// u_texel = 1/source_resolution (half-res FBO).
+export const BLOOM_H_FRAG = /* glsl */ `#version 300 es
+precision highp float;
 
+uniform sampler2D u_src;
+uniform vec2 u_texel;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+  vec3 col =
+    texture(u_src, v_uv + vec2(-6.0, 0.0) * u_texel).rgb * 0.0022 +
+    texture(u_src, v_uv + vec2(-5.0, 0.0) * u_texel).rgb * 0.0088 +
+    texture(u_src, v_uv + vec2(-4.0, 0.0) * u_texel).rgb * 0.0270 +
+    texture(u_src, v_uv + vec2(-3.0, 0.0) * u_texel).rgb * 0.0649 +
+    texture(u_src, v_uv + vec2(-2.0, 0.0) * u_texel).rgb * 0.1211 +
+    texture(u_src, v_uv + vec2(-1.0, 0.0) * u_texel).rgb * 0.1760 +
+    texture(u_src, v_uv                  ).rgb * 0.1997 +
+    texture(u_src, v_uv + vec2( 1.0, 0.0) * u_texel).rgb * 0.1760 +
+    texture(u_src, v_uv + vec2( 2.0, 0.0) * u_texel).rgb * 0.1211 +
+    texture(u_src, v_uv + vec2( 3.0, 0.0) * u_texel).rgb * 0.0649 +
+    texture(u_src, v_uv + vec2( 4.0, 0.0) * u_texel).rgb * 0.0270 +
+    texture(u_src, v_uv + vec2( 5.0, 0.0) * u_texel).rgb * 0.0088 +
+    texture(u_src, v_uv + vec2( 6.0, 0.0) * u_texel).rgb * 0.0022;
   fragColor = vec4(col, 1.0);
 }
 `;
 
-// Upsample: 9-tap tent filter at ±2 texel offsets (wider spread per pass).
-// Using wider offsets instead of ±1 gives more diffusion per upsample step,
-// keeping the bloom cloud soft with only 3 levels in the chain.
-// u_texel is 1/source_resolution.
+// Vertical 13-tap Gaussian pass (σ=2.0 in half-res texels = σ=4 screen px).
+// Applied after BLOOM_H_FRAG; H×V = circular 2D Gaussian — no square bloom.
+export const BLOOM_V_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+
+uniform sampler2D u_src;
+uniform vec2 u_texel;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+  vec3 col =
+    texture(u_src, v_uv + vec2(0.0, -6.0) * u_texel).rgb * 0.0022 +
+    texture(u_src, v_uv + vec2(0.0, -5.0) * u_texel).rgb * 0.0088 +
+    texture(u_src, v_uv + vec2(0.0, -4.0) * u_texel).rgb * 0.0270 +
+    texture(u_src, v_uv + vec2(0.0, -3.0) * u_texel).rgb * 0.0649 +
+    texture(u_src, v_uv + vec2(0.0, -2.0) * u_texel).rgb * 0.1211 +
+    texture(u_src, v_uv + vec2(0.0, -1.0) * u_texel).rgb * 0.1760 +
+    texture(u_src, v_uv                  ).rgb * 0.1997 +
+    texture(u_src, v_uv + vec2(0.0,  1.0) * u_texel).rgb * 0.1760 +
+    texture(u_src, v_uv + vec2(0.0,  2.0) * u_texel).rgb * 0.1211 +
+    texture(u_src, v_uv + vec2(0.0,  3.0) * u_texel).rgb * 0.0649 +
+    texture(u_src, v_uv + vec2(0.0,  4.0) * u_texel).rgb * 0.0270 +
+    texture(u_src, v_uv + vec2(0.0,  5.0) * u_texel).rgb * 0.0088 +
+    texture(u_src, v_uv + vec2(0.0,  6.0) * u_texel).rgb * 0.0022;
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+// Final upsample: simple bilinear blit from half-res bloom to full-res.
+// GL_LINEAR on the FBO texture handles the interpolation automatically.
 export const BLOOM_UP_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 
@@ -354,21 +406,7 @@ in vec2 v_uv;
 out vec4 fragColor;
 
 void main() {
-  vec3 a = texture(u_src, v_uv + vec2(-2.0, -2.0) * u_texel).rgb;
-  vec3 b = texture(u_src, v_uv + vec2( 0.0, -2.0) * u_texel).rgb;
-  vec3 c = texture(u_src, v_uv + vec2( 2.0, -2.0) * u_texel).rgb;
-  vec3 d = texture(u_src, v_uv + vec2(-2.0,  0.0) * u_texel).rgb;
-  vec3 e = texture(u_src, v_uv).rgb;
-  vec3 f = texture(u_src, v_uv + vec2( 2.0,  0.0) * u_texel).rgb;
-  vec3 g = texture(u_src, v_uv + vec2(-2.0,  2.0) * u_texel).rgb;
-  vec3 h = texture(u_src, v_uv + vec2( 0.0,  2.0) * u_texel).rgb;
-  vec3 i = texture(u_src, v_uv + vec2( 2.0,  2.0) * u_texel).rgb;
-
-  vec3 col = e * 4.0
-           + (b + d + f + h) * 2.0
-           + (a + c + g + i);
-
-  fragColor = vec4(col / 16.0, 1.0);
+  fragColor = vec4(texture(u_src, v_uv).rgb, 1.0);
 }
 `;
 
@@ -411,11 +449,10 @@ void main() {
   vec3 prev = texture(u_prev, v_uv).rgb;
   base = max(base, prev * u_persistence);
 
-  // Bloom from multi-pass dual-filter chain.
-  // Multiplier bumped 0.7→1.2 to compensate for 3 levels vs 5 (less accumulation).
+  // Bloom from separable Gaussian chain (H+V × 2 cycles at half-res).
   vec3 bloom = texture(u_bloom, v_uv).rgb;
 
-  vec3 col = base + bloom * 1.2;
+  vec3 col = base + bloom * 1.5;
 
   // Vignette — subtle darkening at edges.
   col *= 1.0 - length(dir) * 0.5;

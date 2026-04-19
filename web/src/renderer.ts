@@ -8,7 +8,9 @@ import {
   BEAM_FRAG,
   BEAM_VERT,
   BLOOM_DOWN_FRAG,
+  BLOOM_H_FRAG,
   BLOOM_UP_FRAG,
+  BLOOM_V_FRAG,
   CIRCLE_FRAG,
   CIRCLE_VERT,
   COMPOSITE_FRAG,
@@ -37,6 +39,8 @@ export class Renderer {
   private beamProg!: Program;
   private gridProg!: Program;
   private bloomDownProg!: Program;
+  private bloomHProg!: Program;
+  private bloomVProg!: Program;
   private bloomUpProg!: Program;
   private compositeProg!: Program;
   private copyProg!: Program;
@@ -57,10 +61,9 @@ export class Renderer {
   private prevFbo!: WebGLFramebuffer;
   private prevTex!: WebGLTexture;
 
-  // Bloom FBO chain — progressively halved resolutions.
-  // 3 levels = 1/2, 1/4, 1/8 res. Coarsest texel = 8×8 screen px at 1280×720.
-  // (5 levels caused 1/32 res = 40×22px, producing 32×32px rectangular blobs.)
-  private static readonly BLOOM_LEVELS = 3;
+  // Two half-res pingpong FBOs for separable Gaussian bloom (H→V × 2 cycles).
+  // bloom[0] and bloom[1] are both at 1/2 resolution — no progressive halving.
+  private static readonly BLOOM_LEVELS = 2;
   private bloomFbos: WebGLFramebuffer[] = [];
   private bloomTexs: WebGLTexture[] = [];
   private bloomSizes: [number, number][] = [];
@@ -90,6 +93,8 @@ export class Renderer {
     this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera', 'u_shake', 'u_time']);
     this.gridProg = this.makeProgram(GRID_VERT, GRID_FRAG, ['u_viewport', 'u_camera', 'u_time', 'u_arena_radius']);
     this.bloomDownProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_DOWN_FRAG, ['u_src', 'u_texel']);
+    this.bloomHProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_H_FRAG, ['u_src', 'u_texel']);
+    this.bloomVProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_V_FRAG, ['u_src', 'u_texel']);
     this.bloomUpProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_UP_FRAG, ['u_src', 'u_texel']);
     this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene', 'u_bloom', 'u_prev', 'u_persistence']);
     this.copyProg = this.makeProgram(FULLSCREEN_VERT, COPY_FRAG, ['u_src']);
@@ -283,20 +288,18 @@ export class Renderer {
     this.prevTex = this.makeTexture(width, height, false);
     this.prevFbo = this.makeFbo(this.prevTex);
 
-    // Bloom FBO chain at 1/2, 1/4, 1/8, 1/16, 1/32 resolution.
+    // Both bloom FBOs at the same half-res — used as pingpong for separable Gaussian.
     this.bloomFbos = [];
     this.bloomTexs = [];
     this.bloomSizes = [];
-    let bw = Math.max(1, width >> 1);
-    let bh = Math.max(1, height >> 1);
+    const bw = Math.max(1, width >> 1);
+    const bh = Math.max(1, height >> 1);
     for (let i = 0; i < Renderer.BLOOM_LEVELS; i++) {
       const tex = this.makeTexture(bw, bh, false);
       const fbo = this.makeFbo(tex);
       this.bloomTexs.push(tex);
       this.bloomFbos.push(fbo);
       this.bloomSizes.push([bw, bh]);
-      bw = Math.max(1, bw >> 1);
-      bh = Math.max(1, bh >> 1);
     }
 
     // Full-resolution bloom output FBO.
@@ -385,45 +388,52 @@ export class Renderer {
 
     gl.bindVertexArray(null);
 
-    // ── Bloom: multi-pass downsample → upsample chain ──
+    // ── Bloom: separable Gaussian (H→V × 2 cycles) at half-res ──
+    // Produces a circular 2D Gaussian — no square/staircase artifacts.
+    // Pipeline: scene → box downsample → [H→V] × 2 → bilinear upsample → bloomOut
     gl.disable(gl.BLEND);
     gl.bindVertexArray(this.fullscreenVao);
 
-    // Downsample: scene → bloom[0] → bloom[1] → ... → bloom[N-1]
+    const [bloomW, bloomH] = this.bloomSizes[0];
+    const bTexelX = 1.0 / bloomW;
+    const bTexelY = 1.0 / bloomH;
+
+    // Step 0: 4-tap box downsample — scene (full-res) → bloom[0] (half-res).
     gl.useProgram(this.bloomDownProg.prog);
-    for (let i = 0; i < Renderer.BLOOM_LEVELS; i++) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFbos[i]);
-      gl.viewport(0, 0, this.bloomSizes[i][0], this.bloomSizes[i][1]);
-      const srcTex = i === 0 ? this.fboTex : this.bloomTexs[i - 1];
-      const srcW = i === 0 ? pixelWidth : this.bloomSizes[i - 1][0];
-      const srcH = i === 0 ? pixelHeight : this.bloomSizes[i - 1][1];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFbos[0]);
+    gl.viewport(0, 0, bloomW, bloomH);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
+    gl.uniform1i(this.bloomDownProg.uniforms['u_src']!, 0);
+    gl.uniform2f(this.bloomDownProg.uniforms['u_texel']!, 1.0 / pixelWidth, 1.0 / pixelHeight);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // Steps 1-4: two H→V Gaussian cycles (pingpong between bloom[0] and bloom[1]).
+    // After cycle 1: σ = 2.0 half-res texels = 4 screen px per axis.
+    // After cycle 2: σ = 2√2 ≈ 2.83 half-res texels = ~5.7 screen px (circular).
+    for (let cycle = 0; cycle < 2; cycle++) {
+      // Horizontal pass: bloom[0] → bloom[1]
+      gl.useProgram(this.bloomHProg.prog);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFbos[1]);
+      gl.viewport(0, 0, bloomW, bloomH);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, srcTex);
-      gl.uniform1i(this.bloomDownProg.uniforms['u_src']!, 0);
-      gl.uniform2f(this.bloomDownProg.uniforms['u_texel']!, 1.0 / srcW, 1.0 / srcH);
+      gl.bindTexture(gl.TEXTURE_2D, this.bloomTexs[0]);
+      gl.uniform1i(this.bloomHProg.uniforms['u_src']!, 0);
+      gl.uniform2f(this.bloomHProg.uniforms['u_texel']!, bTexelX, bTexelY);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      // Vertical pass: bloom[1] → bloom[0]
+      gl.useProgram(this.bloomVProg.prog);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFbos[0]);
+      gl.viewport(0, 0, bloomW, bloomH);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.bloomTexs[1]);
+      gl.uniform1i(this.bloomVProg.uniforms['u_src']!, 0);
+      gl.uniform2f(this.bloomVProg.uniforms['u_texel']!, bTexelX, bTexelY);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
-    // Upsample: bloom[N-1] → bloom[N-2] → ... → bloom[0] (additive)
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE);
-    gl.useProgram(this.bloomUpProg.prog);
-    for (let i = Renderer.BLOOM_LEVELS - 2; i >= 0; i--) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFbos[i]);
-      gl.viewport(0, 0, this.bloomSizes[i][0], this.bloomSizes[i][1]);
-      const srcTex = this.bloomTexs[i + 1];
-      const srcW = this.bloomSizes[i + 1][0];
-      const srcH = this.bloomSizes[i + 1][1];
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, srcTex);
-      gl.uniform1i(this.bloomUpProg.uniforms['u_src']!, 0);
-      gl.uniform2f(this.bloomUpProg.uniforms['u_texel']!, 1.0 / srcW, 1.0 / srcH);
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-    }
-
-    // Final upsample: bloom[0] (half-res) → bloomOut (full-res).
-    // This eliminates magnification artifacts from reading half-res in composite.
-    gl.disable(gl.BLEND);
+    // Step 5: bilinear upsample bloom[0] (half-res) → bloomOut (full-res).
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomOutFbo);
     gl.viewport(0, 0, pixelWidth, pixelHeight);
     gl.clearColor(0, 0, 0, 0);
@@ -432,7 +442,7 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.bloomTexs[0]);
     gl.uniform1i(this.bloomUpProg.uniforms['u_src']!, 0);
-    gl.uniform2f(this.bloomUpProg.uniforms['u_texel']!, 1.0 / this.bloomSizes[0][0], 1.0 / this.bloomSizes[0][1]);
+    gl.uniform2f(this.bloomUpProg.uniforms['u_texel']!, bTexelX, bTexelY);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     gl.bindVertexArray(null);
