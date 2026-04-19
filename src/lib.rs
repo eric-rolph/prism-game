@@ -179,4 +179,8 @@ impl Game {
     pub fn is_victory(&self) -> bool {
         self.inner.is_victory()
     }
+
+    pub fn arena_radius(&self) -> f32 {
+        self.inner.arena_radius()
+    }
 }

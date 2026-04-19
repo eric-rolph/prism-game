@@ -1,7 +1,8 @@
-// WebGL2 renderer for Prism. Renders geometry (additively blended) into an
-// offscreen RGBA8 framebuffer, generates mipmaps, then does a full-screen
-// composite pass with mip-based bloom, radial chromatic aberration, vignette,
-// and tonemapping.
+// WebGL2 renderer for Prism. Multi-pass pipeline:
+//   1. Background grid (parallax hex grid + arena boundary)
+//   2. Geometry pass: beams (spectral fringe + energy ripple) + circles → HDR FBO
+//   3. Mipmap bloom generation
+//   4. Composite: chromatic aberration + temporal persistence + bloom + vignette + tonemap
 
 import {
   BEAM_FRAG,
@@ -9,7 +10,10 @@ import {
   CIRCLE_FRAG,
   CIRCLE_VERT,
   COMPOSITE_FRAG,
+  COPY_FRAG,
   FULLSCREEN_VERT,
+  GRID_FRAG,
+  GRID_VERT,
 } from './shaders.js';
 
 const CIRCLE_STRIDE_FLOATS = 8;
@@ -29,7 +33,9 @@ export class Renderer {
 
   private circleProg!: Program;
   private beamProg!: Program;
+  private gridProg!: Program;
   private compositeProg!: Program;
+  private copyProg!: Program;
 
   private quadBuf!: WebGLBuffer;
   private circleInstanceBuf!: WebGLBuffer;
@@ -39,8 +45,14 @@ export class Renderer {
   private beamVao!: WebGLVertexArrayObject;
   private fullscreenVao!: WebGLVertexArrayObject;
 
+  // Main scene FBO (HDR, mipmapped for bloom).
   private fbo!: WebGLFramebuffer;
   private fboTex!: WebGLTexture;
+
+  // Persistence FBO — stores previous frame for light trails.
+  private prevFbo!: WebGLFramebuffer;
+  private prevTex!: WebGLTexture;
+
   private fboW = 0;
   private fboH = 0;
   private hasColorBufferFloat = false;
@@ -55,13 +67,13 @@ export class Renderer {
     this.gl = gl;
 
     // EXT_color_buffer_float is required for RGBA16F render targets in WebGL2.
-    // The extension object itself is unused — calling getExtension() is the
-    // activation step.  If it's missing we fall back to RGBA8 in resize().
     this.hasColorBufferFloat = !!gl.getExtension('EXT_color_buffer_float');
 
     this.circleProg = this.makeProgram(CIRCLE_VERT, CIRCLE_FRAG, ['u_viewport', 'u_camera', 'u_shake']);
-    this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera', 'u_shake']);
-    this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene']);
+    this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera', 'u_shake', 'u_time']);
+    this.gridProg = this.makeProgram(GRID_VERT, GRID_FRAG, ['u_viewport', 'u_camera', 'u_time', 'u_arena_radius']);
+    this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene', 'u_prev', 'u_persistence']);
+    this.copyProg = this.makeProgram(FULLSCREEN_VERT, COPY_FRAG, ['u_src']);
 
     this.setupBuffers();
   }
@@ -197,39 +209,61 @@ export class Renderer {
 
   // ─── Resize / FBO ───────────────────────────────────────────────────────
 
+  private makeTexture(width: number, height: number, mipmapped: boolean): WebGLTexture {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    if (!tex) throw new Error('createTexture failed');
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    if (this.hasColorBufferFloat) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmapped ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  private makeFbo(tex: WebGLTexture): WebGLFramebuffer {
+    const gl = this.gl;
+    const fbo = gl.createFramebuffer();
+    if (!fbo) throw new Error('createFramebuffer failed');
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error(`FBO incomplete: 0x${status.toString(16)}`);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return fbo;
+  }
+
   resize(width: number, height: number) {
     const gl = this.gl;
     if (width === this.fboW && height === this.fboH && this.fbo) return;
     this.fboW = width;
     this.fboH = height;
 
+    // Clean up old resources.
     if (this.fboTex) gl.deleteTexture(this.fboTex);
     if (this.fbo) gl.deleteFramebuffer(this.fbo);
+    if (this.prevTex) gl.deleteTexture(this.prevTex);
+    if (this.prevFbo) gl.deleteFramebuffer(this.prevFbo);
 
-    const tex = gl.createTexture();
-    if (!tex) throw new Error('createTexture failed');
-    this.fboTex = tex;
-    gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
-    // RGBA16F gives proper HDR bloom; RGBA8 is the safe fallback.
-    if (this.hasColorBufferFloat) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
-    } else {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    }
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // Main scene FBO — mipmapped for bloom.
+    this.fboTex = this.makeTexture(width, height, true);
+    this.fbo = this.makeFbo(this.fboTex);
 
-    const fbo = gl.createFramebuffer();
-    if (!fbo) throw new Error('createFramebuffer failed');
-    this.fbo = fbo;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.fboTex, 0);
-    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-    if (status !== gl.FRAMEBUFFER_COMPLETE) {
-      throw new Error(`FBO incomplete: 0x${status.toString(16)}`);
-    }
+    // Persistence FBO — non-mipmapped, just stores previous frame.
+    this.prevTex = this.makeTexture(width, height, false);
+    this.prevFbo = this.makeFbo(this.prevTex);
+
+    // Clear the persistence buffer to black.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.prevFbo);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
@@ -246,12 +280,13 @@ export class Renderer {
     beamData: Float32Array,
     beamCount: number,
     shake: [number, number] = [0, 0],
+    time: number = 0,
+    arenaRadius: number = 1200,
   ) {
     const gl = this.gl;
     this.resize(pixelWidth, pixelHeight);
 
-    // Upload instance data. bufferData with the full ArrayBuffer view, sized
-    // to exactly the count we're drawing — keeps uploads small.
+    // Upload instance data.
     if (circleCount > 0) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.circleInstanceBuf);
       gl.bufferData(gl.ARRAY_BUFFER, circleData.subarray(0, circleCount * CIRCLE_STRIDE_FLOATS), gl.STREAM_DRAW);
@@ -270,17 +305,28 @@ export class Renderer {
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE); // additive
     gl.disable(gl.DEPTH_TEST);
 
+    // Background grid: alpha blend, not additive, so it stays subtle.
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(this.gridProg.prog);
+    gl.uniform2f(this.gridProg.uniforms['u_viewport']!, viewWidth, viewHeight);
+    gl.uniform2f(this.gridProg.uniforms['u_camera']!, camera[0], camera[1]);
+    gl.uniform1f(this.gridProg.uniforms['u_time']!, time);
+    gl.uniform1f(this.gridProg.uniforms['u_arena_radius']!, arenaRadius);
+    gl.bindVertexArray(this.fullscreenVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // Switch to additive blending for game geometry.
+    gl.blendFunc(gl.ONE, gl.ONE);
+
     // Beams first, then circles — so the player and enemy cores overlay beam trails.
-    // Note: u_viewport is in world units (CSS pixels), not device pixels —
-    // the shader's world↔clip math is independent of the backbuffer resolution.
     if (beamCount > 0) {
       gl.useProgram(this.beamProg.prog);
       gl.uniform2f(this.beamProg.uniforms['u_viewport']!, viewWidth, viewHeight);
       gl.uniform2f(this.beamProg.uniforms['u_camera']!, camera[0], camera[1]);
       gl.uniform2f(this.beamProg.uniforms['u_shake']!, shake[0], shake[1]);
+      gl.uniform1f(this.beamProg.uniforms['u_time']!, time);
       gl.bindVertexArray(this.beamVao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, beamCount);
     }
@@ -300,7 +346,7 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
     gl.generateMipmap(gl.TEXTURE_2D);
 
-    // ── Pass 2: composite to screen ──
+    // ── Pass 2: composite to screen with temporal persistence ──
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, pixelWidth, pixelHeight);
     gl.disable(gl.BLEND);
@@ -311,8 +357,19 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.fboTex);
     gl.uniform1i(this.compositeProg.uniforms['u_scene']!, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.prevTex);
+    gl.uniform1i(this.compositeProg.uniforms['u_prev']!, 1);
+    gl.uniform1f(this.compositeProg.uniforms['u_persistence']!, 0.82);
     gl.bindVertexArray(this.fullscreenVao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
+
+    // ── Copy composited scene → prev texture for next frame's persistence ──
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.prevFbo);
+    gl.blitFramebuffer(0, 0, pixelWidth, pixelHeight, 0, 0, pixelWidth, pixelHeight, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
   }
 }

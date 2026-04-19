@@ -381,7 +381,7 @@ async function main(): Promise<void> {
       waveLabelEl.textContent = `WAVE ${wave + 1}`;
       lastWave = wave;
     }
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < SHARDS.length; i++) {
       const lvl = game.inventory_level(i);
       if (lvl !== lastPipLevels[i]) {
         const pip = pips[i]!;
@@ -405,6 +405,8 @@ async function main(): Promise<void> {
       circlesView, circlesLen,
       beamsView, beamsLen,
       [game.shake_x(), game.shake_y()],
+      now / 1000,
+      game.arena_radius(),
     );
 
     // FPS readout ~2×/s.

@@ -118,6 +118,9 @@ const PROJ_LIFETIME: f32 = 4.0;
 // Crystal obstacles.
 const MAX_CRYSTALS: usize = 6;
 const CRYSTAL_SPAWN_INTERVAL: f32 = 45.0;
+
+// Arena boundary.
+const ARENA_RADIUS: f32 = 1200.0;
 const CRYSTAL_FIRST_WAVE: u32 = 3;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -326,6 +329,9 @@ impl Game {
     }
     pub fn wave(&self) -> u32 {
         self.wave
+    }
+    pub fn arena_radius(&self) -> f32 {
+        ARENA_RADIUS
     }
     pub fn inventory_level(&self, kind_idx: u8) -> u8 {
         ShardKind::from_index(kind_idx)
@@ -599,8 +605,13 @@ impl Game {
                 self.crystal_spawn_timer = CRYSTAL_SPAWN_INTERVAL;
                 let spawn_radius = self.screen_size.length() * 0.6;
                 let angle = self.rng.angle();
-                let pos = self.player.pos + Vec2::new(angle.cos(), angle.sin()) * spawn_radius;
+                let mut pos = self.player.pos + Vec2::new(angle.cos(), angle.sin()) * spawn_radius;
                 let radius = self.rng.range(35.0, 70.0);
+                // Clamp crystal inside arena.
+                let d = pos.length();
+                if d > ARENA_RADIUS - radius {
+                    pos = pos.normalize_or_zero() * (ARENA_RADIUS - radius);
+                }
                 let drift_angle = self.rng.angle();
                 let drift_speed = self.rng.range(15.0, 25.0);
                 self.crystals.push(Crystal {
@@ -622,6 +633,14 @@ impl Game {
                 self.player.pos += push;
             }
         }
+        // Arena boundary — clamp player inside.
+        {
+            let d = self.player.pos.length();
+            let limit = ARENA_RADIUS - self.player.radius;
+            if d > limit {
+                self.player.pos = self.player.pos.normalize_or_zero() * limit;
+            }
+        }
         // Crystal-enemy collision (Dashers crash and take damage, others push away).
         for c in &self.crystals {
             for e in &mut self.enemies {
@@ -635,6 +654,14 @@ impl Game {
                     let push = to_enemy.normalize_or_zero() * (c.radius + e.radius - dist);
                     e.pos += push;
                 }
+            }
+        }
+        // Arena boundary — clamp enemies inside.
+        for e in &mut self.enemies {
+            let d = e.pos.length();
+            let limit = ARENA_RADIUS - e.radius;
+            if d > limit {
+                e.pos = e.pos.normalize_or_zero() * limit;
             }
         }
 
@@ -1219,7 +1246,12 @@ impl Game {
         let spawn_radius = self.screen_size.length() * 0.55;
         let angle = self.rng.angle();
         let dir = Vec2::new(angle.cos(), angle.sin());
-        let pos = self.player.pos + dir * spawn_radius;
+        let mut pos = self.player.pos + dir * spawn_radius;
+        // Clamp spawn inside arena.
+        let d = pos.length();
+        if d > ARENA_RADIUS - radius {
+            pos = pos.normalize_or_zero() * (ARENA_RADIUS - radius);
+        }
         let speed = speed * self.rng.range(0.85, 1.15);
 
         // Store per-enemy data in charge_dir: Orbiters use x for orbit radius.
