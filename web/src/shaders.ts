@@ -328,6 +328,17 @@ uniform float u_persistence;
 in vec2 v_uv;
 out vec4 fragColor;
 
+// 5-tap cross filter at a given mip level to smooth out block boundaries.
+vec3 bloomTap(sampler2D tex, vec2 uv, float lod, vec2 off) {
+  return (
+    textureLod(tex, uv, lod).rgb * 4.0 +
+    textureLod(tex, uv + vec2(off.x, 0.0), lod).rgb +
+    textureLod(tex, uv - vec2(off.x, 0.0), lod).rgb +
+    textureLod(tex, uv + vec2(0.0, off.y), lod).rgb +
+    textureLod(tex, uv - vec2(0.0, off.y), lod).rgb
+  ) / 8.0;
+}
+
 void main() {
   vec2 dir = v_uv - 0.5;
 
@@ -343,12 +354,14 @@ void main() {
   vec3 prev = texture(u_prev, v_uv).rgb;
   base = max(base, prev * u_persistence);
 
-  // Four-tap mip-based bloom with improved weighting.
-  vec3 bloom =
-      textureLod(u_scene, v_uv, 1.0).rgb * 0.15
-    + textureLod(u_scene, v_uv, 2.0).rgb * 0.30
-    + textureLod(u_scene, v_uv, 4.0).rgb * 0.35
-    + textureLod(u_scene, v_uv, 6.0).rgb * 0.20;
+  // Multi-tap bloom — 5-tap cross per mip level to eliminate blocky artifacts.
+  // Offset scales with mip level so the blur grows proportionally.
+  vec2 texel = 1.0 / vec2(textureSize(u_scene, 0));
+  vec3 bloom = bloomTap(u_scene, v_uv, 1.0, texel * 2.0)  * 0.10
+             + bloomTap(u_scene, v_uv, 2.0, texel * 4.0)  * 0.20
+             + bloomTap(u_scene, v_uv, 3.0, texel * 8.0)  * 0.30
+             + bloomTap(u_scene, v_uv, 4.0, texel * 16.0) * 0.25
+             + bloomTap(u_scene, v_uv, 5.0, texel * 32.0) * 0.15;
 
   vec3 col = base + bloom * 0.7;
 
