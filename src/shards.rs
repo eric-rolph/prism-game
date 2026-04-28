@@ -89,7 +89,12 @@ impl Inventory {
     /// shards (Siphon, Barrier) are offered less frequently after level 2.
     /// At least one offensive shard is always included if possible.
     pub fn roll_choices(&self, rng: &mut Rng) -> [Option<ShardKind>; 3] {
-        let defensive = [ShardKind::Siphon, ShardKind::Barrier, ShardKind::Frost, ShardKind::Thorns];
+        let defensive = [
+            ShardKind::Siphon,
+            ShardKind::Barrier,
+            ShardKind::Frost,
+            ShardKind::Thorns,
+        ];
 
         let mut candidates: Vec<(ShardKind, f32)> = (0..SHARD_COUNT as u8)
             .filter_map(ShardKind::from_index)
@@ -97,7 +102,11 @@ impl Inventory {
             .map(|s| {
                 let weight = match s {
                     ShardKind::Siphon | ShardKind::Barrier => {
-                        if self.levels[s.as_index()] >= 2 { 0.4 } else { 1.0 }
+                        if self.levels[s.as_index()] >= 2 {
+                            0.4
+                        } else {
+                            1.0
+                        }
                     }
                     _ => 1.0,
                 };
@@ -111,7 +120,9 @@ impl Inventory {
                 break;
             }
             let total: f32 = candidates.iter().map(|(_, w)| w).sum();
-            if total <= 0.0 { break; }
+            if total <= 0.0 {
+                break;
+            }
             let mut roll = (rng.next_u32() as f64 / u32::MAX as f64) as f32 * total;
             let mut pick = 0;
             for (i, (_, w)) in candidates.iter().enumerate() {
@@ -125,7 +136,11 @@ impl Inventory {
         }
 
         // Guarantee at least one offensive option if all 3 are defensive.
-        if result.iter().filter_map(|r| *r).all(|s| defensive.contains(&s)) {
+        if result
+            .iter()
+            .filter_map(|r| *r)
+            .all(|s| defensive.contains(&s))
+        {
             let offensive: Vec<ShardKind> = (0..SHARD_COUNT as u8)
                 .filter_map(ShardKind::from_index)
                 .filter(|s| !self.is_maxed(*s) && !defensive.contains(s))
@@ -152,50 +167,76 @@ impl Inventory {
 pub fn synergy_for(kind: ShardKind) -> &'static [(ShardKind, &'static str, &'static str)] {
     match kind {
         ShardKind::Split => &[
-            (ShardKind::Cascade, "CHAIN REACTION", "cascade beams also fan out"),
-            (ShardKind::Frost, "BLIZZARD", "frozen enemies take +40% beam damage"),
+            (
+                ShardKind::Cascade,
+                "CHAIN REACTION",
+                "cascade beams also fan out",
+            ),
+            (
+                ShardKind::Frost,
+                "BLIZZARD",
+                "frozen enemies take +40% beam damage",
+            ),
         ],
-        ShardKind::Cascade => &[
-            (ShardKind::Split, "CHAIN REACTION", "cascade beams also fan out"),
-        ],
-        ShardKind::Mirror => &[
-            (ShardKind::Diffract, "SUPERNOVA", "diffract bursts are 2x larger"),
-        ],
-        ShardKind::Diffract => &[
-            (ShardKind::Mirror, "SUPERNOVA", "diffract bursts are 2x larger"),
-        ],
-        ShardKind::Lens => &[
-            (ShardKind::Chromatic, "PRISM CANNON", "RGB beams deal +50% damage"),
-        ],
-        ShardKind::Chromatic => &[
-            (ShardKind::Lens, "PRISM CANNON", "RGB beams deal +50% damage"),
-        ],
-        ShardKind::Refract => &[
-            (ShardKind::Echo, "TRACKING ECHO", "echo salvos home 2x harder"),
-        ],
-        ShardKind::Echo => &[
-            (ShardKind::Refract, "TRACKING ECHO", "echo salvos home 2x harder"),
-        ],
-        ShardKind::Halo => &[
-            (ShardKind::Frost, "FROZEN ORBIT", "halo beads slow enemies"),
-        ],
+        ShardKind::Cascade => &[(
+            ShardKind::Split,
+            "CHAIN REACTION",
+            "cascade beams also fan out",
+        )],
+        ShardKind::Mirror => &[(
+            ShardKind::Diffract,
+            "SUPERNOVA",
+            "diffract bursts are 2x larger",
+        )],
+        ShardKind::Diffract => &[(
+            ShardKind::Mirror,
+            "SUPERNOVA",
+            "diffract bursts are 2x larger",
+        )],
+        ShardKind::Lens => &[(
+            ShardKind::Chromatic,
+            "PRISM CANNON",
+            "RGB beams deal +50% damage",
+        )],
+        ShardKind::Chromatic => &[(
+            ShardKind::Lens,
+            "PRISM CANNON",
+            "RGB beams deal +50% damage",
+        )],
+        ShardKind::Refract => &[(
+            ShardKind::Echo,
+            "TRACKING ECHO",
+            "echo salvos home 2x harder",
+        )],
+        ShardKind::Echo => &[(
+            ShardKind::Refract,
+            "TRACKING ECHO",
+            "echo salvos home 2x harder",
+        )],
+        ShardKind::Halo => &[(ShardKind::Frost, "FROZEN ORBIT", "halo beads slow enemies")],
         ShardKind::Frost => &[
             (ShardKind::Halo, "FROZEN ORBIT", "halo beads slow enemies"),
-            (ShardKind::Split, "BLIZZARD", "frozen enemies take +40% beam damage"),
+            (
+                ShardKind::Split,
+                "BLIZZARD",
+                "frozen enemies take +40% beam damage",
+            ),
         ],
-        ShardKind::Siphon => &[
-            (ShardKind::Thorns, "BLOOD PACT", "thorns shots also heal"),
-        ],
+        ShardKind::Siphon => &[(ShardKind::Thorns, "BLOOD PACT", "thorns shots also heal")],
         ShardKind::Thorns => &[
             (ShardKind::Siphon, "BLOOD PACT", "thorns shots also heal"),
-            (ShardKind::Cascade, "MARTYRDOM", "thorns kills trigger cascade"),
+            (
+                ShardKind::Cascade,
+                "MARTYRDOM",
+                "thorns kills trigger cascade",
+            ),
         ],
-        ShardKind::Barrier => &[
-            (ShardKind::Interference, "RESONANCE", "barrier pulses on hit"),
-        ],
-        ShardKind::Interference => &[
-            (ShardKind::Barrier, "RESONANCE", "barrier pulses on hit"),
-        ],
+        ShardKind::Barrier => &[(
+            ShardKind::Interference,
+            "RESONANCE",
+            "barrier pulses on hit",
+        )],
+        ShardKind::Interference => &[(ShardKind::Barrier, "RESONANCE", "barrier pulses on hit")],
     }
 }
 
@@ -264,7 +305,12 @@ pub fn compose_salvo(
     // Stage 4: curve-fit each straight beam into a homing polyline.
     // Synergy: TRACKING ECHO (Refract+Echo 3+) — double homing blend.
     let homing_boost = inventory.has_synergy(ShardKind::Refract, ShardKind::Echo);
-    beams = apply_refract(&beams, enemies, inventory.level(ShardKind::Refract), homing_boost);
+    beams = apply_refract(
+        &beams,
+        enemies,
+        inventory.level(ShardKind::Refract),
+        homing_boost,
+    );
 
     // Final hard cap.
     beams.truncate(MAX_SALVO_BEAMS);
@@ -355,7 +401,12 @@ fn apply_chromatic(beams: &mut Vec<BeamRequest>, level: u8) {
     }
 }
 
-fn apply_refract(beams: &[BeamRequest], enemies: &[Enemy], level: u8, homing_boost: bool) -> Vec<BeamRequest> {
+fn apply_refract(
+    beams: &[BeamRequest],
+    enemies: &[Enemy],
+    level: u8,
+    homing_boost: bool,
+) -> Vec<BeamRequest> {
     if level == 0 {
         return beams.to_vec();
     }

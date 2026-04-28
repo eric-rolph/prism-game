@@ -4,11 +4,14 @@
 //! when the player is in the middle of a level-up choice (pause), so the
 //! JS side can show a picker UI in response to `is_leveling_up()`.
 
-use crate::entities::{Beam, Crystal, Enemy, EnemyKind, EnemyState, Halo, InterferencePulse, Particle, Player, Projectile, XpGem};
+use crate::entities::{
+    Beam, Crystal, Enemy, EnemyKind, EnemyState, Halo, InterferencePulse, Particle, Player,
+    Projectile, XpGem,
+};
 use crate::math::Rng;
 use crate::shards::{compose_salvo, BeamRequest, Inventory, ShardKind};
 use crate::{BeamInstance, CircleInstance};
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 pub struct Game {
     time: f32,
@@ -119,9 +122,103 @@ const PROJ_LIFETIME: f32 = 4.0;
 const MAX_CRYSTALS: usize = 6;
 const CRYSTAL_SPAWN_INTERVAL: f32 = 45.0;
 
-// Arena boundary.
-const ARENA_RADIUS: f32 = 1200.0;
+// Traversable globe.
+// World x/y coordinates are arc lengths on an equirectangular chart:
+// x = longitude * radius, y = latitude * radius. Longitude wraps; crossing a
+// pole reflects latitude and rotates longitude 180 degrees.
+const GLOBE_RADIUS: f32 = 1200.0;
 const CRYSTAL_FIRST_WAVE: u32 = 3;
+
+fn globe_normal(pos: Vec2) -> Vec3 {
+    let lon = pos.x / GLOBE_RADIUS;
+    let lat = pos.y / GLOBE_RADIUS;
+    let (sin_lon, cos_lon) = lon.sin_cos();
+    let (sin_lat, cos_lat) = lat.sin_cos();
+    Vec3::new(sin_lon * cos_lat, sin_lat, cos_lon * cos_lat).normalize_or_zero()
+}
+
+fn globe_basis(pos: Vec2) -> (Vec3, Vec3, Vec3) {
+    let lon = pos.x / GLOBE_RADIUS;
+    let lat = pos.y / GLOBE_RADIUS;
+    let (sin_lon, cos_lon) = lon.sin_cos();
+    let (sin_lat, cos_lat) = lat.sin_cos();
+    let normal = Vec3::new(sin_lon * cos_lat, sin_lat, cos_lon * cos_lat).normalize_or_zero();
+    let east = Vec3::new(cos_lon, 0.0, -sin_lon).normalize_or_zero();
+    let north = Vec3::new(-sin_lon * sin_lat, cos_lat, -cos_lon * sin_lat).normalize_or_zero();
+    (normal, east, north)
+}
+
+fn globe_pos_from_normal(normal: Vec3) -> Vec2 {
+    let n = normal.normalize_or_zero();
+    if n.length_squared() < 1e-8 {
+        return Vec2::ZERO;
+    }
+    let lat = n.y.clamp(-1.0, 1.0).asin();
+    let lon = n.x.atan2(n.z);
+    Vec2::new(lon * GLOBE_RADIUS, lat * GLOBE_RADIUS)
+}
+
+fn nearest_globe_delta(from: Vec2, to: Vec2) -> Vec2 {
+    let (normal, east, north) = globe_basis(from);
+    let target = globe_normal(to);
+    let dot = normal.dot(target).clamp(-1.0, 1.0);
+    let angle = dot.acos();
+    if angle < 1e-5 {
+        return Vec2::ZERO;
+    }
+
+    let tangent = target - normal * dot;
+    if tangent.length_squared() < 1e-8 {
+        return Vec2::new(angle * GLOBE_RADIUS, 0.0);
+    }
+
+    let dir = tangent.normalize();
+    Vec2::new(dir.dot(east), dir.dot(north)) * (angle * GLOBE_RADIUS)
+}
+
+fn nearest_globe_pos(reference: Vec2, pos: Vec2) -> Vec2 {
+    reference + nearest_globe_delta(reference, pos)
+}
+
+fn globe_distance(a: Vec2, b: Vec2) -> f32 {
+    nearest_globe_delta(a, b).length()
+}
+
+fn move_on_globe(pos: &mut Vec2, surface_delta: Vec2) {
+    let distance = surface_delta.length();
+    if distance < 1e-6 {
+        return;
+    }
+
+    let (normal, east, north) = globe_basis(*pos);
+    let tangent = east * surface_delta.x + north * surface_delta.y;
+    if tangent.length_squared() < 1e-8 {
+        return;
+    }
+
+    let theta = distance / GLOBE_RADIUS;
+    let dir = tangent.normalize();
+    let next = normal * theta.cos() + dir * theta.sin();
+    *pos = globe_pos_from_normal(next);
+}
+
+fn tangent_point_on_globe(origin: Vec2, local_pos: Vec2) -> Vec2 {
+    let mut pos = origin;
+    move_on_globe(&mut pos, local_pos - origin);
+    pos
+}
+
+fn tangent_endpoint_on_globe(start: Vec2, surface_delta: Vec2) -> Vec2 {
+    let mut end = start;
+    move_on_globe(&mut end, surface_delta);
+    end
+}
+
+fn tangent_segment_on_globe(origin: Vec2, start: Vec2, end: Vec2) -> (Vec2, Vec2) {
+    let globe_start = tangent_point_on_globe(origin, start);
+    let globe_end = tangent_endpoint_on_globe(globe_start, end - start);
+    (globe_start, globe_end)
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum WaveShape {
@@ -138,12 +235,48 @@ fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
     let dmg_scale = 1.0 + minute * 0.08;
     let spd_scale = 1.0 + minute * 0.03;
     match kind {
-        EnemyKind::Drone => (9.0, 150.0 * hp_scale, 100.0 * spd_scale, 14.0 * dmg_scale, [0.35, 0.18, 0.55]),
-        EnemyKind::Brute => (22.0, 1100.0 * hp_scale, 52.0 * spd_scale, 28.0 * dmg_scale, [0.7, 0.15, 0.15]),
-        EnemyKind::Dasher => (7.0, 110.0 * hp_scale, 76.0 * spd_scale, 20.0 * dmg_scale, [0.2, 0.8, 0.9]),
-        EnemyKind::Splitter => (14.0, 370.0 * hp_scale, 82.0 * spd_scale, 16.0 * dmg_scale, [0.2, 0.7, 0.3]),
-        EnemyKind::Orbiter => (10.0, 280.0 * hp_scale, 124.0 * spd_scale, 14.0 * dmg_scale, [0.9, 0.5, 0.15]),
-        EnemyKind::Emitter => (11.0, 230.0 * hp_scale, 64.0 * spd_scale, 10.0 * dmg_scale, [0.7, 0.3, 0.8]),
+        EnemyKind::Drone => (
+            9.0,
+            150.0 * hp_scale,
+            100.0 * spd_scale,
+            14.0 * dmg_scale,
+            [0.35, 0.18, 0.55],
+        ),
+        EnemyKind::Brute => (
+            22.0,
+            1100.0 * hp_scale,
+            52.0 * spd_scale,
+            28.0 * dmg_scale,
+            [0.7, 0.15, 0.15],
+        ),
+        EnemyKind::Dasher => (
+            7.0,
+            110.0 * hp_scale,
+            76.0 * spd_scale,
+            20.0 * dmg_scale,
+            [0.2, 0.8, 0.9],
+        ),
+        EnemyKind::Splitter => (
+            14.0,
+            370.0 * hp_scale,
+            82.0 * spd_scale,
+            16.0 * dmg_scale,
+            [0.2, 0.7, 0.3],
+        ),
+        EnemyKind::Orbiter => (
+            10.0,
+            280.0 * hp_scale,
+            124.0 * spd_scale,
+            14.0 * dmg_scale,
+            [0.9, 0.5, 0.15],
+        ),
+        EnemyKind::Emitter => (
+            11.0,
+            230.0 * hp_scale,
+            64.0 * spd_scale,
+            10.0 * dmg_scale,
+            [0.7, 0.3, 0.8],
+        ),
     }
 }
 
@@ -331,7 +464,7 @@ impl Game {
         self.wave
     }
     pub fn arena_radius(&self) -> f32 {
-        ARENA_RADIUS
+        GLOBE_RADIUS
     }
     pub fn inventory_level(&self, kind_idx: u8) -> u8 {
         ShardKind::from_index(kind_idx)
@@ -358,7 +491,8 @@ impl Game {
                 self.rebuild_halos();
             }
             if kind == ShardKind::Barrier {
-                self.player.barrier_max = BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
+                self.player.barrier_max =
+                    BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
                 self.player.barrier_hp = (self.player.barrier_hp + self.player.barrier_max * 0.5)
                     .min(self.player.barrier_max);
             }
@@ -401,7 +535,7 @@ impl Game {
         if self.player.dash_timer > 0.0 {
             self.player.dash_timer -= dt;
             let speed = DASH_DISTANCE / DASH_DURATION;
-            self.player.pos += self.player.dash_dir * speed * dt;
+            move_on_globe(&mut self.player.pos, self.player.dash_dir * speed * dt);
         } else if self.dash_input && self.player.dash_cooldown <= 0.0 {
             // Start dash if there's a movement direction.
             let dir = if self.input.length_squared() > 0.01 {
@@ -429,7 +563,7 @@ impl Game {
 
         // Movement (suppressed during dash).
         if self.player.dash_timer <= 0.0 {
-            self.player.pos += self.input * self.player.speed * dt;
+            move_on_globe(&mut self.player.pos, self.input * self.player.speed * dt);
         }
         self.camera = self.player.pos;
 
@@ -467,10 +601,14 @@ impl Game {
             if e.slow_timer > 0.0 {
                 e.slow_timer -= dt;
             }
-            let speed_mult = if e.slow_timer > 0.0 { FROST_SLOW_FACTOR } else { 1.0 };
+            let speed_mult = if e.slow_timer > 0.0 {
+                FROST_SLOW_FACTOR
+            } else {
+                1.0
+            };
             match e.state {
                 EnemyState::Drifting => {
-                    let to_player = player_pos - e.pos;
+                    let to_player = nearest_globe_delta(e.pos, player_pos);
                     let dir = to_player.normalize_or_zero();
 
                     match e.kind {
@@ -479,11 +617,11 @@ impl Game {
                                 e.state = EnemyState::Orbiting;
                                 e.state_timer = 0.0;
                             } else {
-                                e.pos += dir * e.speed * speed_mult * dt;
+                                move_on_globe(&mut e.pos, dir * e.speed * speed_mult * dt);
                             }
                         }
                         EnemyKind::Dasher => {
-                            e.pos += dir * e.speed * speed_mult * dt;
+                            move_on_globe(&mut e.pos, dir * e.speed * speed_mult * dt);
                             if to_player.length() < 250.0 {
                                 e.state = EnemyState::Telegraphing;
                                 // Telegraph shortens late-game: 0.45s base, 0.35s after wave 10.
@@ -493,14 +631,14 @@ impl Game {
                             }
                         }
                         EnemyKind::Emitter => {
-                            e.pos += dir * e.speed * speed_mult * dt;
+                            move_on_globe(&mut e.pos, dir * e.speed * speed_mult * dt);
                             if to_player.length() < EMITTER_RANGE {
                                 e.state = EnemyState::Shooting;
                                 e.state_timer = EMITTER_FIRE_INTERVAL;
                             }
                         }
                         _ => {
-                            e.pos += dir * e.speed * speed_mult * dt;
+                            move_on_globe(&mut e.pos, dir * e.speed * speed_mult * dt);
                         }
                     }
                 }
@@ -512,7 +650,7 @@ impl Game {
                     }
                 }
                 EnemyState::Charging => {
-                    e.pos += e.charge_dir * 320.0 * speed_mult * dt;
+                    move_on_globe(&mut e.pos, e.charge_dir * 320.0 * speed_mult * dt);
                     e.state_timer -= dt;
                     if e.state_timer <= 0.0 {
                         e.state = EnemyState::Drifting;
@@ -521,18 +659,27 @@ impl Game {
                 EnemyState::Orbiting => {
                     e.state_timer += dt;
                     // Orbit radius stored in charge_dir.x (set at spawn).
-                    let orbit_radius = if e.charge_dir.x > 10.0 { e.charge_dir.x } else { 100.0 };
+                    let orbit_radius = if e.charge_dir.x > 10.0 {
+                        e.charge_dir.x
+                    } else {
+                        100.0
+                    };
                     let angle_speed = 1.8 * speed_mult;
-                    let base_angle = (e.pos - player_pos).y.atan2((e.pos - player_pos).x);
+                    let from_player = nearest_globe_delta(player_pos, e.pos);
+                    let base_angle = from_player.y.atan2(from_player.x);
                     let angle = base_angle + angle_speed * dt;
-                    e.pos = player_pos + Vec2::new(angle.cos(), angle.sin()) * orbit_radius;
+                    e.pos = player_pos;
+                    move_on_globe(
+                        &mut e.pos,
+                        Vec2::new(angle.cos(), angle.sin()) * orbit_radius,
+                    );
                 }
                 EnemyState::Shooting => {
-                    let to_player = player_pos - e.pos;
+                    let to_player = nearest_globe_delta(e.pos, player_pos);
                     // Drift away if player gets too close.
                     if to_player.length() < EMITTER_RANGE * 0.5 {
                         let away = -to_player.normalize_or_zero();
-                        e.pos += away * e.speed * 0.5 * dt;
+                        move_on_globe(&mut e.pos, away * e.speed * 0.5 * dt);
                     }
                     // Fire projectiles on timer.
                     e.state_timer -= dt;
@@ -567,16 +714,18 @@ impl Game {
         }
         self.projectiles.extend(new_projectiles);
 
-        // Update projectiles.
+        // Update projectiles on the wrapped globe.
         for p in &mut self.projectiles {
-            p.pos += p.vel * dt;
+            move_on_globe(&mut p.pos, p.vel * dt);
             p.life += dt;
         }
         // Projectile-player collision.
         if self.player.iframe_timer <= 0.0 {
             let mut proj_damage = 0.0_f32;
             for p in &mut self.projectiles {
-                if p.life < PROJ_LIFETIME && (p.pos - self.player.pos).length() < PROJ_RADIUS + self.player.radius {
+                if p.life < PROJ_LIFETIME
+                    && globe_distance(p.pos, self.player.pos) < PROJ_RADIUS + self.player.radius
+                {
                     proj_damage = p.damage;
                     p.life = PROJ_LIFETIME; // mark for removal
                     break;
@@ -591,7 +740,7 @@ impl Game {
         // Projectile-crystal collision (projectiles die on crystals).
         for p in &mut self.projectiles {
             for c in &self.crystals {
-                if (p.pos - c.pos).length() < PROJ_RADIUS + c.radius {
+                if globe_distance(p.pos, c.pos) < PROJ_RADIUS + c.radius {
                     p.life = PROJ_LIFETIME;
                 }
             }
@@ -605,13 +754,9 @@ impl Game {
                 self.crystal_spawn_timer = CRYSTAL_SPAWN_INTERVAL;
                 let spawn_radius = self.screen_size.length() * 0.6;
                 let angle = self.rng.angle();
-                let mut pos = self.player.pos + Vec2::new(angle.cos(), angle.sin()) * spawn_radius;
+                let mut pos = self.player.pos;
+                move_on_globe(&mut pos, Vec2::new(angle.cos(), angle.sin()) * spawn_radius);
                 let radius = self.rng.range(35.0, 70.0);
-                // Clamp crystal inside arena.
-                let d = pos.length();
-                if d > ARENA_RADIUS - radius {
-                    pos = pos.normalize_or_zero() * (ARENA_RADIUS - radius);
-                }
                 let drift_angle = self.rng.angle();
                 let drift_speed = self.rng.range(15.0, 25.0);
                 self.crystals.push(Crystal {
@@ -622,29 +767,21 @@ impl Game {
             }
         }
         for c in &mut self.crystals {
-            c.pos += c.drift_vel * dt;
+            move_on_globe(&mut c.pos, c.drift_vel * dt);
         }
         // Crystal-player collision (push player out).
         for c in &self.crystals {
-            let to_player = self.player.pos - c.pos;
+            let to_player = nearest_globe_delta(c.pos, self.player.pos);
             let dist = to_player.length();
             if dist < c.radius + self.player.radius {
                 let push = to_player.normalize_or_zero() * (c.radius + self.player.radius - dist);
-                self.player.pos += push;
-            }
-        }
-        // Arena boundary — clamp player inside.
-        {
-            let d = self.player.pos.length();
-            let limit = ARENA_RADIUS - self.player.radius;
-            if d > limit {
-                self.player.pos = self.player.pos.normalize_or_zero() * limit;
+                move_on_globe(&mut self.player.pos, push);
             }
         }
         // Crystal-enemy collision (Dashers crash and take damage, others push away).
         for c in &self.crystals {
             for e in &mut self.enemies {
-                let to_enemy = e.pos - c.pos;
+                let to_enemy = nearest_globe_delta(c.pos, e.pos);
                 let dist = to_enemy.length();
                 if dist < c.radius + e.radius {
                     if e.kind == EnemyKind::Dasher && e.state == EnemyState::Charging {
@@ -652,16 +789,8 @@ impl Game {
                         e.state = EnemyState::Drifting;
                     }
                     let push = to_enemy.normalize_or_zero() * (c.radius + e.radius - dist);
-                    e.pos += push;
+                    move_on_globe(&mut e.pos, push);
                 }
-            }
-        }
-        // Arena boundary — clamp enemies inside.
-        for e in &mut self.enemies {
-            let d = e.pos.length();
-            let limit = ARENA_RADIUS - e.radius;
-            if d > limit {
-                e.pos = e.pos.normalize_or_zero() * limit;
             }
         }
 
@@ -673,7 +802,7 @@ impl Game {
                 if e.hp <= 0.0 {
                     continue;
                 }
-                let dist = (e.pos - self.player.pos).length();
+                let dist = globe_distance(e.pos, self.player.pos);
                 if dist < e.radius + self.player.radius {
                     contact_dmg = e.contact_damage;
                     break;
@@ -725,7 +854,9 @@ impl Game {
 
         // Halos: orbit + contact damage.
         // Synergy: FROZEN ORBIT (Halo+Frost 3+) — halo beads slow enemies.
-        let frozen_orbit = self.inventory.has_synergy(ShardKind::Halo, ShardKind::Frost);
+        let frozen_orbit = self
+            .inventory
+            .has_synergy(ShardKind::Halo, ShardKind::Frost);
         for h in &mut self.halos {
             h.angle += h.angular_speed * dt;
         }
@@ -733,13 +864,14 @@ impl Game {
             .halos
             .iter()
             .map(|h| {
-                let p = self.player.pos + Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius;
+                let mut p = self.player.pos;
+                move_on_globe(&mut p, Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius);
                 (p, h.size)
             })
             .collect();
         for (hpos, hsize) in &halo_snapshots {
             for e in &mut self.enemies {
-                if (e.pos - *hpos).length() < hsize + e.radius {
+                if globe_distance(e.pos, *hpos) < hsize + e.radius {
                     e.hp -= HALO_DPS * dt;
                     if frozen_orbit {
                         e.slow_timer = e.slow_timer.max(FROST_SLOW_DURATION);
@@ -752,11 +884,11 @@ impl Game {
         let barrier_level = self.inventory.level(ShardKind::Barrier);
         if barrier_level > 0 {
             self.player.barrier_max = BARRIER_HP_PER_LEVEL * barrier_level as f32;
-            self.player.barrier_hp = (self.player.barrier_hp + BARRIER_REGEN_PER_SEC * dt)
-                .min(self.player.barrier_max);
+            self.player.barrier_hp =
+                (self.player.barrier_hp + BARRIER_REGEN_PER_SEC * dt).min(self.player.barrier_max);
             // Contact damage to enemies within barrier radius.
             for e in &mut self.enemies {
-                let dist = (e.pos - self.player.pos).length();
+                let dist = globe_distance(e.pos, self.player.pos);
                 if dist < BARRIER_RADIUS + e.radius {
                     e.hp -= BARRIER_CONTACT_DPS * dt;
                 }
@@ -780,11 +912,14 @@ impl Game {
         for p in &mut self.pulses {
             p.life += dt;
         }
-        let pulse_snapshots: Vec<(Vec2, f32)> =
-            self.pulses.iter().map(|p| (p.pos, p.current_radius())).collect();
+        let pulse_snapshots: Vec<(Vec2, f32)> = self
+            .pulses
+            .iter()
+            .map(|p| (p.pos, p.current_radius()))
+            .collect();
         for (ppos, pradius) in &pulse_snapshots {
             for e in &mut self.enemies {
-                let d = (e.pos - *ppos).length();
+                let d = globe_distance(e.pos, *ppos);
                 if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + e.radius {
                     e.hp -= INTERFERENCE_DPS * dt;
                 }
@@ -795,17 +930,17 @@ impl Game {
         // XP gem collection — magnetize nearby gems, collect touching ones.
         for g in &mut self.gems {
             g.life += dt;
-            let to_player = self.player.pos - g.pos;
+            let to_player = nearest_globe_delta(g.pos, self.player.pos);
             let dist = to_player.length();
             if dist < GEM_MAGNET_RADIUS {
                 let dir = to_player.normalize_or_zero();
-                g.pos += dir * GEM_MAGNET_SPEED * dt;
+                move_on_globe(&mut g.pos, dir * GEM_MAGNET_SPEED * dt);
             }
         }
         // Collect gems touching player.
         let mut collected_xp: u32 = 0;
         self.gems.retain(|g| {
-            let dist = (g.pos - self.player.pos).length();
+            let dist = globe_distance(g.pos, self.player.pos);
             if dist < GEM_COLLECT_RADIUS + self.player.radius {
                 collected_xp += g.value;
                 false
@@ -856,7 +991,7 @@ impl Game {
         // Particles.
         for p in &mut self.particles {
             p.life += dt;
-            p.pos += p.vel * dt;
+            move_on_globe(&mut p.pos, p.vel * dt);
             p.vel *= (1.0 - 2.2 * dt).max(0.0);
         }
         self.particles.retain(|p| p.life < p.max_life);
@@ -875,7 +1010,16 @@ impl Game {
             Some(t) => t,
             None => return false,
         };
-        let salvo = compose_salvo(self.player.pos, target, &self.enemies, &self.inventory);
+        let local_enemies: Vec<Enemy> = self
+            .enemies
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                e.pos = nearest_globe_pos(self.player.pos, e.pos);
+                e
+            })
+            .collect();
+        let salvo = compose_salvo(self.player.pos, target, &local_enemies, &self.inventory);
         if salvo.is_empty() {
             return false;
         }
@@ -902,19 +1046,16 @@ impl Game {
         let frost = self.inventory.level(ShardKind::Frost);
         let mut impacts: Vec<Vec2> = Vec::new();
         let mut hit_count: u32 = 0;
+        let (start, end) = tangent_segment_on_globe(self.player.pos, req.start, req.end);
 
         // Synergy: BLIZZARD (Split+Frost 3+) — frozen enemies take +40% damage.
-        let blizzard = self.inventory.has_synergy(ShardKind::Split, ShardKind::Frost);
+        let blizzard = self
+            .inventory
+            .has_synergy(ShardKind::Split, ShardKind::Frost);
 
         // Primary damage pass.
         for e in &mut self.enemies {
-            if capsule_circle_intersect(
-                req.start,
-                req.end,
-                req.thickness * 0.5,
-                e.pos,
-                e.radius,
-            ) {
+            if capsule_circle_intersect_globe(start, end, req.thickness * 0.5, e.pos, e.radius) {
                 let mut dmg = req.damage;
                 if blizzard && e.slow_timer > 0.0 {
                     dmg *= 1.4;
@@ -941,8 +1082,8 @@ impl Game {
 
         // Primary visual.
         self.beams.push(Beam {
-            start: req.start,
-            end: req.end,
+            start,
+            end,
             life: 0.0,
             max_life: BEAM_LIFETIME,
             thickness: req.thickness,
@@ -951,17 +1092,27 @@ impl Game {
 
         // Diffract: each impact spawns L radial sub-beams (damage + visual).
         // Synergy: SUPERNOVA (Mirror+Diffract 3+) — 2x burst reach and thickness.
-        let supernova = self.inventory.has_synergy(ShardKind::Mirror, ShardKind::Diffract);
-        let diffract_reach = if supernova { DIFFRACT_MINI_REACH * 2.0 } else { DIFFRACT_MINI_REACH };
-        let diffract_thick = if supernova { DIFFRACT_MINI_THICKNESS * 1.5 } else { DIFFRACT_MINI_THICKNESS };
+        let supernova = self
+            .inventory
+            .has_synergy(ShardKind::Mirror, ShardKind::Diffract);
+        let diffract_reach = if supernova {
+            DIFFRACT_MINI_REACH * 2.0
+        } else {
+            DIFFRACT_MINI_REACH
+        };
+        let diffract_thick = if supernova {
+            DIFFRACT_MINI_THICKNESS * 1.5
+        } else {
+            DIFFRACT_MINI_THICKNESS
+        };
         for impact in impacts {
             for _ in 0..diffract {
                 let a = self.rng.angle();
                 let dir = Vec2::new(a.cos(), a.sin());
-                let end = impact + dir * diffract_reach;
+                let end = tangent_endpoint_on_globe(impact, dir * diffract_reach);
 
                 for e in &mut self.enemies {
-                    if capsule_circle_intersect(
+                    if capsule_circle_intersect_globe(
                         impact,
                         end,
                         diffract_thick * 0.5,
@@ -1012,8 +1163,10 @@ impl Game {
                 let angle = (i as f32) * std::f32::consts::TAU / 3.0 + self.rng.angle() * 0.3;
                 let offset = Vec2::new(angle.cos(), angle.sin()) * 20.0;
                 let (_, _, _, _, color) = enemy_stats(EnemyKind::Drone, minute);
+                let mut spawn_pos = pos;
+                move_on_globe(&mut spawn_pos, offset);
                 self.enemies.push(Enemy {
-                    pos: pos + offset,
+                    pos: spawn_pos,
                     radius: 6.0,
                     hp: 40.0,
                     speed: 90.0,
@@ -1036,7 +1189,9 @@ impl Game {
         // Synergy: CHAIN REACTION (Split+Cascade 3+) — cascade beams fan into 3.
         if cascade_depth < CASCADE_MAX_DEPTH {
             let cascade = self.inventory.level(ShardKind::Cascade);
-            let chain_reaction = self.inventory.has_synergy(ShardKind::Split, ShardKind::Cascade);
+            let chain_reaction = self
+                .inventory
+                .has_synergy(ShardKind::Split, ShardKind::Cascade);
             let fan_count = if chain_reaction { 3u32 } else { 1 };
             let fan_spread = 0.3_f32; // radians
 
@@ -1050,9 +1205,9 @@ impl Game {
                     };
                     let a = base_a + offset;
                     let dir = Vec2::new(a.cos(), a.sin());
-                    let end = pos + dir * CASCADE_REACH;
+                    let end = tangent_endpoint_on_globe(pos, dir * CASCADE_REACH);
                     for e in &mut self.enemies {
-                        if capsule_circle_intersect(
+                        if capsule_circle_intersect_globe(
                             pos,
                             end,
                             CASCADE_THICKNESS * 0.5,
@@ -1120,7 +1275,10 @@ impl Game {
             remaining -= absorbed;
 
             // Synergy: RESONANCE (Barrier+Interference 3+) — emit a pulse when barrier absorbs.
-            if self.inventory.has_synergy(ShardKind::Barrier, ShardKind::Interference) {
+            if self
+                .inventory
+                .has_synergy(ShardKind::Barrier, ShardKind::Interference)
+            {
                 self.pulses.push(InterferencePulse {
                     pos: self.player.pos,
                     life: 0.0,
@@ -1144,22 +1302,27 @@ impl Game {
     /// Fire retaliatory beams in random directions (Thorns shard).
     fn fire_thorns(&mut self, level: u8) {
         let beam_count = THORNS_BEAMS_PER_LEVEL as u32 * level as u32;
-        let siphon_heal = if self.inventory.has_synergy(ShardKind::Siphon, ShardKind::Thorns) {
+        let siphon_heal = if self
+            .inventory
+            .has_synergy(ShardKind::Siphon, ShardKind::Thorns)
+        {
             SIPHON_HEAL_PER_HIT * self.inventory.level(ShardKind::Siphon) as f32
         } else {
             0.0
         };
         // Synergy: MARTYRDOM (Thorns+Cascade 3+) — thorns kills trigger cascade.
-        let martyrdom = self.inventory.has_synergy(ShardKind::Thorns, ShardKind::Cascade);
+        let martyrdom = self
+            .inventory
+            .has_synergy(ShardKind::Thorns, ShardKind::Cascade);
 
         for _ in 0..beam_count {
             let a = self.rng.angle();
             let dir = Vec2::new(a.cos(), a.sin());
             let start = self.player.pos;
-            let end = start + dir * THORNS_BEAM_REACH;
+            let end = tangent_endpoint_on_globe(start, dir * THORNS_BEAM_REACH);
 
             for e in &mut self.enemies {
-                if capsule_circle_intersect(
+                if capsule_circle_intersect_globe(
                     start,
                     end,
                     THORNS_BEAM_THICKNESS * 0.5,
@@ -1197,9 +1360,15 @@ impl Game {
                 for _ in 0..cascade_level {
                     let a = self.rng.angle();
                     let dir = Vec2::new(a.cos(), a.sin());
-                    let end = pos + dir * CASCADE_REACH;
+                    let end = tangent_endpoint_on_globe(pos, dir * CASCADE_REACH);
                     for e in &mut self.enemies {
-                        if capsule_circle_intersect(pos, end, CASCADE_THICKNESS * 0.5, e.pos, e.radius) {
+                        if capsule_circle_intersect_globe(
+                            pos,
+                            end,
+                            CASCADE_THICKNESS * 0.5,
+                            e.pos,
+                            e.radius,
+                        ) {
                             e.hp -= CASCADE_DAMAGE;
                         }
                     }
@@ -1246,12 +1415,8 @@ impl Game {
         let spawn_radius = self.screen_size.length() * 0.55;
         let angle = self.rng.angle();
         let dir = Vec2::new(angle.cos(), angle.sin());
-        let mut pos = self.player.pos + dir * spawn_radius;
-        // Clamp spawn inside arena.
-        let d = pos.length();
-        if d > ARENA_RADIUS - radius {
-            pos = pos.normalize_or_zero() * (ARENA_RADIUS - radius);
-        }
+        let mut pos = self.player.pos;
+        move_on_globe(&mut pos, dir * spawn_radius);
         let speed = speed * self.rng.range(0.85, 1.15);
 
         // Store per-enemy data in charge_dir: Orbiters use x for orbit radius.
@@ -1284,11 +1449,17 @@ impl Game {
         match (self.wave, self.wave_shape()) {
             (6, _) => {
                 // Orbiter + Dasher mix.
-                return if self.rng.next_u32() % 2 == 0 { EnemyKind::Orbiter } else { EnemyKind::Dasher };
+                return if self.rng.next_u32() % 2 == 0 {
+                    EnemyKind::Orbiter
+                } else {
+                    EnemyKind::Dasher
+                };
             }
             (9, _) => {
                 // Splitter swarm.
-                if self.rng.next_u32() % 3 != 0 { return EnemyKind::Splitter; }
+                if self.rng.next_u32() % 3 != 0 {
+                    return EnemyKind::Splitter;
+                }
             }
             _ => {}
         }
@@ -1297,18 +1468,28 @@ impl Game {
         match self.wave_shape() {
             WaveShape::Elite => {
                 // Heavy enemies only.
-                let pool = [(EnemyKind::Brute, 5u32), (EnemyKind::Splitter, 3), (EnemyKind::Emitter, 2)];
+                let pool = [
+                    (EnemyKind::Brute, 5u32),
+                    (EnemyKind::Splitter, 3),
+                    (EnemyKind::Emitter, 2),
+                ];
                 let total: u32 = pool.iter().map(|p| p.1).sum();
                 let mut roll = self.rng.next_u32() % total;
                 for (kind, weight) in &pool {
-                    if roll < *weight { return *kind; }
+                    if roll < *weight {
+                        return *kind;
+                    }
                     roll -= weight;
                 }
                 return EnemyKind::Brute;
             }
             WaveShape::Swarm => {
                 // Lots of drones + dashers.
-                return if self.rng.next_u32() % 3 == 0 { EnemyKind::Dasher } else { EnemyKind::Drone };
+                return if self.rng.next_u32() % 3 == 0 {
+                    EnemyKind::Dasher
+                } else {
+                    EnemyKind::Drone
+                };
             }
             _ => {}
         }
@@ -1346,7 +1527,10 @@ impl Game {
     fn find_nearest_enemy_pos(&self) -> Option<Vec2> {
         self.enemies
             .iter()
-            .map(|e| (e.pos, (e.pos - self.player.pos).length_squared()))
+            .map(|e| {
+                let delta = nearest_globe_delta(self.player.pos, e.pos);
+                (self.player.pos + delta, delta.length_squared())
+            })
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(p, _)| p)
     }
@@ -1396,14 +1580,16 @@ impl Game {
     fn build_draw_buffers(&mut self) {
         self.circle_buf.clear();
         self.beam_buf.clear();
+        let camera = self.camera;
 
         // Interference pulses underneath everything else.
         for p in &self.pulses {
             let t = p.life / p.max_life;
             let r = p.current_radius();
+            let pos = nearest_globe_pos(camera, p.pos);
             self.circle_buf.push(CircleInstance {
-                x: p.pos.x,
-                y: p.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: r,
                 r: 0.4,
                 g: 0.55,
@@ -1414,12 +1600,13 @@ impl Game {
         }
 
         // Player (blink during i-frames).
-        let visible = self.player.iframe_timer <= 0.0
-            || ((self.player.iframe_timer * 16.0) as u32 % 2 == 0);
+        let visible =
+            self.player.iframe_timer <= 0.0 || ((self.player.iframe_timer * 16.0) as u32 % 2 == 0);
         if visible {
+            let pos = nearest_globe_pos(camera, self.player.pos);
             self.circle_buf.push(CircleInstance {
-                x: self.player.pos.x,
-                y: self.player.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: self.player.radius,
                 r: 1.0,
                 g: 1.0,
@@ -1433,9 +1620,10 @@ impl Game {
         let hp_frac = self.player.hp / self.player.max_hp;
         if hp_frac < 1.0 {
             // Red-tinged ring, dimmer as health decreases.
+            let pos = nearest_globe_pos(camera, self.player.pos);
             self.circle_buf.push(CircleInstance {
-                x: self.player.pos.x,
-                y: self.player.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: self.player.radius + 4.0,
                 r: 1.0 - hp_frac * 0.5,
                 g: hp_frac * 0.8,
@@ -1447,7 +1635,9 @@ impl Game {
 
         // Halos.
         for h in &self.halos {
-            let p = self.player.pos + Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius;
+            let mut p = self.player.pos;
+            move_on_globe(&mut p, Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius);
+            let p = nearest_globe_pos(camera, p);
             self.circle_buf.push(CircleInstance {
                 x: p.x,
                 y: p.y,
@@ -1463,9 +1653,10 @@ impl Game {
         // Barrier shield ring.
         if self.player.barrier_max > 0.0 {
             let fill = self.player.barrier_hp / self.player.barrier_max;
+            let pos = nearest_globe_pos(camera, self.player.pos);
             self.circle_buf.push(CircleInstance {
-                x: self.player.pos.x,
-                y: self.player.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: BARRIER_RADIUS,
                 r: 0.3,
                 g: 0.7,
@@ -1478,21 +1669,26 @@ impl Game {
         // Enemies — colored per-type, flash white on hit.
         let hit_set: Vec<Vec2> = self.hit_flash_positions.clone();
         for e in &self.enemies {
-            let is_hit = hit_set.iter().any(|h| (*h - e.pos).length() < 1.0);
+            let pos = nearest_globe_pos(camera, e.pos);
+            let is_hit = hit_set.iter().any(|h| globe_distance(*h, e.pos) < 1.0);
             let (glow, r, g, b, alpha) = if is_hit {
                 (3.0, 1.0_f32, 1.0_f32, 1.0_f32, 1.0_f32)
             } else {
                 match e.state {
                     EnemyState::Telegraphing => {
-                        let flash = if (e.state_timer * 12.0) as u32 % 2 == 0 { 2.0 } else { 0.8 };
+                        let flash = if (e.state_timer * 12.0) as u32 % 2 == 0 {
+                            2.0
+                        } else {
+                            0.8
+                        };
                         (flash, e.color[0], e.color[1], e.color[2], 1.0)
                     }
                     _ => (0.6, e.color[0], e.color[1], e.color[2], 1.0),
                 }
             };
             self.circle_buf.push(CircleInstance {
-                x: e.pos.x,
-                y: e.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: e.radius,
                 r,
                 g,
@@ -1504,6 +1700,7 @@ impl Game {
 
         // XP gems — bright cyan/green, small, pulsing glow.
         for g in &self.gems {
+            let pos = nearest_globe_pos(camera, g.pos);
             let pulse = 1.0 + (g.life * 6.0).sin() * 0.3;
             let fade = if g.life > GEM_LIFETIME - 2.0 {
                 (GEM_LIFETIME - g.life) / 2.0
@@ -1511,8 +1708,8 @@ impl Game {
                 1.0
             };
             self.circle_buf.push(CircleInstance {
-                x: g.pos.x,
-                y: g.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: GEM_RADIUS,
                 r: 0.3,
                 g: 1.0,
@@ -1524,10 +1721,11 @@ impl Game {
 
         // Particles.
         for p in &self.particles {
+            let pos = nearest_globe_pos(camera, p.pos);
             let t = 1.0 - (p.life / p.max_life);
             self.circle_buf.push(CircleInstance {
-                x: p.pos.x,
-                y: p.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: p.size * t.max(0.15),
                 r: p.color[0],
                 g: p.color[1],
@@ -1540,11 +1738,13 @@ impl Game {
         // Beams — colored per-shard (Diffract mini, Cascade burst, Chromatic RGB, default cyan).
         for b in &self.beams {
             let t = 1.0 - (b.life / b.max_life);
+            let start = nearest_globe_pos(camera, b.start);
+            let end = nearest_globe_pos(camera, b.end);
             self.beam_buf.push(BeamInstance {
-                x0: b.start.x,
-                y0: b.start.y,
-                x1: b.end.x,
-                y1: b.end.y,
+                x0: start.x,
+                y0: start.y,
+                x1: end.x,
+                y1: end.y,
                 thickness: b.thickness,
                 r: b.color[0],
                 g: b.color[1],
@@ -1556,9 +1756,10 @@ impl Game {
 
         // Projectiles — small magenta orbs.
         for p in &self.projectiles {
+            let pos = nearest_globe_pos(camera, p.pos);
             self.circle_buf.push(CircleInstance {
-                x: p.pos.x,
-                y: p.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: p.radius,
                 r: 0.9,
                 g: 0.2,
@@ -1570,9 +1771,10 @@ impl Game {
 
         // Crystals — semi-transparent teal obstacles.
         for c in &self.crystals {
+            let pos = nearest_globe_pos(camera, c.pos);
             self.circle_buf.push(CircleInstance {
-                x: c.pos.x,
-                y: c.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: c.radius,
                 r: 0.3,
                 g: 0.7,
@@ -1582,8 +1784,8 @@ impl Game {
             });
             // Inner bright core.
             self.circle_buf.push(CircleInstance {
-                x: c.pos.x,
-                y: c.pos.y,
+                x: pos.x,
+                y: pos.y,
                 radius: c.radius * 0.3,
                 r: 0.5,
                 g: 0.9,
@@ -1604,4 +1806,14 @@ fn capsule_circle_intersect(a: Vec2, b: Vec2, cap_half: f32, c: Vec2, cr: f32) -
     let t = ((c - a).dot(ab) / len_sq).clamp(0.0, 1.0);
     let closest = a + ab * t;
     closest.distance(c) <= cap_half + cr
+}
+
+fn capsule_circle_intersect_globe(a: Vec2, b: Vec2, cap_half: f32, c: Vec2, cr: f32) -> bool {
+    capsule_circle_intersect(
+        a,
+        nearest_globe_pos(a, b),
+        cap_half,
+        nearest_globe_pos(a, c),
+        cr,
+    )
 }

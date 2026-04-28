@@ -1,7 +1,7 @@
 // WebGL2 renderer for Prism. Multi-pass pipeline:
-//   1. Background grid (parallax hex grid + arena boundary)
+//   1. Background globe (seamless lit surface)
 //   2. Geometry pass: beams (spectral fringe + energy ripple) + circles → HDR FBO
-//   3. Dual-filter bloom: downsample chain → upsample chain → full-res output
+//   3. Bloom: downsample → separable Gaussian → tent-filtered full-res upsample
 //   4. Composite: chromatic aberration + temporal persistence + bloom + vignette + tonemap
 
 import {
@@ -14,7 +14,6 @@ import {
   CIRCLE_FRAG,
   CIRCLE_VERT,
   COMPOSITE_FRAG,
-  COPY_FRAG,
   FULLSCREEN_VERT,
   GRID_FRAG,
   GRID_VERT,
@@ -43,7 +42,6 @@ export class Renderer {
   private bloomVProg!: Program;
   private bloomUpProg!: Program;
   private compositeProg!: Program;
-  private copyProg!: Program;
 
   private quadBuf!: WebGLBuffer;
   private circleInstanceBuf!: WebGLBuffer;
@@ -68,8 +66,8 @@ export class Renderer {
   private bloomTexs: WebGLTexture[] = [];
   private bloomSizes: [number, number][] = [];
 
-  // Full-resolution bloom output — final upsample target to avoid
-  // magnification artifacts from reading the half-res bloom[0].
+  // Full-resolution bloom output — final tent-filtered upsample target to avoid
+  // magnification artifacts from reading the half-res bloom[0] in composite.
   private bloomOutFbo!: WebGLFramebuffer;
   private bloomOutTex!: WebGLTexture;
 
@@ -89,15 +87,14 @@ export class Renderer {
     // EXT_color_buffer_float is required for RGBA16F render targets in WebGL2.
     this.hasColorBufferFloat = !!gl.getExtension('EXT_color_buffer_float');
 
-    this.circleProg = this.makeProgram(CIRCLE_VERT, CIRCLE_FRAG, ['u_viewport', 'u_camera', 'u_shake']);
-    this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera', 'u_shake', 'u_time']);
+    this.circleProg = this.makeProgram(CIRCLE_VERT, CIRCLE_FRAG, ['u_viewport', 'u_camera', 'u_shake', 'u_arena_radius']);
+    this.beamProg = this.makeProgram(BEAM_VERT, BEAM_FRAG, ['u_viewport', 'u_camera', 'u_shake', 'u_time', 'u_arena_radius']);
     this.gridProg = this.makeProgram(GRID_VERT, GRID_FRAG, ['u_viewport', 'u_camera', 'u_time', 'u_arena_radius']);
     this.bloomDownProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_DOWN_FRAG, ['u_src', 'u_texel']);
     this.bloomHProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_H_FRAG, ['u_src', 'u_texel']);
     this.bloomVProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_V_FRAG, ['u_src', 'u_texel']);
     this.bloomUpProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_UP_FRAG, ['u_src', 'u_texel']);
     this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene', 'u_bloom', 'u_prev', 'u_persistence']);
-    this.copyProg = this.makeProgram(FULLSCREEN_VERT, COPY_FRAG, ['u_src']);
 
     this.setupBuffers();
   }
@@ -353,7 +350,7 @@ export class Renderer {
     gl.enable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
 
-    // Background grid: alpha blend, not additive, so it stays subtle.
+    // Background globe: alpha blend, not additive, so it stays subtle.
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(this.gridProg.prog);
     gl.uniform2f(this.gridProg.uniforms['u_viewport']!, viewWidth, viewHeight);
@@ -373,6 +370,7 @@ export class Renderer {
       gl.uniform2f(this.beamProg.uniforms['u_camera']!, camera[0], camera[1]);
       gl.uniform2f(this.beamProg.uniforms['u_shake']!, shake[0], shake[1]);
       gl.uniform1f(this.beamProg.uniforms['u_time']!, time);
+      gl.uniform1f(this.beamProg.uniforms['u_arena_radius']!, arenaRadius);
       gl.bindVertexArray(this.beamVao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, beamCount);
     }
@@ -382,6 +380,7 @@ export class Renderer {
       gl.uniform2f(this.circleProg.uniforms['u_viewport']!, viewWidth, viewHeight);
       gl.uniform2f(this.circleProg.uniforms['u_camera']!, camera[0], camera[1]);
       gl.uniform2f(this.circleProg.uniforms['u_shake']!, shake[0], shake[1]);
+      gl.uniform1f(this.circleProg.uniforms['u_arena_radius']!, arenaRadius);
       gl.bindVertexArray(this.circleVao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, circleCount);
     }
@@ -390,7 +389,7 @@ export class Renderer {
 
     // ── Bloom: separable Gaussian (H→V × 2 cycles) at half-res ──
     // Produces a circular 2D Gaussian — no square/staircase artifacts.
-    // Pipeline: scene → box downsample → [H→V] × 2 → bilinear upsample → bloomOut
+    // Pipeline: scene → box downsample → [H→V] × 2 → 9-tap tent upsample → bloomOut
     gl.disable(gl.BLEND);
     gl.bindVertexArray(this.fullscreenVao);
 
@@ -433,7 +432,7 @@ export class Renderer {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
-    // Step 5: bilinear upsample bloom[0] (half-res) → bloomOut (full-res).
+    // Step 5: tent-filtered upsample bloom[0] (half-res) → bloomOut (full-res).
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomOutFbo);
     gl.viewport(0, 0, pixelWidth, pixelHeight);
     gl.clearColor(0, 0, 0, 0);

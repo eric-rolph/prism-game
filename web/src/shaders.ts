@@ -20,10 +20,18 @@ layout(location=4) in float a_glow;
 uniform vec2 u_viewport;
 uniform vec2 u_camera;
 uniform vec2 u_shake;
+uniform float u_arena_radius;
 
 out vec2 v_local;   // -QUAD_EXPAND..+QUAD_EXPAND; edge of circle at ±1
 out vec4 v_color;
 out float v_glow;
+
+vec2 projectGlobe(vec2 local, float radius) {
+  float d = length(local);
+  if (d < 1e-4) return local;
+  float theta = min(d / radius, 1.55334);
+  return local * (sin(theta) * radius / d);
+}
 
 void main() {
   const float EXPAND = ${QUAD_EXPAND.toFixed(1)};
@@ -31,8 +39,8 @@ void main() {
   v_color = a_color;
   v_glow = a_glow;
 
-  vec2 world = a_pos + a_quad * a_radius * EXPAND;
-  vec2 screen = world - u_camera + u_viewport * 0.5 + u_shake;
+  vec2 local = (a_pos - u_camera) + a_quad * a_radius * EXPAND;
+  vec2 screen = projectGlobe(local, max(u_arena_radius, 1.0)) + u_viewport * 0.5 + u_shake;
   vec2 clip = (screen / u_viewport) * 2.0 - 1.0;
   clip.y = -clip.y;
 
@@ -85,6 +93,7 @@ uniform vec2 u_viewport;
 uniform vec2 u_camera;
 uniform vec2 u_shake;
 uniform float u_time;
+uniform float u_arena_radius;
 
 out vec2 v_world;
 out vec2 v_p0;
@@ -93,6 +102,13 @@ out float v_thickness;
 out vec4 v_color;
 out float v_glow;
 out float v_time;
+
+vec2 projectGlobe(vec2 local, float radius) {
+  float d = length(local);
+  if (d < 1e-4) return local;
+  float theta = min(d / radius, 1.55334);
+  return local * (sin(theta) * radius / d);
+}
 
 void main() {
   float pad = 12.0 + a_thickness * 3.5;
@@ -107,16 +123,17 @@ void main() {
   float halfThick = a_thickness * 0.5 + pad;
 
   vec2 world = center + dir * (a_quad.x * halfLen) + perp * (a_quad.y * halfThick);
+  vec2 local = world - u_camera;
 
-  v_world = world;
-  v_p0 = a_p0;
-  v_p1 = a_p1;
+  v_world = local;
+  v_p0 = a_p0 - u_camera;
+  v_p1 = a_p1 - u_camera;
   v_thickness = a_thickness;
   v_color = a_color;
   v_glow = a_glow;
   v_time = u_time;
 
-  vec2 screen = world - u_camera + u_viewport * 0.5 + u_shake;
+  vec2 screen = projectGlobe(local, max(u_arena_radius, 1.0)) + u_viewport * 0.5 + u_shake;
   vec2 clip = (screen / u_viewport) * 2.0 - 1.0;
   clip.y = -clip.y;
 
@@ -220,9 +237,9 @@ void main() {
 }
 `;
 
-// ─── Background grid shader ─────────────────────────────────────────────
-// Renders a subtle hexagonal grid that provides spatial grounding. The grid
-// scrolls with the camera to give a sense of movement through space.
+// ─── Background globe shader ─────────────────────────────────────────────
+// Renders the play field as a seamless local patch of a traversable globe.
+// World x/y are arc lengths: x is longitude, y is meridian travel.
 
 export const GRID_VERT = /* glsl */ `#version 300 es
 layout(location=0) in vec2 a_quad;
@@ -246,67 +263,76 @@ uniform float u_arena_radius;
 in vec2 v_uv;
 out vec4 fragColor;
 
-// Hex grid distance — returns distance to nearest hex edge.
-float hexDist(vec2 p) {
-  p = abs(p);
-  return max(dot(p, normalize(vec2(1.0, 1.73205))), p.x);
+const float PI = 3.14159265;
+const float TAU = 6.28318531;
+
+float angularLine(float angle, float period, float width) {
+  float d = abs(fract(angle / period + 0.5) - 0.5) * period;
+  return 1.0 - smoothstep(width, width * 1.8, d);
 }
 
-vec4 hexCoords(vec2 uv) {
-  const vec2 s = vec2(1.0, 1.73205);
-  vec4 hC = floor(vec4(uv, uv - vec2(0.5, 1.0)) / s.xyxy) + 0.5;
-  vec4 h = vec4(uv - hC.xy * s, uv - (hC.zw + 0.5) * s);
-  return dot(h.xy, h.xy) < dot(h.zw, h.zw)
-    ? vec4(h.xy, hC.xy)
-    : vec4(h.zw, hC.zw + 0.5);
+vec3 globeNormalFromLonLat(float lon, float lat) {
+  float c = cos(lat);
+  return normalize(vec3(sin(lon) * c, sin(lat), cos(lon) * c));
+}
+
+vec3 globeEast(float lon) {
+  return normalize(vec3(cos(lon), 0.0, -sin(lon)));
+}
+
+vec3 globeNorth(float lon, float lat) {
+  return normalize(vec3(-sin(lon) * sin(lat), cos(lat), -cos(lon) * sin(lat)));
 }
 
 void main() {
-  // Convert screen UV to world coordinates.
-  vec2 world = (v_uv - 0.5) * u_viewport + u_camera;
+  float radius = max(u_arena_radius, 1.0);
+  vec2 screen = vec2((v_uv.x - 0.5) * u_viewport.x, (0.5 - v_uv.y) * u_viewport.y);
+  float screenR = length(screen);
+  float sphereMask = 1.0 - smoothstep(radius - 8.0, radius + 18.0, screenR);
+  if (sphereMask <= 0.0) {
+    fragColor = vec4(0.0);
+    return;
+  }
 
-  // Hex grid — scale controls hex size (larger = bigger hexes).
-  float hexScale = 60.0;
-  vec2 hexUV = world / hexScale;
-  vec4 hx = hexCoords(hexUV);
+  float camLon = u_camera.x / radius;
+  float camLat = u_camera.y / radius;
+  vec3 center = globeNormalFromLonLat(camLon, camLat);
+  vec3 east = globeEast(camLon);
+  vec3 north = globeNorth(camLon, camLat);
+  float z = sqrt(max(radius * radius - screenR * screenR, 0.0));
+  vec3 normal = normalize(center * z + east * screen.x + north * screen.y);
 
-  // Distance from hex center to edge.
-  float edgeDist = hexDist(hx.xy);
+  float longitude = atan(normal.x, normal.z);
+  float latitude = asin(clamp(normal.y, -1.0, 1.0));
 
-  // Thin hex grid lines.
-  float gridLine = 1.0 - smoothstep(0.42, 0.5, edgeDist);
+  float meridians = angularLine(longitude, TAU / 24.0, 0.0032);
+  float parallels = angularLine(latitude, PI / 14.0, 0.0032);
+  float equator = angularLine(latitude, PI, 0.006);
+  float gridLine = max(max(meridians, parallels), equator * 0.75);
 
-  // Arena boundary — soft glow ring.
-  float distFromOrigin = length(world);
-  float arenaEdge = smoothstep(u_arena_radius - 80.0, u_arena_radius, distFromOrigin);
-  float arenaGlow = exp(-max(distFromOrigin - u_arena_radius, 0.0) * 0.015) * arenaEdge;
-  float arenaLine = smoothstep(u_arena_radius - 3.0, u_arena_radius, distFromOrigin)
-                  * (1.0 - smoothstep(u_arena_radius, u_arena_radius + 3.0, distFromOrigin));
-
-  // Arena pulse — breathing effect.
   float pulse = 0.7 + 0.3 * sin(u_time * 1.5);
+  vec3 lightDir = normalize(vec3(-0.35, 0.48, 0.80));
+  float diffuse = max(dot(normal, lightDir), 0.0);
+  float polarGlow = pow(abs(normal.y), 10.0);
+  float dateLine = angularLine(longitude, PI, 0.005);
+  float limb = pow(1.0 - clamp(z / radius, 0.0, 1.0), 2.2);
 
-  // Distance fade — grid fades near edges of visible area.
-  float distFade = 1.0 - smoothstep(u_arena_radius * 0.3, u_arena_radius * 0.95, distFromOrigin);
+  vec3 surfaceColor = vec3(0.010, 0.015, 0.040) * (0.50 + diffuse * 0.50)
+                    + vec3(0.010, 0.065, 0.105) * (0.35 + 0.65 * normal.y * normal.y)
+                    + vec3(0.045, 0.020, 0.090) * limb * 0.65;
+  vec3 gridColor = vec3(0.10, 0.50, 0.88) * gridLine * (0.10 + limb * 0.06);
+  vec3 landmarkColor = vec3(0.22, 0.78, 1.00) * (polarGlow * 0.16 + dateLine * 0.08 * pulse);
 
-  // Compose grid: very subtle blue-violet lines.
-  vec3 gridColor = vec3(0.15, 0.12, 0.35) * gridLine * 0.35 * distFade;
+  vec3 col = surfaceColor + gridColor + landmarkColor;
+  float alpha = (0.11 + gridLine * 0.08 + polarGlow * 0.05 + limb * 0.07) * sphereMask;
 
-  // Arena wall: bright cyan-white with colored glow.
-  vec3 wallColor = vec3(0.3, 0.7, 1.0) * arenaLine * 2.5 * pulse
-                 + vec3(0.2, 0.4, 0.9) * arenaGlow * 0.8 * pulse;
-
-  // Player proximity brightening — handled by uniform later if needed.
-  vec3 col = gridColor + wallColor;
-  float alpha = max(gridLine * 0.12 * distFade, arenaLine * 0.9 + arenaGlow * 0.4);
-
-  fragColor = vec4(col, alpha);
+  fragColor = vec4(col, clamp(alpha, 0.0, 1.0));
 }
 `;
 
 // ─── Bloom: separable Gaussian ───────────────────────────────────────────
 // Architecture: scene→half-res (box downsample) → H→V × 2 cycles (Gaussian)
-//               → full-res (bilinear upsample) → composite.
+//               → full-res (9-tap tent upsample) → composite.
 //
 // WHY separable: 2D Gaussian = G1D_H × G1D_V, which is radially symmetric.
 // A single-pass 2D grid kernel (tent/box) is a separable BOX filter, which
@@ -394,8 +420,9 @@ void main() {
 }
 `;
 
-// Final upsample: simple bilinear blit from half-res bloom to full-res.
-// GL_LINEAR on the FBO texture handles the interpolation automatically.
+// Final upsample: 9-tap tent filter from half-res bloom to full-res.
+// This removes the visible half-res cell edges that survive a naked bilinear
+// stretch, especially around bright additive primitives.
 export const BLOOM_UP_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 
@@ -406,7 +433,21 @@ in vec2 v_uv;
 out vec4 fragColor;
 
 void main() {
-  fragColor = vec4(texture(u_src, v_uv).rgb, 1.0);
+  vec2 dx = vec2(u_texel.x, 0.0);
+  vec2 dy = vec2(0.0, u_texel.y);
+
+  vec3 col =
+    texture(u_src, v_uv - dx - dy).rgb * 1.0 +
+    texture(u_src, v_uv      - dy).rgb * 2.0 +
+    texture(u_src, v_uv + dx - dy).rgb * 1.0 +
+    texture(u_src, v_uv - dx     ).rgb * 2.0 +
+    texture(u_src, v_uv          ).rgb * 4.0 +
+    texture(u_src, v_uv + dx     ).rgb * 2.0 +
+    texture(u_src, v_uv - dx + dy).rgb * 1.0 +
+    texture(u_src, v_uv      + dy).rgb * 2.0 +
+    texture(u_src, v_uv + dx + dy).rgb * 1.0;
+
+  fragColor = vec4(col * 0.0625, 1.0);
 }
 `;
 
@@ -480,4 +521,3 @@ void main() {
   fragColor = texture(u_src, v_uv);
 }
 `;
-

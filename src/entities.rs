@@ -39,6 +39,7 @@ pub enum EnemyState {
     Shooting,
 }
 
+#[derive(Clone)]
 pub struct Enemy {
     pub pos: Vec2,
     pub radius: f32,
