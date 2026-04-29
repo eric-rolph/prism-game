@@ -23,30 +23,32 @@ Status: implemented; playtest pending.
 
 ## Slice 2: Synergy System Upgrade
 
-Status: started with Gravity Well and Event Horizon.
+Status: complete.
 
 Goal: turn synergies into build-defining effects, not hidden arithmetic.
 
-- Add an explicit synergy activation model in Rust so the UI can query active and almost-active combos.
-- Show active synergies on the HUD, not only as hints on level-up cards.
-- Add one visible effect per existing combo:
-  - Chain Reaction: cascade beams fork into fan patterns and gain a distinct color.
-  - Blizzard: frozen enemies shatter into small slow fields on death.
-  - Supernova: diffract bursts become thicker expanding spokes.
-  - Prism Cannon: chromatic beams converge into a periodic white core shot.
-  - Tracking Echo: echo salvos retarget independently instead of replaying the same aim.
-  - Frozen Orbit: halo beads leave brief frost trails.
-  - Blood Pact: thorns beams heal only on close-range hits, rewarding risky positioning.
-  - Martyrdom: thorns kills emit mini cascade pulses.
-  - Resonance: barrier hits trigger shorter, more frequent interference ripples.
-  - Gravity Well: Magnet + Interference makes pulse rings pull enemies inward.
-  - Event Horizon: Momentum + Halo collapses halo orbit tighter and spins it faster.
+- ✅ Add an explicit synergy activation model in Rust so the UI can query active and almost-active combos.
+- ✅ Show active synergies on the HUD, not only as hints on level-up cards.
+- ✅ All 11 synergy effects implemented:
+  - Chain Reaction: cascade beams fork into 3-wide fans, electric cyan color.
+  - Blizzard: frozen enemies shatter into slow fields; frozen targets take +40% beam damage.
+  - Supernova: diffract bursts become evenly-spaced starburst spokes in white-violet.
+  - Prism Cannon: periodic convergent white core shot every 1.8s (4× damage, 3.5× thick).
+  - Tracking Echo: echo salvos aim at the second-nearest enemy for independent retargeting.
+  - Frozen Orbit: halo beads leave frost fields every 0.35s as they orbit.
+  - Blood Pact: thorns heal only within 90 units, rewarding close-range aggression.
+  - Martyrdom: thorns kills emit cascade pulses from the kill position.
+  - Resonance: halves interference pulse interval when Barrier active.
+  - Gravity Well: interference rings pull nearby enemies inward.
+  - Event Horizon: halo orbit radius shrinks 28%, angular speed increases 65%.
 
 ## Slice 3: Upgrade Variety
 
+Status: started with rarity tags.
+
 Goal: make level-up choices create archetypes.
 
-- Add rarity tags: common numeric upgrades, rare behavior modifiers, legendary evolutions.
+- ✅ Rarity tags on level-up cards: common (muted), rare (blue), legendary (gold) with matching border tints.
 - Add reroll and skip after the level-up UI is stable.
 - Add 3-4 passive shards:
   - Magnet: larger gem magnet radius and faster pickup pull.
@@ -57,7 +59,7 @@ Goal: make level-up choices create archetypes.
 
 ## Slice 4: Enemy And Wave Director
 
-Status: started with Pulsar, Umbra, and collapsing Orbiters.
+Status: in progress.
 
 Goal: make enemy count and enemy composition progress deliberately.
 
@@ -68,8 +70,8 @@ Goal: make enemy count and enemy composition progress deliberately.
   - Formation
   - Cluster Drop
   - Boss Telegraph
-- Add spawn grace so new enemies cannot deal instant contact damage.
-- Add late-wave special events at waves 12, 15, 18, 21, 24, and 27.
+- ✅ Spawn grace (0.5s contact-damage immunity on spawn).
+- ✅ Late-wave special events at waves 12, 15, 18, 21, 24, and 27.
 - Add bosses or elites at 5:00, 10:00, and 15:00:
   - 5:00 Sentinel: slow brute with orbiting shields.
   - 10:00 Hydra: splitter boss that sheds minions.
@@ -121,8 +123,8 @@ Goal: make progression legible and replayable.
 
 ## Near-Term Order
 
-1. Finish Slice 1 and playtest a 15-minute run.
-2. Build the synergy activation query and active-synergy HUD.
-3. Convert 2-3 existing synergies into highly visible effects.
-4. Add late-wave spawn patterns before adding new enemy structs.
-5. Add the 10:00 Hydra-style pressure event, then decide whether the final win should be pure survival or boss kill.
+1. ✅ Finish Slice 1 and playtest a 15-minute run.
+2. ✅ Build the synergy activation query and active-synergy HUD.
+3. ✅ Convert all 11 synergies into visible effects.
+4. ✅ Add late-wave spawn events at waves 12, 15, 18, 21, 24, 27.
+5. Add the 5:00 Sentinel boss, then decide whether 10:00 Hydra or Slice 3 reroll/skip is higher priority.

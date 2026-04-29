@@ -19,24 +19,25 @@ const SYNERGY_NAMES: string[] = [
 ];
 
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
-interface ShardMeta { name: string; color: string; desc: string; synergies: string[] }
+type Rarity = 'common' | 'rare' | 'legendary';
+interface ShardMeta { name: string; color: string; desc: string; synergies: string[]; rarity: Rarity }
 const SHARDS: ShardMeta[] = [
-  { name: 'SPLIT',        color: '#8effa3', desc: 'fan out more beams per volley',       synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
-  { name: 'REFRACT',      color: '#7fd3ff', desc: 'beams curve toward nearest enemy',    synergies: ['ECHO → TRACKING ECHO'] },
-  { name: 'MIRROR',       color: '#c9a3ff', desc: 'fire in every direction',             synergies: ['DIFFRACT → SUPERNOVA'] },
-  { name: 'CHROMATIC',    color: '#ffa3c9', desc: 'split into red / green / blue',       synergies: ['LENS → PRISM CANNON'] },
-  { name: 'LENS',         color: '#ffe58e', desc: 'thicker, heavier beams',              synergies: ['CHROMATIC → PRISM CANNON'] },
-  { name: 'DIFFRACT',     color: '#8efff4', desc: 'hits scatter into radial bursts',     synergies: ['MIRROR → SUPERNOVA'] },
-  { name: 'ECHO',         color: '#ff9d6c', desc: 'second salvo after a short delay',    synergies: ['REFRACT → TRACKING ECHO'] },
-  { name: 'HALO',         color: '#f5f5bc', desc: 'orbital beads strike on contact',     synergies: ['FROST → FROZEN ORBIT'] },
-  { name: 'CASCADE',      color: '#ff6f91', desc: 'kills fork into secondary beams',     synergies: ['SPLIT → CHAIN REACTION'] },
-  { name: 'INTERFERENCE', color: '#9a9dff', desc: 'standing-wave pulses ripple outward', synergies: ['BARRIER → RESONANCE'] },
-  { name: 'SIPHON',       color: '#a3ffdb', desc: 'beams heal you on every hit',         synergies: ['THORNS → BLOOD PACT (close-range only)'] },
-  { name: 'FROST',        color: '#b3e5fc', desc: 'beams slow enemies on hit',           synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
-  { name: 'BARRIER',      color: '#64b5f6', desc: 'energy shield absorbs + deals damage',synergies: ['INTERFERENCE → RESONANCE'] },
-  { name: 'THORNS',       color: '#ef5350', desc: 'taking damage fires retaliatory beams',synergies: ['SIPHON → BLOOD PACT (close-range heal)', 'CASCADE → MARTYRDOM'] },
-  { name: 'MAGNET',       color: '#7cffd4', desc: 'pull radiance gems from farther away', synergies: ['INTERFERENCE → GRAVITY WELL'] },
-  { name: 'MOMENTUM',     color: '#d7ff6f', desc: 'move faster and dash more often',     synergies: ['HALO → EVENT HORIZON'] },
+  { name: 'SPLIT',        color: '#8effa3', rarity: 'common',    desc: 'fan out more beams per volley',        synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
+  { name: 'REFRACT',      color: '#7fd3ff', rarity: 'rare',      desc: 'beams curve toward nearest enemy',     synergies: ['ECHO → TRACKING ECHO'] },
+  { name: 'MIRROR',       color: '#c9a3ff', rarity: 'common',    desc: 'fire in every direction',              synergies: ['DIFFRACT → SUPERNOVA'] },
+  { name: 'CHROMATIC',    color: '#ffa3c9', rarity: 'common',    desc: 'split into red / green / blue',        synergies: ['LENS → PRISM CANNON'] },
+  { name: 'LENS',         color: '#ffe58e', rarity: 'common',    desc: 'thicker, heavier beams',               synergies: ['CHROMATIC → PRISM CANNON'] },
+  { name: 'DIFFRACT',     color: '#8efff4', rarity: 'rare',      desc: 'hits scatter into radial bursts',      synergies: ['MIRROR → SUPERNOVA'] },
+  { name: 'ECHO',         color: '#ff9d6c', rarity: 'rare',      desc: 'second salvo after a short delay',     synergies: ['REFRACT → TRACKING ECHO'] },
+  { name: 'HALO',         color: '#f5f5bc', rarity: 'rare',      desc: 'orbital beads strike on contact',      synergies: ['FROST → FROZEN ORBIT', 'MOMENTUM → EVENT HORIZON'] },
+  { name: 'CASCADE',      color: '#ff6f91', rarity: 'legendary', desc: 'kills fork into secondary beams',      synergies: ['SPLIT → CHAIN REACTION', 'THORNS → MARTYRDOM'] },
+  { name: 'INTERFERENCE', color: '#9a9dff', rarity: 'legendary', desc: 'standing-wave pulses ripple outward',  synergies: ['BARRIER → RESONANCE', 'MAGNET → GRAVITY WELL'] },
+  { name: 'SIPHON',       color: '#a3ffdb', rarity: 'common',    desc: 'beams heal you on every hit',          synergies: ['THORNS → BLOOD PACT (close-range only)'] },
+  { name: 'FROST',        color: '#b3e5fc', rarity: 'common',    desc: 'beams slow enemies on hit',            synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
+  { name: 'BARRIER',      color: '#64b5f6', rarity: 'common',    desc: 'energy shield absorbs + deals damage', synergies: ['INTERFERENCE → RESONANCE'] },
+  { name: 'THORNS',       color: '#ef5350', rarity: 'rare',      desc: 'taking damage fires retaliatory beams',synergies: ['SIPHON → BLOOD PACT (close-range heal)', 'CASCADE → MARTYRDOM'] },
+  { name: 'MAGNET',       color: '#7cffd4', rarity: 'common',    desc: 'pull radiance gems from farther away', synergies: ['INTERFERENCE → GRAVITY WELL'] },
+  { name: 'MOMENTUM',     color: '#d7ff6f', rarity: 'common',    desc: 'move faster and dash more often',      synergies: ['HALO → EVENT HORIZON'] },
 ];
 
 async function main(): Promise<void> {
@@ -236,6 +237,8 @@ async function main(): Promise<void> {
       const card = document.createElement('button');
       card.className = 'shard-card';
       card.type = 'button';
+      if (meta.rarity === 'rare') card.style.borderColor = 'rgba(127,211,255,0.3)';
+      if (meta.rarity === 'legendary') card.style.borderColor = 'rgba(255,215,64,0.4)';
 
       // Build synergy hint for this shard.
       let synergyHtml = '';
@@ -244,6 +247,7 @@ async function main(): Promise<void> {
       }
 
       card.innerHTML =
+        `<div class="shard-rarity ${meta.rarity}">${meta.rarity}</div>` +
         `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
         `<div class="shard-name">${meta.name}</div>` +
         `<div class="shard-level">LVL ${currentLevel} → ${nextLevel}</div>` +

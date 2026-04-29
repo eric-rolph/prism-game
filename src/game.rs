@@ -61,6 +61,7 @@ pub struct Game {
 
     halo_trail_timer: f32,
     wave_event_fired: bool,
+    prism_cannon_timer: f32,
 
     // Screen shake (accumulated amplitude, decays per frame).
     shake_amount: f32,
@@ -355,6 +356,9 @@ const BLIZZARD_FIELD_RADIUS: f32 = 72.0;
 const BLIZZARD_FIELD_LIFETIME: f32 = 2.8;
 const MAX_FROST_FIELDS: usize = 12;
 
+const PRISM_CANNON_INTERVAL: f32 = 1.8;
+const PRISM_CANNON_DAMAGE_MULT: f32 = 4.0;
+const PRISM_CANNON_THICKNESS_MULT: f32 = 3.5;
 const BLOOD_PACT_RANGE: f32 = 90.0;
 const SPAWN_GRACE: f32 = 0.50;
 const FROZEN_ORBIT_TRAIL_INTERVAL: f32 = 0.35;
@@ -438,6 +442,7 @@ impl Game {
             hit_flash_positions: Vec::new(),
             halo_trail_timer: 0.0,
             wave_event_fired: false,
+            prism_cannon_timer: 0.0,
             circle_buf: Vec::with_capacity(1024),
             beam_buf: Vec::with_capacity(256),
         }
@@ -972,6 +977,7 @@ impl Game {
         }
 
         // Fire.
+        self.prism_cannon_timer -= dt;
         self.fire_timer -= dt;
         if self.fire_timer <= 0.0 {
             if self.fire_primary() {
@@ -982,12 +988,21 @@ impl Game {
         }
 
         // Echo: scheduled re-fires.
+        // Synergy: TRACKING ECHO (Refract+Echo 3+) — salvos target the second-nearest enemy.
+        let tracking_echo = self
+            .inventory
+            .has_synergy(ShardKind::Refract, ShardKind::Echo);
         let now = self.time;
         let mut i = 0;
         while i < self.pending_echoes.len() {
             if self.pending_echoes[i] <= now {
                 self.pending_echoes.swap_remove(i);
-                self.fire_primary_inner(false);
+                let echo_target = if tracking_echo {
+                    self.find_secondary_target()
+                } else {
+                    None
+                };
+                self.fire_primary_inner(false, echo_target);
             } else {
                 i += 1;
             }
@@ -1208,11 +1223,11 @@ impl Game {
     // --- Firing ---------------------------------------------------------
 
     fn fire_primary(&mut self) -> bool {
-        self.fire_primary_inner(true)
+        self.fire_primary_inner(true, None)
     }
 
-    fn fire_primary_inner(&mut self, schedule_echo: bool) -> bool {
-        let target = match self.find_nearest_enemy_pos() {
+    fn fire_primary_inner(&mut self, schedule_echo: bool, target_override: Option<Vec2>) -> bool {
+        let target = match target_override.or_else(|| self.find_nearest_enemy_pos()) {
             Some(t) => t,
             None => return false,
         };
@@ -1228,6 +1243,24 @@ impl Game {
         let salvo = compose_salvo(self.player.pos, target, &local_enemies, &self.inventory);
         if salvo.is_empty() {
             return false;
+        }
+
+        // Synergy: PRISM CANNON (Lens+Chromatic 3+) — periodic convergent white core shot.
+        if self.inventory.has_synergy(ShardKind::Lens, ShardKind::Chromatic)
+            && self.prism_cannon_timer <= 0.0
+        {
+            self.prism_cannon_timer = PRISM_CANNON_INTERVAL;
+            let base = &salvo[0];
+            let dir = (base.end - base.start).normalize_or_zero();
+            let reach = (base.end - base.start).length();
+            let core = BeamRequest {
+                start: base.start,
+                end: base.start + dir * reach,
+                thickness: base.thickness * PRISM_CANNON_THICKNESS_MULT,
+                damage: base.damage * PRISM_CANNON_DAMAGE_MULT,
+                color: [1.0, 1.0, 1.0],
+            };
+            self.fire_beam(core);
         }
 
         for req in &salvo {
@@ -1710,6 +1743,35 @@ impl Game {
                     self.spawn_enemy_at(EnemyKind::Splitter, base + spread);
                 }
             }
+            21 => {
+                // Iron Ring: 4 Brutes from cardinal directions + 2 Pulsars.
+                for i in 0..4 {
+                    let angle = i as f32 * std::f32::consts::TAU / 4.0;
+                    self.spawn_enemy_at(EnemyKind::Brute, angle);
+                }
+                let a = self.rng.angle();
+                self.spawn_enemy_at(EnemyKind::Pulsar, a);
+                self.spawn_enemy_at(EnemyKind::Pulsar, a + std::f32::consts::PI);
+            }
+            24 => {
+                // Orbit Cage: 6 Orbiters from evenly distributed angles.
+                for i in 0..6 {
+                    let angle = i as f32 * std::f32::consts::TAU / 6.0;
+                    self.spawn_enemy_at(EnemyKind::Orbiter, angle);
+                }
+            }
+            27 => {
+                // Final Storm: Umbra vanguard + Dasher flanks + Splitter cluster.
+                for i in 0..3 {
+                    let angle = i as f32 * std::f32::consts::TAU / 3.0;
+                    self.spawn_enemy_at(EnemyKind::Umbra, angle);
+                    self.spawn_enemy_at(EnemyKind::Dasher, angle + 0.4);
+                }
+                let base = self.rng.angle();
+                for i in 0..3 {
+                    self.spawn_enemy_at(EnemyKind::Splitter, base + i as f32 * 0.3);
+                }
+            }
             _ => {}
         }
     }
@@ -1842,6 +1904,21 @@ impl Game {
             })
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(p, _)| p)
+    }
+
+    fn find_secondary_target(&self) -> Option<Vec2> {
+        let mut by_dist: Vec<(Vec2, f32)> = self
+            .enemies
+            .iter()
+            .map(|e| {
+                let delta = nearest_globe_delta(self.player.pos, e.pos);
+                (self.player.pos + delta, delta.length_squared())
+            })
+            .collect();
+        by_dist.sort_unstable_by(|a, b| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        by_dist.get(1).map(|(p, _)| *p)
     }
 
     fn wave_shape(&self) -> WaveShape {
