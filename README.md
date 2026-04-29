@@ -50,7 +50,7 @@ prism/
 ├── src/
 │   ├── lib.rs                      #[wasm_bindgen] surface
 │   ├── game.rs                     State, update loop
-│   ├── shards.rs                   The 10 shard operators
+│   ├── shards.rs                   The 16 shard operators
 │   ├── entities.rs                 Plain data structs
 │   └── math.rs                     Seeded xorshift RNG
 ├── web/

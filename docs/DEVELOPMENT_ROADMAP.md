@@ -19,11 +19,33 @@ Prism is now a playable browser bullet-heaven with:
 ## Current Diagnosis
 
 - The run now has its first milestone encounter at 5:00, but the full boss arc is not complete. Late-game pressure after Sentinel still comes mostly from density, cocktails, and events rather than Hydra/Void Prism rules.
+- The strongest senior-dev question is now: what does the player decide every 5 seconds? Each new feature should create a readable choice about positioning, target priority, route planning, or build direction.
+- Pickup readability needs to stay sacred. Radiance gems must be instantly distinct from enemies in shape, color, animation, and motion trail.
 - Upgrade choices are readable but still mostly “pick one of three.” There is no reroll, skip, banish, evolution offer, or long-horizon build target after a synergy activates.
 - The death/victory screen reports only score, rank, kills, and survival time. It does not yet tell the story of the build or give the player a saved target to beat.
 - Audio remains the biggest missing sensory layer. The visuals now have enough state changes to drive a good Web Audio event system without needing asset files.
 - Balance needs measured playtests at the new 15-minute length: time-to-death, rank curve, kill count, damage taken sources, and common winning shard clusters.
 - Older docs still contain useful designs, but some status tables are stale. Treat `docs/ENEMY_WAVE_DESIGN.md` as a boss/enemy idea bank and `docs/GENRE_GAP_ANALYSIS.md` as historical context.
+
+## Senior Game-Dev Direction
+
+Prism should avoid adding “more stuff” unless the stuff creates a player decision or strengthens feedback. The goal is not higher entity count; it is sharper reads.
+
+Design principles for the next passes:
+
+- Every 5 seconds, the player should make a decision: dodge, route toward gems, break a cage, hunt a ranged threat, reposition around a boss shield, or commit to a build path.
+- Readability beats surprise. Enemies, pickups, boss shields, projectiles, and hazards need distinct silhouettes and motion language.
+- Bosses should be rule changes, not large enemies. Sentinel teaches shield positioning; Hydra should teach target priority; Void Prism should teach phase and space management.
+- Upgrades need both immediate value and long-horizon intent. Synergies are mid-run excitement; level-6 evolutions are build goals.
+- Tune from run evidence. Major balance changes should follow run summaries, not intuition alone.
+
+Immediate senior-dev execution sequence:
+
+1. Make radiance gems visually unmistakable as pickups.
+2. Add debug run summaries for balance evidence.
+3. Improve Sentinel shield feedback and add one explicit attack pattern.
+4. Extract boss/wave/progression modules from `game.rs` before Hydra.
+5. Add procedural audio for beams, pickups, shield cracks, rank-up, boss warnings, death, and victory.
 
 ## Slice 1: Boss Milestones
 
@@ -172,8 +194,9 @@ Status: opportunistic, but do before public sharing.
    - If choices feel stale before 10:00, build skip/reroll and first evolutions next.
 5. Add the Web Audio event system before polish work; it will make every later feature easier to evaluate.
 
-## Done From Previous Roadmap
+## Done / Completed
 
+- Radiance gems rendered as distinct pickup crystals/sparkles instead of enemy-like round dots.
 - 15-minute session length.
 - Max shard level 6.
 - Wave-ramped enemy cap and catch-up spawning.

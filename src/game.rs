@@ -109,7 +109,7 @@ const GEM_MAGNET_RADIUS: f32 = 100.0;
 const GEM_COLLECT_RADIUS: f32 = 16.0;
 const GEM_MAGNET_SPEED: f32 = 400.0;
 const GEM_LIFETIME: f32 = 20.0;
-const GEM_RADIUS: f32 = 4.0;
+const GEM_VISUAL_RADIUS: f32 = 4.5; // Half the starter Drone radius.
 
 // Player health.
 const PLAYER_MAX_HP: f32 = 100.0;
@@ -2667,24 +2667,47 @@ impl Game {
             });
         }
 
-        // XP gems — bright cyan/green, small, pulsing glow.
+        // Radiance gems — pickup-only crystals, not enemy-like round dots.
         for g in &self.gems {
             let pos = nearest_globe_pos(camera, g.pos);
-            let pulse = 1.0 + (g.life * 6.0).sin() * 0.3;
+            let pulse = 1.0 + (g.life * 7.5).sin() * 0.25;
             let fade = if g.life > GEM_LIFETIME - 2.0 {
                 (GEM_LIFETIME - g.life) / 2.0
             } else {
                 1.0
             };
+            let (r, g_col, b, tier_glow) = if g.value >= 5 {
+                (1.0, 0.82, 0.24, 1.1)
+            } else if g.value >= 3 {
+                (0.28, 0.72, 1.0, 0.9)
+            } else {
+                (0.20, 1.0, 0.68, 0.75)
+            };
+            let radius = GEM_VISUAL_RADIUS;
+            let core_radius = radius * 0.52;
+
+            // Colored pickup shell: outer visible silhouette is half a starter Drone.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: GEM_RADIUS,
-                r: 0.3,
+                radius,
+                r,
+                g: g_col,
+                b,
+                a: 0.36 * fade,
+                glow: tier_glow * pulse * fade,
+            });
+
+            // White-hot center makes the collectible read as "reward" instead of threat.
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: core_radius,
+                r: 0.92,
                 g: 1.0,
-                b: 0.7,
-                a: fade,
-                glow: 2.5 * pulse * fade,
+                b: 0.92,
+                a: 0.8 * fade,
+                glow: tier_glow * 1.4 * pulse * fade,
             });
         }
 
