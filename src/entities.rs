@@ -80,6 +80,33 @@ pub struct Crystal {
     pub drift_vel: Vec2,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BossKind {
+    Sentinel,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BossState {
+    Telegraphing,
+    Active,
+    Dying,
+}
+
+pub struct Boss {
+    pub kind: BossKind,
+    pub pos: Vec2,
+    pub radius: f32,
+    pub hp: f32,
+    pub max_hp: f32,
+    pub speed: f32,
+    pub contact_damage: f32,
+    pub state: BossState,
+    pub state_timer: f32,
+    pub phase: u8,
+    pub shield_angle: f32,
+    pub shield_hp: [f32; 3],
+}
+
 pub struct Beam {
     pub start: Vec2,
     pub end: Vec2,

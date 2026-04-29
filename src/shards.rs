@@ -197,17 +197,17 @@ impl Inventory {
 /// `active_synergy_bits` / `near_synergy_bits` corresponds to entry i here.
 /// Must stay in index-lock with SYNERGY_NAMES in web/src/main.ts.
 pub const SYNERGIES: &[(ShardKind, ShardKind, &'static str)] = &[
-    (ShardKind::Split,       ShardKind::Cascade,      "CHAIN REACTION"),
-    (ShardKind::Split,       ShardKind::Frost,        "BLIZZARD"),
-    (ShardKind::Mirror,      ShardKind::Diffract,     "SUPERNOVA"),
-    (ShardKind::Lens,        ShardKind::Chromatic,    "PRISM CANNON"),
-    (ShardKind::Refract,     ShardKind::Echo,         "TRACKING ECHO"),
-    (ShardKind::Halo,        ShardKind::Frost,        "FROZEN ORBIT"),
-    (ShardKind::Halo,        ShardKind::Momentum,     "EVENT HORIZON"),
-    (ShardKind::Siphon,      ShardKind::Thorns,       "BLOOD PACT"),
-    (ShardKind::Thorns,      ShardKind::Cascade,      "MARTYRDOM"),
-    (ShardKind::Barrier,     ShardKind::Interference, "RESONANCE"),
-    (ShardKind::Magnet,      ShardKind::Interference, "GRAVITY WELL"),
+    (ShardKind::Split, ShardKind::Cascade, "CHAIN REACTION"),
+    (ShardKind::Split, ShardKind::Frost, "BLIZZARD"),
+    (ShardKind::Mirror, ShardKind::Diffract, "SUPERNOVA"),
+    (ShardKind::Lens, ShardKind::Chromatic, "PRISM CANNON"),
+    (ShardKind::Refract, ShardKind::Echo, "TRACKING ECHO"),
+    (ShardKind::Halo, ShardKind::Frost, "FROZEN ORBIT"),
+    (ShardKind::Halo, ShardKind::Momentum, "EVENT HORIZON"),
+    (ShardKind::Siphon, ShardKind::Thorns, "BLOOD PACT"),
+    (ShardKind::Thorns, ShardKind::Cascade, "MARTYRDOM"),
+    (ShardKind::Barrier, ShardKind::Interference, "RESONANCE"),
+    (ShardKind::Magnet, ShardKind::Interference, "GRAVITY WELL"),
 ];
 
 /// A ready-to-fire beam with concrete world-space endpoints.

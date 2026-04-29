@@ -72,6 +72,9 @@ prism/
 
 1. ✅ Pipeline alive
 2. ✅ WebGL2 renderer — SDF circles + beams, additive blend, mip-based bloom, radial chromatic aberration, Reinhard tonemap
-3. ✅ Shard system — all 10 operators, level-up picker, HUD with rank / XP / shard tray
-4. Procedural audio — Web Audio synth voices locked to a music clock
-5. Waves, Nightfall boss, meta progression, polish
+3. ✅ Shard system — 16 operators, level-up picker, rarity tags, active/near synergy HUD
+4. ✅ Survival structure — 15-minute session, wave pressure, enemy roles, XP gems, dash, death/victory screens
+5. Boss milestones — Sentinel shipped; Hydra and Void Prism next
+6. Upgrade economy — skip/reroll, passive shards, level-6 evolutions
+7. Procedural audio — Web Audio event voices for beams, gems, rank-ups, synergies, bosses, victory/death
+8. Run goals — post-run stats, local high scores, optional endless mode

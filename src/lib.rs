@@ -188,6 +188,18 @@ impl Game {
         self.inner.is_victory()
     }
 
+    pub fn boss_active(&self) -> bool {
+        self.inner.boss_active()
+    }
+
+    pub fn boss_kind_index(&self) -> i32 {
+        self.inner.boss_kind_index()
+    }
+
+    pub fn boss_hp_pct(&self) -> f32 {
+        self.inner.boss_hp_pct()
+    }
+
     pub fn arena_radius(&self) -> f32 {
         self.inner.arena_radius()
     }

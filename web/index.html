@@ -308,6 +308,38 @@
         color: var(--dim);
         margin-top: 2px;
       }
+      #boss-hud {
+        position: absolute;
+        top: 52px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(360px, 58vw);
+        display: none;
+        text-align: center;
+        pointer-events: none;
+      }
+      #boss-hud.shown {
+        display: block;
+      }
+      #boss-name {
+        font-size: 10px;
+        letter-spacing: 3px;
+        color: rgba(255, 238, 210, 0.8);
+        text-shadow: 0 0 16px rgba(255, 180, 120, 0.35);
+      }
+      #boss-bar {
+        height: 3px;
+        margin-top: 7px;
+        background: rgba(255, 238, 210, 0.14);
+        overflow: hidden;
+      }
+      #boss-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #ff4f4f, #ffb36c, #fff4c7);
+        box-shadow: 0 0 16px rgba(255, 160, 100, 0.7);
+        transition: width 100ms linear;
+      }
 
       /* Dash cooldown indicator */
       #dash-wrap {
@@ -395,6 +427,10 @@
       <div id="timer-wrap">
         <div id="timer">0:00</div>
         <div id="wave-label">WAVE 1</div>
+      </div>
+      <div id="boss-hud">
+        <div id="boss-name">PRISM SENTINEL</div>
+        <div id="boss-bar"><div id="boss-fill"></div></div>
       </div>
       <div id="stats">
         <div class="rank" id="rank">rank 0</div>

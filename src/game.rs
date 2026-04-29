@@ -5,8 +5,8 @@
 //! JS side can show a picker UI in response to `is_leveling_up()`.
 
 use crate::entities::{
-    Beam, Crystal, Enemy, EnemyKind, EnemyState, FrostField, Halo, InterferencePulse, Particle,
-    Player, Projectile, XpGem,
+    Beam, Boss, BossKind, BossState, Crystal, Enemy, EnemyKind, EnemyState, FrostField, Halo,
+    InterferencePulse, Particle, Player, Projectile, XpGem,
 };
 use crate::math::Rng;
 use crate::shards::{compose_salvo, BeamRequest, Inventory, ShardKind};
@@ -27,6 +27,7 @@ pub struct Game {
     gems: Vec<XpGem>,
     projectiles: Vec<Projectile>,
     crystals: Vec<Crystal>,
+    boss: Option<Boss>,
 
     input: Vec2,
     dash_input: bool,
@@ -62,6 +63,9 @@ pub struct Game {
     halo_trail_timer: f32,
     wave_event_fired: bool,
     prism_cannon_timer: f32,
+    sentinel_spawned: bool,
+    boss_breather_timer: f32,
+    boss_kills: u32,
 
     // Screen shake (accumulated amplitude, decays per frame).
     shake_amount: f32,
@@ -139,6 +143,19 @@ const ORBITER_INWARD_SPEED_PER_WAVE: f32 = 0.55;
 // Crystal obstacles.
 const MAX_CRYSTALS: usize = 6;
 const CRYSTAL_SPAWN_INTERVAL: f32 = 45.0;
+
+// Boss milestones.
+const SENTINEL_SPAWN_TIME: f32 = 300.0;
+const BOSS_TELEGRAPH_TIME: f32 = 2.0;
+const BOSS_DEATH_TIME: f32 = 1.0;
+const BOSS_POST_BREATHER: f32 = 3.0;
+const BOSS_SPAWN_SOFT_CAP: usize = 45;
+const SENTINEL_HP: f32 = 9000.0;
+const SENTINEL_RADIUS: f32 = 46.0;
+const SENTINEL_SHIELD_HP: f32 = 800.0;
+const SENTINEL_SHIELD_RADIUS: f32 = 12.0;
+const SENTINEL_SHIELD_ORBIT: f32 = 72.0;
+const SENTINEL_SHIELD_SPIN: f32 = 1.35;
 
 // Traversable globe.
 // World x/y coordinates are arc lengths on an equirectangular chart:
@@ -417,6 +434,7 @@ impl Game {
             gems: Vec::with_capacity(256),
             projectiles: Vec::with_capacity(64),
             crystals: Vec::new(),
+            boss: None,
             input: Vec2::ZERO,
             dash_input: false,
             rng: Rng::new(seed),
@@ -443,6 +461,9 @@ impl Game {
             halo_trail_timer: 0.0,
             wave_event_fired: false,
             prism_cannon_timer: 0.0,
+            sentinel_spawned: false,
+            boss_breather_timer: 0.0,
+            boss_kills: 0,
             circle_buf: Vec::with_capacity(1024),
             beam_buf: Vec::with_capacity(256),
         }
@@ -493,6 +514,24 @@ impl Game {
 
     pub fn is_victory(&self) -> bool {
         self.dead && self.time >= SESSION_LENGTH
+    }
+
+    pub fn boss_active(&self) -> bool {
+        self.boss.is_some()
+    }
+
+    pub fn boss_kind_index(&self) -> i32 {
+        match self.boss.as_ref().map(|b| b.kind) {
+            Some(BossKind::Sentinel) => 0,
+            None => -1,
+        }
+    }
+
+    pub fn boss_hp_pct(&self) -> f32 {
+        self.boss
+            .as_ref()
+            .map(|b| (b.hp / b.max_hp).clamp(0.0, 1.0))
+            .unwrap_or(0.0)
     }
 
     pub fn camera(&self) -> Vec2 {
@@ -680,13 +719,25 @@ impl Game {
         }
         let in_breather = self.wave_timer > WAVE_DURATION;
 
+        if self.boss_breather_timer > 0.0 {
+            self.boss_breather_timer = (self.boss_breather_timer - dt).max(0.0);
+        }
+        self.maybe_spawn_sentinel();
+        self.update_boss(dt);
+
         // Spawn enemies (wave-based).
         let enemy_cap = self.enemy_cap_for_wave();
-        if !in_breather && self.enemies.len() < enemy_cap {
+        let boss_spawn_limited = self.boss.is_some() && self.enemies.len() >= BOSS_SPAWN_SOFT_CAP;
+        if !in_breather
+            && self.boss_breather_timer <= 0.0
+            && !boss_spawn_limited
+            && self.enemies.len() < enemy_cap
+        {
             self.spawn_timer -= dt;
             let mut spawned = 0;
             while self.spawn_timer <= 0.0
                 && self.enemies.len() < enemy_cap
+                && !(self.boss.is_some() && self.enemies.len() >= BOSS_SPAWN_SOFT_CAP)
                 && spawned < MAX_SPAWNS_PER_FRAME
             {
                 self.spawn_wave_enemy();
@@ -966,6 +1017,17 @@ impl Game {
                 self.shake_amount += SHAKE_HIT_PX;
             }
         }
+        if self.player.iframe_timer <= 0.0 {
+            if let Some(boss) = &self.boss {
+                if boss.state == BossState::Active
+                    && globe_distance(boss.pos, self.player.pos) < boss.radius + self.player.radius
+                {
+                    self.apply_damage_to_player(boss.contact_damage);
+                    self.player.iframe_timer = IFRAME_DURATION;
+                    self.shake_amount += SHAKE_HIT_PX * 1.6;
+                }
+            }
+        }
 
         // Player death check (early, before beams fire).
         if self.player.hp <= 0.0 {
@@ -1049,6 +1111,15 @@ impl Game {
                 }
             }
         }
+        if let Some(boss) = &mut self.boss {
+            if boss.state == BossState::Active {
+                for (hpos, hsize) in &halo_snapshots {
+                    if globe_distance(boss.pos, *hpos) < boss.radius + hsize {
+                        boss.hp -= HALO_DPS * dt;
+                    }
+                }
+            }
+        }
         // Frozen Orbit: halo beads leave brief frost fields as they orbit.
         if frozen_orbit && !self.halos.is_empty() {
             self.halo_trail_timer -= dt;
@@ -1080,6 +1151,13 @@ impl Game {
                     e.hp -= BARRIER_CONTACT_DPS * dt;
                 }
             }
+            if let Some(boss) = &mut self.boss {
+                if boss.state == BossState::Active
+                    && globe_distance(boss.pos, self.player.pos) < BARRIER_RADIUS + boss.radius
+                {
+                    boss.hp -= BARRIER_CONTACT_DPS * dt;
+                }
+            }
         }
 
         // Interference: emit + expand + damage.
@@ -1096,8 +1174,7 @@ impl Game {
                 let resonance = self
                     .inventory
                     .has_synergy(ShardKind::Barrier, ShardKind::Interference);
-                self.interference_timer =
-                    if resonance { 1.0 } else { 2.0 } / interf_level as f32;
+                self.interference_timer = if resonance { 1.0 } else { 2.0 } / interf_level as f32;
             }
         }
         for p in &mut self.pulses {
@@ -1112,7 +1189,11 @@ impl Game {
             .inventory
             .has_synergy(ShardKind::Magnet, ShardKind::Interference)
         {
-            Some(70.0 + self.inventory.level(ShardKind::Magnet) as f32 * MAGNET_SPEED_PER_LEVEL * 0.45)
+            Some(
+                70.0 + self.inventory.level(ShardKind::Magnet) as f32
+                    * MAGNET_SPEED_PER_LEVEL
+                    * 0.45,
+            )
         } else {
             None
         };
@@ -1128,6 +1209,14 @@ impl Game {
                 }
                 if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + e.radius {
                     e.hp -= INTERFERENCE_DPS * dt;
+                }
+            }
+            if let Some(boss) = &mut self.boss {
+                if boss.state == BossState::Active {
+                    let d = globe_distance(boss.pos, *ppos);
+                    if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + boss.radius {
+                        boss.hp -= INTERFERENCE_DPS * dt;
+                    }
                 }
             }
         }
@@ -1192,7 +1281,13 @@ impl Game {
                 dead_enemies.push(dead);
             }
             for dead in &dead_enemies {
-                self.on_enemy_death(dead.pos, dead.kind, cascade_depth, dead.no_xp, dead.slow_timer > 0.0);
+                self.on_enemy_death(
+                    dead.pos,
+                    dead.kind,
+                    cascade_depth,
+                    dead.no_xp,
+                    dead.slow_timer > 0.0,
+                );
             }
             cascade_depth += 1;
             if cascade_depth >= CASCADE_MAX_DEPTH {
@@ -1200,8 +1295,15 @@ impl Game {
                 break;
             }
         }
+        if self
+            .boss
+            .as_ref()
+            .is_some_and(|b| b.state == BossState::Active && b.hp <= 0.0)
+        {
+            self.start_boss_death();
+        }
 
-        // Session victory (survived 10 minutes).
+        // Session victory (survived 15 minutes).
         if self.time >= SESSION_LENGTH && !self.dead {
             self.dead = true;
             self.score = self.compute_score() + 500; // survival bonus
@@ -1220,6 +1322,262 @@ impl Game {
         self.build_draw_buffers();
     }
 
+    // --- Boss milestones -----------------------------------------------
+
+    fn maybe_spawn_sentinel(&mut self) {
+        if self.sentinel_spawned || self.time < SENTINEL_SPAWN_TIME || self.boss.is_some() {
+            return;
+        }
+
+        self.sentinel_spawned = true;
+        let angle = self.rng.angle();
+        let dir = Vec2::new(angle.cos(), angle.sin());
+        let mut pos = self.player.pos;
+        move_on_globe(&mut pos, dir * self.screen_size.length() * 0.48);
+
+        self.boss = Some(Boss {
+            kind: BossKind::Sentinel,
+            pos,
+            radius: SENTINEL_RADIUS,
+            hp: SENTINEL_HP,
+            max_hp: SENTINEL_HP,
+            speed: 0.0,
+            contact_damage: 0.0,
+            state: BossState::Telegraphing,
+            state_timer: BOSS_TELEGRAPH_TIME,
+            phase: 0,
+            shield_angle: self.rng.angle(),
+            shield_hp: [SENTINEL_SHIELD_HP; 3],
+        });
+        self.projectiles.clear();
+        self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
+        self.shake_amount += 8.0;
+    }
+
+    fn update_boss(&mut self, dt: f32) {
+        let mut activated = false;
+        let mut phase_changed = false;
+        let mut add_spawn: Option<(Vec2, EnemyKind, u32)> = None;
+        let mut finish_death = false;
+
+        if let Some(boss) = &mut self.boss {
+            match boss.state {
+                BossState::Telegraphing => {
+                    boss.state_timer -= dt;
+                    let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
+                    boss.radius = SENTINEL_RADIUS * (0.35 + t * 0.65);
+                    if boss.state_timer <= 0.0 {
+                        boss.state = BossState::Active;
+                        boss.state_timer = 2.4;
+                        boss.radius = SENTINEL_RADIUS;
+                        boss.speed = 34.0;
+                        boss.contact_damage = 35.0;
+                        activated = true;
+                    }
+                }
+                BossState::Active => {
+                    let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
+                    let next_phase = if hp_pct > 0.60 {
+                        0
+                    } else if hp_pct > 0.30 {
+                        1
+                    } else {
+                        2
+                    };
+                    if next_phase != boss.phase {
+                        boss.phase = next_phase;
+                        phase_changed = true;
+                    }
+
+                    let phase_scale = boss.phase as f32;
+                    boss.radius = SENTINEL_RADIUS + phase_scale * 5.0;
+                    boss.speed = 34.0 + phase_scale * 12.0;
+                    boss.contact_damage = 35.0 + phase_scale * 7.0;
+                    boss.shield_angle += SENTINEL_SHIELD_SPIN * (1.0 + phase_scale * 0.25) * dt;
+
+                    let dir = nearest_globe_delta(boss.pos, self.player.pos).normalize_or_zero();
+                    move_on_globe(&mut boss.pos, dir * boss.speed * dt);
+
+                    boss.state_timer -= dt;
+                    if boss.state_timer <= 0.0 {
+                        boss.state_timer = match boss.phase {
+                            0 => 3.0,
+                            1 => 2.4,
+                            _ => 1.8,
+                        };
+                        let kind = match boss.phase {
+                            0 => EnemyKind::Drone,
+                            1 => EnemyKind::Dasher,
+                            _ => EnemyKind::Drone,
+                        };
+                        let count = match boss.phase {
+                            0 => 2,
+                            1 => 1,
+                            _ => 3,
+                        };
+                        add_spawn = Some((boss.pos, kind, count));
+                    }
+                }
+                BossState::Dying => {
+                    boss.state_timer -= dt;
+                    let t = (boss.state_timer / BOSS_DEATH_TIME).clamp(0.0, 1.0);
+                    boss.radius = SENTINEL_RADIUS * t;
+                    if boss.state_timer <= 0.0 {
+                        finish_death = true;
+                    }
+                }
+            }
+        }
+
+        if activated {
+            self.shake_amount += 12.0;
+        }
+        if phase_changed {
+            self.shake_amount += 6.0;
+        }
+        if let Some((origin, kind, count)) = add_spawn {
+            self.spawn_boss_adds(origin, kind, count);
+        }
+        if finish_death {
+            self.finish_boss_death();
+        }
+    }
+
+    fn spawn_boss_adds(&mut self, origin: Vec2, kind: EnemyKind, count: u32) {
+        let base = self.rng.angle();
+        for i in 0..count {
+            let angle = base + i as f32 * std::f32::consts::TAU / count as f32;
+            let dir = Vec2::new(angle.cos(), angle.sin());
+            let mut pos = origin;
+            move_on_globe(&mut pos, dir * (SENTINEL_RADIUS + 26.0));
+            self.spawn_enemy_near_pos(kind, pos);
+        }
+    }
+
+    fn spawn_enemy_near_pos(&mut self, kind: EnemyKind, pos: Vec2) {
+        let minute = self.time / 60.0;
+        let (radius, hp, speed, contact_damage, color) = enemy_stats(kind, minute);
+        self.enemies.push(Enemy {
+            pos,
+            radius,
+            hp,
+            speed: speed * self.rng.range(0.9, 1.1),
+            kind,
+            state: EnemyState::Drifting,
+            state_timer: 0.0,
+            charge_dir: Vec2::ZERO,
+            color,
+            contact_damage,
+            slow_timer: 0.0,
+            no_xp: false,
+            spawn_grace: SPAWN_GRACE,
+        });
+    }
+
+    fn start_boss_death(&mut self) {
+        if let Some(boss) = &mut self.boss {
+            boss.state = BossState::Dying;
+            boss.state_timer = BOSS_DEATH_TIME;
+            boss.hp = 0.0;
+            boss.contact_damage = 0.0;
+            boss.shield_hp = [0.0; 3];
+            self.projectiles.clear();
+            self.shake_amount += 16.0;
+        }
+    }
+
+    fn finish_boss_death(&mut self) {
+        let Some(boss) = self.boss.take() else {
+            return;
+        };
+
+        self.boss_kills += 1;
+        self.boss_breather_timer = BOSS_POST_BREATHER;
+        self.shake_amount += 18.0;
+
+        for _ in 0..44 {
+            let angle = self.rng.angle();
+            let speed = self.rng.range(120.0, 360.0);
+            self.particles.push(Particle {
+                pos: boss.pos,
+                vel: Vec2::new(angle.cos(), angle.sin()) * speed,
+                life: 0.0,
+                max_life: self.rng.range(0.65, 1.35),
+                color: [1.0, self.rng.range(0.45, 0.95), self.rng.range(0.25, 0.9)],
+                size: self.rng.range(2.0, 5.0),
+            });
+        }
+
+        for i in 0..18 {
+            let angle = i as f32 * std::f32::consts::TAU / 18.0;
+            let mut pos = boss.pos;
+            move_on_globe(&mut pos, Vec2::new(angle.cos(), angle.sin()) * 44.0);
+            self.gems.push(XpGem {
+                pos,
+                value: 3,
+                life: 0.0,
+            });
+        }
+    }
+
+    fn sentinel_shield_pos(boss: &Boss, idx: usize) -> Vec2 {
+        let angle = boss.shield_angle + idx as f32 * std::f32::consts::TAU / 3.0;
+        let mut pos = boss.pos;
+        move_on_globe(
+            &mut pos,
+            Vec2::new(angle.cos(), angle.sin()) * SENTINEL_SHIELD_ORBIT,
+        );
+        pos
+    }
+
+    fn damage_boss_with_beam(
+        &mut self,
+        start: Vec2,
+        end: Vec2,
+        cap_half: f32,
+        damage: f32,
+    ) -> Option<Vec2> {
+        let boss = self.boss.as_mut()?;
+        if boss.state != BossState::Active {
+            return None;
+        }
+
+        for i in 0..boss.shield_hp.len() {
+            if boss.shield_hp[i] <= 0.0 {
+                continue;
+            }
+            let shield_pos = Self::sentinel_shield_pos(boss, i);
+            if capsule_circle_intersect_globe(
+                start,
+                end,
+                cap_half,
+                shield_pos,
+                SENTINEL_SHIELD_RADIUS,
+            ) {
+                boss.shield_hp[i] = (boss.shield_hp[i] - damage).max(0.0);
+                self.hit_flash_positions.push(shield_pos);
+                return Some(shield_pos);
+            }
+        }
+
+        if capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius) {
+            boss.hp -= damage;
+            self.hit_flash_positions.push(boss.pos);
+            return Some(boss.pos);
+        }
+        None
+    }
+
+    fn damage_boss_direct_beam(&mut self, start: Vec2, end: Vec2, cap_half: f32, damage: f32) {
+        if let Some(boss) = &mut self.boss {
+            if boss.state == BossState::Active
+                && capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius)
+            {
+                boss.hp -= damage;
+            }
+        }
+    }
+
     // --- Firing ---------------------------------------------------------
 
     fn fire_primary(&mut self) -> bool {
@@ -1231,7 +1589,7 @@ impl Game {
             Some(t) => t,
             None => return false,
         };
-        let local_enemies: Vec<Enemy> = self
+        let mut local_enemies: Vec<Enemy> = self
             .enemies
             .iter()
             .cloned()
@@ -1240,13 +1598,34 @@ impl Game {
                 e
             })
             .collect();
+        if let Some(boss) = &self.boss {
+            if boss.state == BossState::Active {
+                local_enemies.push(Enemy {
+                    pos: nearest_globe_pos(self.player.pos, boss.pos),
+                    radius: boss.radius,
+                    hp: boss.hp,
+                    speed: 0.0,
+                    kind: EnemyKind::Brute,
+                    state: EnemyState::Drifting,
+                    state_timer: 0.0,
+                    charge_dir: Vec2::ZERO,
+                    color: [1.0, 1.0, 1.0],
+                    contact_damage: 0.0,
+                    slow_timer: 0.0,
+                    no_xp: true,
+                    spawn_grace: 0.0,
+                });
+            }
+        }
         let salvo = compose_salvo(self.player.pos, target, &local_enemies, &self.inventory);
         if salvo.is_empty() {
             return false;
         }
 
         // Synergy: PRISM CANNON (Lens+Chromatic 3+) — periodic convergent white core shot.
-        if self.inventory.has_synergy(ShardKind::Lens, ShardKind::Chromatic)
+        if self
+            .inventory
+            .has_synergy(ShardKind::Lens, ShardKind::Chromatic)
             && self.prism_cannon_timer <= 0.0
         {
             self.prism_cannon_timer = PRISM_CANNON_INTERVAL;
@@ -1311,6 +1690,14 @@ impl Game {
                 }
             }
         }
+        if let Some(impact) =
+            self.damage_boss_with_beam(start, end, req.thickness * 0.5, req.damage)
+        {
+            hit_count += 1;
+            if diffract > 0 {
+                impacts.push(impact);
+            }
+        }
 
         // Siphon: heal player per hit (capped per salvo to prevent god-mode).
         if siphon > 0 && hit_count > 0 {
@@ -1373,6 +1760,12 @@ impl Game {
                         e.hp -= DIFFRACT_MINI_DAMAGE;
                     }
                 }
+                self.damage_boss_direct_beam(
+                    impact,
+                    end,
+                    diffract_thick * 0.5,
+                    DIFFRACT_MINI_DAMAGE,
+                );
 
                 self.beams.push(Beam {
                     start: impact,
@@ -1386,14 +1779,23 @@ impl Game {
         }
     }
 
-    fn on_enemy_death(&mut self, pos: Vec2, kind: EnemyKind, cascade_depth: u32, no_xp: bool, was_frozen: bool) {
+    fn on_enemy_death(
+        &mut self,
+        pos: Vec2,
+        kind: EnemyKind,
+        cascade_depth: u32,
+        no_xp: bool,
+        was_frozen: bool,
+    ) {
         self.kills_total += 1;
         self.spawn_death_particles(pos, kind);
 
         // Blizzard: frozen enemy death leaves a lingering frost slow-field.
         if was_frozen
             && self.frost_fields.len() < MAX_FROST_FIELDS
-            && self.inventory.has_synergy(ShardKind::Split, ShardKind::Frost)
+            && self
+                .inventory
+                .has_synergy(ShardKind::Split, ShardKind::Frost)
         {
             self.frost_fields.push(FrostField {
                 pos,
@@ -1473,7 +1875,11 @@ impl Game {
                 .inventory
                 .has_synergy(ShardKind::Split, ShardKind::Cascade);
             let fan_count = if chain_reaction { 3u32 } else { 1 };
-            let color = if chain_reaction { [0.25, 1.0, 0.88] } else { [1.0, 0.5, 0.3] };
+            let color = if chain_reaction {
+                [0.25, 1.0, 0.88]
+            } else {
+                [1.0, 0.5, 0.3]
+            };
             self.fire_cascade_beams(pos, cascade, fan_count, color);
         }
     }
@@ -1502,6 +1908,7 @@ impl Game {
                         e.hp -= CASCADE_DAMAGE;
                     }
                 }
+                self.damage_boss_direct_beam(origin, end, CASCADE_THICKNESS * 0.5, CASCADE_DAMAGE);
                 self.beams.push(Beam {
                     start: origin,
                     end,
@@ -1621,6 +2028,13 @@ impl Game {
                     }
                 }
             }
+            if self
+                .damage_boss_with_beam(start, end, THORNS_BEAM_THICKNESS * 0.5, THORNS_BEAM_DAMAGE)
+                .is_some()
+                && siphon_heal > 0.0
+            {
+                self.player.hp = (self.player.hp + siphon_heal).min(self.player.max_hp);
+            }
 
             self.beams.push(Beam {
                 start,
@@ -1635,7 +2049,12 @@ impl Game {
         // Martyrdom: kills during thorns trigger cascade from their position.
         if martyrdom {
             let cascade_level = self.inventory.level(ShardKind::Cascade);
-            let kills: Vec<Vec2> = self.enemies.iter().filter(|e| e.hp <= 0.0).map(|e| e.pos).collect();
+            let kills: Vec<Vec2> = self
+                .enemies
+                .iter()
+                .filter(|e| e.hp <= 0.0)
+                .map(|e| e.pos)
+                .collect();
             for pos in kills {
                 self.fire_cascade_beams(pos, cascade_level, 1, [1.0, 0.5, 0.3]);
             }
@@ -1644,7 +2063,7 @@ impl Game {
 
     fn compute_score(&self) -> u32 {
         let time_bonus = (self.time / 10.0) as u32;
-        self.kills_total + self.rank * 5 + time_bonus
+        self.kills_total + self.rank * 5 + time_bonus + self.boss_kills * 500
     }
 
     fn enemy_cap_for_wave(&self) -> usize {
@@ -1690,7 +2109,11 @@ impl Game {
         let speed = speed * self.rng.range(0.85, 1.15);
         // Orbiters store orbit radius in charge_dir.x and spin direction in charge_dir.y.
         let charge_dir = if kind == EnemyKind::Orbiter {
-            let spin = if self.rng.next_u32() % 2 == 0 { 1.0 } else { -1.0 };
+            let spin = if self.rng.next_u32() % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
             Vec2::new(self.rng.range(150.0, 220.0), spin)
         } else {
             Vec2::ZERO
@@ -1896,14 +2319,36 @@ impl Game {
     }
 
     fn find_nearest_enemy_pos(&self) -> Option<Vec2> {
-        self.enemies
+        let nearest_enemy = self
+            .enemies
             .iter()
             .map(|e| {
                 let delta = nearest_globe_delta(self.player.pos, e.pos);
                 (self.player.pos + delta, delta.length_squared())
             })
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(p, _)| p)
+            .map(|(p, d)| (p, d));
+
+        let nearest_boss = self.boss.as_ref().and_then(|b| {
+            if b.state != BossState::Active {
+                return None;
+            }
+            let delta = nearest_globe_delta(self.player.pos, b.pos);
+            Some((self.player.pos + delta, delta.length_squared()))
+        });
+
+        match (nearest_enemy, nearest_boss) {
+            (Some(enemy), Some(boss)) => {
+                if boss.1 < enemy.1 {
+                    Some(boss.0)
+                } else {
+                    Some(enemy.0)
+                }
+            }
+            (Some(enemy), None) => Some(enemy.0),
+            (None, Some(boss)) => Some(boss.0),
+            (None, None) => None,
+        }
     }
 
     fn find_secondary_target(&self) -> Option<Vec2> {
@@ -1915,9 +2360,7 @@ impl Game {
                 (self.player.pos + delta, delta.length_squared())
             })
             .collect();
-        by_dist.sort_unstable_by(|a, b| {
-            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        by_dist.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         by_dist.get(1).map(|(p, _)| *p)
     }
 
@@ -2079,6 +2522,90 @@ impl Game {
                 a: 0.12 * fill,
                 glow: 0.8 * fill,
             });
+        }
+
+        // Boss milestone: Prism Sentinel, with telegraph, phased body, and shields.
+        if let Some(boss) = &self.boss {
+            let pos = nearest_globe_pos(camera, boss.pos);
+            match boss.state {
+                BossState::Telegraphing => {
+                    let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: SENTINEL_RADIUS * (1.0 + t * 1.6),
+                        r: 1.0,
+                        g: 0.95,
+                        b: 0.75,
+                        a: 0.10 + t * 0.18,
+                        glow: 2.0 + t * 4.0,
+                    });
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius,
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.65,
+                        glow: 4.0,
+                    });
+                }
+                BossState::Active | BossState::Dying => {
+                    let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
+                    let (r, g, b, glow) = match boss.phase {
+                        0 => (1.0, 0.96, 0.88, 4.0),
+                        1 => (1.0, 0.48, 0.18, 4.8),
+                        _ => (1.0, 0.12, 0.12, 5.5),
+                    };
+                    let dying_alpha = if boss.state == BossState::Dying {
+                        (boss.state_timer / BOSS_DEATH_TIME).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius + 8.0,
+                        r,
+                        g,
+                        b,
+                        a: 0.18 * dying_alpha,
+                        glow: glow * 1.1 * dying_alpha,
+                    });
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius,
+                        r,
+                        g,
+                        b,
+                        a: (0.72 + hp_pct * 0.18) * dying_alpha,
+                        glow: glow * dying_alpha,
+                    });
+
+                    if boss.state == BossState::Active {
+                        for i in 0..boss.shield_hp.len() {
+                            if boss.shield_hp[i] <= 0.0 {
+                                continue;
+                            }
+                            let shield_fill = boss.shield_hp[i] / SENTINEL_SHIELD_HP;
+                            let shield_pos =
+                                nearest_globe_pos(camera, Self::sentinel_shield_pos(boss, i));
+                            self.circle_buf.push(CircleInstance {
+                                x: shield_pos.x,
+                                y: shield_pos.y,
+                                radius: SENTINEL_SHIELD_RADIUS + 4.0 * shield_fill,
+                                r: 0.55,
+                                g: 0.9,
+                                b: 1.0,
+                                a: 0.55 + shield_fill * 0.25,
+                                glow: 3.0 + shield_fill * 2.0,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         // Enemies — colored per-type, flash white on hit.

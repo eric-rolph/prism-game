@@ -17,6 +17,7 @@ const SYNERGY_NAMES: string[] = [
   'CHAIN REACTION', 'BLIZZARD', 'SUPERNOVA', 'PRISM CANNON', 'TRACKING ECHO',
   'FROZEN ORBIT', 'EVENT HORIZON', 'BLOOD PACT', 'MARTYRDOM', 'RESONANCE', 'GRAVITY WELL',
 ];
+const BOSS_NAMES: string[] = ['PRISM SENTINEL'];
 
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
 type Rarity = 'common' | 'rare' | 'legendary';
@@ -103,12 +104,18 @@ async function main(): Promise<void> {
   const dashFillRaw = document.getElementById('dash-fill');
   const waveClearRaw = document.getElementById('wave-clear');
   const deathTitleRaw = document.getElementById('death-title');
-  if (!dashFillRaw || !waveClearRaw || !deathTitleRaw) {
+  const bossHudRaw = document.getElementById('boss-hud');
+  const bossNameRaw = document.getElementById('boss-name');
+  const bossFillRaw = document.getElementById('boss-fill');
+  if (!dashFillRaw || !waveClearRaw || !deathTitleRaw || !bossHudRaw || !bossNameRaw || !bossFillRaw) {
     throw new Error('Dash/wave-clear elements missing from index.html');
   }
   const dashFillEl: HTMLElement = dashFillRaw;
   const waveClearEl: HTMLElement = waveClearRaw;
   const deathTitleEl: HTMLElement = deathTitleRaw;
+  const bossHudEl: HTMLElement = bossHudRaw;
+  const bossNameEl: HTMLElement = bossNameRaw;
+  const bossFillEl: HTMLElement = bossFillRaw;
 
   // Boot WASM. `wasm.memory.buffer` is the ArrayBuffer we re-view as typed
   // arrays every frame — it can grow, so we must check for buffer identity.
@@ -215,6 +222,9 @@ async function main(): Promise<void> {
   let lastHpPct = -1;
   let lastTimerStr = '';
   let lastWave = -1;
+  let lastBossActive = false;
+  let lastBossKind = -2;
+  let lastBossPct = -1;
   const lastPipLevels: number[] = new Array(SHARDS.length).fill(-1);
   let lastActiveBits = -1;
   let lastNearBits = -1;
@@ -312,6 +322,9 @@ async function main(): Promise<void> {
     lastHpPct = -1;
     lastTimerStr = '';
     lastWave = -1;
+    lastBossActive = false;
+    lastBossKind = -2;
+    lastBossPct = -1;
     lastPipLevels.fill(-1);
     lastActiveBits = -1;
     lastNearBits = -1;
@@ -414,6 +427,25 @@ async function main(): Promise<void> {
     if (wave !== lastWave) {
       waveLabelEl.textContent = `WAVE ${wave + 1}`;
       lastWave = wave;
+    }
+    const bossActive = game.boss_active();
+    if (bossActive !== lastBossActive) {
+      bossHudEl.classList.toggle('shown', bossActive);
+      lastBossActive = bossActive;
+      lastBossPct = -1;
+      lastBossKind = -2;
+    }
+    if (bossActive) {
+      const bossKind = game.boss_kind_index();
+      if (bossKind !== lastBossKind) {
+        bossNameEl.textContent = BOSS_NAMES[bossKind] ?? 'UNKNOWN PRISM';
+        lastBossKind = bossKind;
+      }
+      const bossPct = Math.max(0, Math.min(100, Math.round(game.boss_hp_pct() * 100)));
+      if (bossPct !== lastBossPct) {
+        bossFillEl.style.width = bossPct + '%';
+        lastBossPct = bossPct;
+      }
     }
     for (let i = 0; i < SHARDS.length; i++) {
       const lvl = game.inventory_level(i);
