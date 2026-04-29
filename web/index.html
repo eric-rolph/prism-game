@@ -347,6 +347,32 @@
       .victory-title {
         color: #66ff88 !important;
       }
+
+      /* Active synergy list — top-right, below rank/kills */
+      #synergies-hud {
+        position: absolute;
+        top: 48px;
+        right: 14px;
+        text-align: right;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        pointer-events: none;
+      }
+      .synergy-tag {
+        font-size: 9px;
+        letter-spacing: 2px;
+        padding: 2px 5px;
+        border-radius: 2px;
+        transition: opacity 200ms ease, color 200ms ease;
+      }
+      .synergy-tag.active {
+        color: #ffd740;
+        text-shadow: 0 0 8px rgba(255, 215, 64, 0.7);
+      }
+      .synergy-tag.near {
+        color: rgba(255, 215, 64, 0.35);
+      }
     </style>
   </head>
   <body>
@@ -365,6 +391,7 @@
         <div class="rank" id="rank">rank 0</div>
         <div class="kills" id="kills">0 kills</div>
       </div>
+      <div id="synergies-hud"></div>
       <div id="xp-wrap"><div id="xp-fill"></div></div>
       <div id="shards-tray"></div>
     </div>

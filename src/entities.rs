@@ -24,6 +24,8 @@ pub enum EnemyKind {
     Splitter,
     Orbiter,
     Emitter,
+    Pulsar,
+    Umbra,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -37,6 +39,8 @@ pub enum EnemyState {
     Orbiting,
     /// Emitter: stationary, firing projectiles.
     Shooting,
+    /// Pulsar: swelling area-denial pulse.
+    Pulsing,
 }
 
 #[derive(Clone)]
@@ -115,4 +119,12 @@ impl InterferencePulse {
     pub fn current_radius(&self) -> f32 {
         (self.life / self.max_life).min(1.0) * self.max_radius
     }
+}
+
+/// Lingering slow-zone left by a frozen enemy killed with Blizzard active.
+pub struct FrostField {
+    pub pos: Vec2,
+    pub life: f32,
+    pub max_life: f32,
+    pub radius: f32,
 }

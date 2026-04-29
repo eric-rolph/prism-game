@@ -111,14 +111,22 @@ impl Game {
         self.inner.is_leveling_up()
     }
 
-    /// Shard kind index (0..14) for the given choice slot (0..3), or -1 if empty.
+    /// Shard kind index (0..16) for the given choice slot (0..3), or -1 if empty.
     pub fn level_choice(&self, slot: u8) -> i32 {
         self.inner.level_choice(slot)
     }
 
-    /// The current level (0..5) of the given shard kind index (0..14).
+    /// The current level (0..6) of the given shard kind index (0..16).
     pub fn inventory_level(&self, kind: u8) -> u8 {
         self.inner.inventory_level(kind)
+    }
+    /// Bitmask: bit i set if SYNERGIES[i] is fully active (both shards ≥ 3).
+    pub fn active_synergy_bits(&self) -> u32 {
+        self.inner.active_synergy_bits()
+    }
+    /// Bitmask: bit i set if SYNERGIES[i] is near-active (one shard ≥ 3, the other ≥ 1).
+    pub fn near_synergy_bits(&self) -> u32 {
+        self.inner.near_synergy_bits()
     }
 
     /// Commit a level-up choice by slot (0..3). No-op outside of a pause.

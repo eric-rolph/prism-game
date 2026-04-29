@@ -30,10 +30,12 @@ pub enum ShardKind {
     Frost = 11,
     Barrier = 12,
     Thorns = 13,
+    Magnet = 14,
+    Momentum = 15,
 }
 
-pub const SHARD_COUNT: usize = 14;
-pub const MAX_SHARD_LEVEL: u8 = 5;
+pub const SHARD_COUNT: usize = 16;
+pub const MAX_SHARD_LEVEL: u8 = 6;
 
 impl ShardKind {
     pub fn from_index(i: u8) -> Option<Self> {
@@ -52,6 +54,8 @@ impl ShardKind {
             11 => Some(Self::Frost),
             12 => Some(Self::Barrier),
             13 => Some(Self::Thorns),
+            14 => Some(Self::Magnet),
+            15 => Some(Self::Momentum),
             _ => None,
         }
     }
@@ -158,87 +162,53 @@ impl Inventory {
     pub fn has_synergy(&self, a: ShardKind, b: ShardKind) -> bool {
         self.levels[a.as_index()] >= 3 && self.levels[b.as_index()] >= 3
     }
-}
 
-/// Named synergy combos. Each pair of shards at level 3+ unlocks a bonus.
-/// Returns (name, description) for the synergy if the second shard would
-/// complete a new synergy pair.
-#[allow(dead_code)]
-pub fn synergy_for(kind: ShardKind) -> &'static [(ShardKind, &'static str, &'static str)] {
-    match kind {
-        ShardKind::Split => &[
-            (
-                ShardKind::Cascade,
-                "CHAIN REACTION",
-                "cascade beams also fan out",
-            ),
-            (
-                ShardKind::Frost,
-                "BLIZZARD",
-                "frozen enemies take +40% beam damage",
-            ),
-        ],
-        ShardKind::Cascade => &[(
-            ShardKind::Split,
-            "CHAIN REACTION",
-            "cascade beams also fan out",
-        )],
-        ShardKind::Mirror => &[(
-            ShardKind::Diffract,
-            "SUPERNOVA",
-            "diffract bursts are 2x larger",
-        )],
-        ShardKind::Diffract => &[(
-            ShardKind::Mirror,
-            "SUPERNOVA",
-            "diffract bursts are 2x larger",
-        )],
-        ShardKind::Lens => &[(
-            ShardKind::Chromatic,
-            "PRISM CANNON",
-            "RGB beams deal +50% damage",
-        )],
-        ShardKind::Chromatic => &[(
-            ShardKind::Lens,
-            "PRISM CANNON",
-            "RGB beams deal +50% damage",
-        )],
-        ShardKind::Refract => &[(
-            ShardKind::Echo,
-            "TRACKING ECHO",
-            "echo salvos home 2x harder",
-        )],
-        ShardKind::Echo => &[(
-            ShardKind::Refract,
-            "TRACKING ECHO",
-            "echo salvos home 2x harder",
-        )],
-        ShardKind::Halo => &[(ShardKind::Frost, "FROZEN ORBIT", "halo beads slow enemies")],
-        ShardKind::Frost => &[
-            (ShardKind::Halo, "FROZEN ORBIT", "halo beads slow enemies"),
-            (
-                ShardKind::Split,
-                "BLIZZARD",
-                "frozen enemies take +40% beam damage",
-            ),
-        ],
-        ShardKind::Siphon => &[(ShardKind::Thorns, "BLOOD PACT", "thorns shots also heal")],
-        ShardKind::Thorns => &[
-            (ShardKind::Siphon, "BLOOD PACT", "thorns shots also heal"),
-            (
-                ShardKind::Cascade,
-                "MARTYRDOM",
-                "thorns kills trigger cascade",
-            ),
-        ],
-        ShardKind::Barrier => &[(
-            ShardKind::Interference,
-            "RESONANCE",
-            "barrier pulses on hit",
-        )],
-        ShardKind::Interference => &[(ShardKind::Barrier, "RESONANCE", "barrier pulses on hit")],
+    /// Bitmask of fully active synergies (both shards at level 3+). Bit i
+    /// corresponds to SYNERGIES[i].
+    pub fn active_synergy_bits(&self) -> u32 {
+        let mut bits = 0u32;
+        for (i, &(a, b, _)) in SYNERGIES.iter().enumerate() {
+            if self.has_synergy(a, b) {
+                bits |= 1 << i;
+            }
+        }
+        bits
+    }
+
+    /// Bitmask of near-active synergies: one shard is at 3+ and the other is
+    /// owned (1+) but not yet enough to activate. Excludes already-active ones.
+    pub fn near_synergy_bits(&self) -> u32 {
+        let mut bits = 0u32;
+        for (i, &(a, b, _)) in SYNERGIES.iter().enumerate() {
+            if self.has_synergy(a, b) {
+                continue;
+            }
+            let la = self.levels[a.as_index()];
+            let lb = self.levels[b.as_index()];
+            if (la >= 3 && lb >= 1) || (lb >= 3 && la >= 1) {
+                bits |= 1 << i;
+            }
+        }
+        bits
     }
 }
+
+/// Canonical synergy table: (shard_a, shard_b, name). Bit i in
+/// `active_synergy_bits` / `near_synergy_bits` corresponds to entry i here.
+/// Must stay in index-lock with SYNERGY_NAMES in web/src/main.ts.
+pub const SYNERGIES: &[(ShardKind, ShardKind, &'static str)] = &[
+    (ShardKind::Split,       ShardKind::Cascade,      "CHAIN REACTION"),
+    (ShardKind::Split,       ShardKind::Frost,        "BLIZZARD"),
+    (ShardKind::Mirror,      ShardKind::Diffract,     "SUPERNOVA"),
+    (ShardKind::Lens,        ShardKind::Chromatic,    "PRISM CANNON"),
+    (ShardKind::Refract,     ShardKind::Echo,         "TRACKING ECHO"),
+    (ShardKind::Halo,        ShardKind::Frost,        "FROZEN ORBIT"),
+    (ShardKind::Halo,        ShardKind::Momentum,     "EVENT HORIZON"),
+    (ShardKind::Siphon,      ShardKind::Thorns,       "BLOOD PACT"),
+    (ShardKind::Thorns,      ShardKind::Cascade,      "MARTYRDOM"),
+    (ShardKind::Barrier,     ShardKind::Interference, "RESONANCE"),
+    (ShardKind::Magnet,      ShardKind::Interference, "GRAVITY WELL"),
+];
 
 /// A ready-to-fire beam with concrete world-space endpoints.
 #[derive(Clone, Debug)]

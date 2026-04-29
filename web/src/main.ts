@@ -11,6 +11,13 @@ import { Input } from './input.js';
 const CIRCLE_STRIDE_FLOATS = 8;
 const BEAM_STRIDE_FLOATS = 10;
 
+// Must stay in index-lock with Rust's SYNERGIES const (src/shards.rs).
+// Order determines bit positions in active_synergy_bits() / near_synergy_bits().
+const SYNERGY_NAMES: string[] = [
+  'CHAIN REACTION', 'BLIZZARD', 'SUPERNOVA', 'PRISM CANNON', 'TRACKING ECHO',
+  'FROZEN ORBIT', 'EVENT HORIZON', 'BLOOD PACT', 'MARTYRDOM', 'RESONANCE', 'GRAVITY WELL',
+];
+
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
 interface ShardMeta { name: string; color: string; desc: string; synergies: string[] }
 const SHARDS: ShardMeta[] = [
@@ -28,6 +35,8 @@ const SHARDS: ShardMeta[] = [
   { name: 'FROST',        color: '#b3e5fc', desc: 'beams slow enemies on hit',           synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
   { name: 'BARRIER',      color: '#64b5f6', desc: 'energy shield absorbs + deals damage',synergies: ['INTERFERENCE → RESONANCE'] },
   { name: 'THORNS',       color: '#ef5350', desc: 'taking damage fires retaliatory beams',synergies: ['SIPHON → BLOOD PACT', 'CASCADE → MARTYRDOM'] },
+  { name: 'MAGNET',       color: '#7cffd4', desc: 'pull radiance gems from farther away', synergies: ['INTERFERENCE → GRAVITY WELL'] },
+  { name: 'MOMENTUM',     color: '#d7ff6f', desc: 'move faster and dash more often',     synergies: ['HALO → EVENT HORIZON'] },
 ];
 
 async function main(): Promise<void> {
@@ -84,6 +93,11 @@ async function main(): Promise<void> {
   const deathRestartEl: HTMLElement = deathRestartRaw;
   const hpFillEl: HTMLElement = hpFillRaw;
 
+  // Synergy HUD.
+  const synergiesHudRaw = document.getElementById('synergies-hud');
+  if (!synergiesHudRaw) throw new Error('synergies-hud missing from index.html');
+  const synergiesHudEl: HTMLElement = synergiesHudRaw;
+
   // Dash + wave clear elements.
   const dashFillRaw = document.getElementById('dash-fill');
   const waveClearRaw = document.getElementById('wave-clear');
@@ -99,6 +113,18 @@ async function main(): Promise<void> {
   // arrays every frame — it can grow, so we must check for buffer identity.
   const wasm = await init();
   const memory: WebAssembly.Memory = wasm.memory;
+
+  // Build synergy tag elements — one per synergy, hidden until active or near.
+  synergiesHudEl.innerHTML = '';
+  const synergyTags: HTMLElement[] = [];
+  for (const name of SYNERGY_NAMES) {
+    const tag = document.createElement('div');
+    tag.className = 'synergy-tag';
+    tag.textContent = '⚡ ' + name;
+    tag.style.display = 'none';
+    synergiesHudEl.appendChild(tag);
+    synergyTags.push(tag);
+  }
 
   // Build the shard tray — one pip per shard. Filled in as levels rise.
   trayEl.innerHTML = '';
@@ -188,7 +214,9 @@ async function main(): Promise<void> {
   let lastHpPct = -1;
   let lastTimerStr = '';
   let lastWave = -1;
-  const lastPipLevels: number[] = new Array(10).fill(-1);
+  const lastPipLevels: number[] = new Array(SHARDS.length).fill(-1);
+  let lastActiveBits = -1;
+  let lastNearBits = -1;
 
   // --- Level-up modal ----------------------------------------------------
 
@@ -281,6 +309,8 @@ async function main(): Promise<void> {
     lastTimerStr = '';
     lastWave = -1;
     lastPipLevels.fill(-1);
+    lastActiveBits = -1;
+    lastNearBits = -1;
   };
 
   const doRestart = (): void => {
@@ -392,6 +422,28 @@ async function main(): Promise<void> {
         pip.style.borderColor = lvl > 0 ? color : '';
         lastPipLevels[i] = lvl;
       }
+    }
+    // Synergy HUD — update only when bitmasks change.
+    const activeBits = game.active_synergy_bits();
+    const nearBits = game.near_synergy_bits();
+    if (activeBits !== lastActiveBits || nearBits !== lastNearBits) {
+      for (let i = 0; i < synergyTags.length; i++) {
+        const tag = synergyTags[i]!;
+        const isActive = (activeBits >>> i & 1) === 1;
+        const isNear = (nearBits >>> i & 1) === 1;
+        if (isActive) {
+          tag.style.display = '';
+          tag.className = 'synergy-tag active';
+        } else if (isNear) {
+          tag.style.display = '';
+          tag.className = 'synergy-tag near';
+        } else {
+          tag.style.display = 'none';
+          tag.className = 'synergy-tag';
+        }
+      }
+      lastActiveBits = activeBits;
+      lastNearBits = nearBits;
     }
 
     // Refresh views after update() — Rust rebuilt the buffers during update.
