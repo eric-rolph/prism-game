@@ -57,6 +57,7 @@ pub struct Enemy {
     pub contact_damage: f32,
     pub slow_timer: f32,
     pub no_xp: bool,
+    pub spawn_grace: f32,
 }
 
 pub struct XpGem {

@@ -59,6 +59,9 @@ pub struct Game {
     dead: bool,
     score: u32,
 
+    halo_trail_timer: f32,
+    wave_event_fired: bool,
+
     // Screen shake (accumulated amplitude, decays per frame).
     shake_amount: f32,
     shake_offset: Vec2,
@@ -352,6 +355,12 @@ const BLIZZARD_FIELD_RADIUS: f32 = 72.0;
 const BLIZZARD_FIELD_LIFETIME: f32 = 2.8;
 const MAX_FROST_FIELDS: usize = 12;
 
+const BLOOD_PACT_RANGE: f32 = 90.0;
+const SPAWN_GRACE: f32 = 0.50;
+const FROZEN_ORBIT_TRAIL_INTERVAL: f32 = 0.35;
+const FROZEN_ORBIT_TRAIL_RADIUS: f32 = 28.0;
+const FROZEN_ORBIT_TRAIL_LIFETIME: f32 = 1.2;
+
 const DIFFRACT_MINI_DAMAGE: f32 = 35.0;
 const DIFFRACT_MINI_REACH: f32 = 95.0;
 const DIFFRACT_MINI_THICKNESS: f32 = 1.7;
@@ -427,6 +436,8 @@ impl Game {
             shake_amount: 0.0,
             shake_offset: Vec2::ZERO,
             hit_flash_positions: Vec::new(),
+            halo_trail_timer: 0.0,
+            wave_event_fired: false,
             circle_buf: Vec::with_capacity(1024),
             beam_buf: Vec::with_capacity(256),
         }
@@ -659,6 +670,8 @@ impl Game {
             self.wave_timer = 0.0;
             self.wave += 1;
             self.wave_clear_timer = WAVE_CLEAR_BANNER_DURATION;
+            self.wave_event_fired = false;
+            self.maybe_fire_wave_event();
         }
         let in_breather = self.wave_timer > WAVE_DURATION;
 
@@ -682,6 +695,9 @@ impl Game {
         let player_pos = self.player.pos;
         let minute = self.time / 60.0;
         for e in &mut self.enemies {
+            if e.spawn_grace > 0.0 {
+                e.spawn_grace = (e.spawn_grace - dt).max(0.0);
+            }
             // Frost slow decay.
             if e.slow_timer > 0.0 {
                 e.slow_timer -= dt;
@@ -930,7 +946,7 @@ impl Game {
         if self.player.iframe_timer <= 0.0 {
             let mut contact_dmg = 0.0_f32;
             for e in &self.enemies {
-                if e.hp <= 0.0 {
+                if e.hp <= 0.0 || e.spawn_grace > 0.0 {
                     continue;
                 }
                 let dist = globe_distance(e.pos, self.player.pos);
@@ -1018,6 +1034,23 @@ impl Game {
                 }
             }
         }
+        // Frozen Orbit: halo beads leave brief frost fields as they orbit.
+        if frozen_orbit && !self.halos.is_empty() {
+            self.halo_trail_timer -= dt;
+            if self.halo_trail_timer <= 0.0 {
+                self.halo_trail_timer = FROZEN_ORBIT_TRAIL_INTERVAL;
+                for &(hpos, _) in &halo_snapshots {
+                    if self.frost_fields.len() < MAX_FROST_FIELDS {
+                        self.frost_fields.push(FrostField {
+                            pos: hpos,
+                            life: 0.0,
+                            max_life: FROZEN_ORBIT_TRAIL_LIFETIME,
+                            radius: FROZEN_ORBIT_TRAIL_RADIUS,
+                        });
+                    }
+                }
+            }
+        }
 
         // Barrier: shield regen + contact damage to nearby enemies.
         let barrier_level = self.inventory.level(ShardKind::Barrier);
@@ -1045,7 +1078,11 @@ impl Game {
                     max_life: 0.9,
                     max_radius: 320.0 + 40.0 * interf_level as f32,
                 });
-                self.interference_timer = 2.0 / interf_level as f32;
+                let resonance = self
+                    .inventory
+                    .has_synergy(ShardKind::Barrier, ShardKind::Interference);
+                self.interference_timer =
+                    if resonance { 1.0 } else { 2.0 } / interf_level as f32;
             }
         }
         for p in &mut self.pulses {
@@ -1387,6 +1424,7 @@ impl Game {
                     contact_damage: 8.0,
                     slow_timer: 0.0,
                     no_xp: true,
+                    spawn_grace: 0.0,
                 });
             }
         }
@@ -1543,7 +1581,9 @@ impl Game {
                     e.radius,
                 ) {
                     e.hp -= THORNS_BEAM_DAMAGE;
-                    if siphon_heal > 0.0 {
+                    if siphon_heal > 0.0
+                        && globe_distance(e.pos, self.player.pos) < BLOOD_PACT_RANGE
+                    {
                         self.player.hp = (self.player.hp + siphon_heal).min(self.player.max_hp);
                     }
                 }
@@ -1602,30 +1642,26 @@ impl Game {
     }
 
     fn spawn_wave_enemy(&mut self) {
-        let minute = self.time / 60.0;
         let kind = self.pick_enemy_kind();
-        let (radius, hp, speed, contact_damage, color) = enemy_stats(kind, minute);
-
-        let spawn_radius = self.screen_size.length() * 0.55;
         let angle = self.rng.angle();
+        self.spawn_enemy_at(kind, angle);
+    }
+
+    fn spawn_enemy_at(&mut self, kind: EnemyKind, angle: f32) {
+        let minute = self.time / 60.0;
+        let (radius, hp, speed, contact_damage, color) = enemy_stats(kind, minute);
+        let spawn_radius = self.screen_size.length() * 0.55;
         let dir = Vec2::new(angle.cos(), angle.sin());
         let mut pos = self.player.pos;
         move_on_globe(&mut pos, dir * spawn_radius);
         let speed = speed * self.rng.range(0.85, 1.15);
-
-        // Store per-enemy data in charge_dir: Orbiters use x for current orbit radius
-        // and y for spin direction.
+        // Orbiters store orbit radius in charge_dir.x and spin direction in charge_dir.y.
         let charge_dir = if kind == EnemyKind::Orbiter {
-            let spin = if self.rng.next_u32() % 2 == 0 {
-                1.0
-            } else {
-                -1.0
-            };
+            let spin = if self.rng.next_u32() % 2 == 0 { 1.0 } else { -1.0 };
             Vec2::new(self.rng.range(150.0, 220.0), spin)
         } else {
             Vec2::ZERO
         };
-
         self.enemies.push(Enemy {
             pos,
             radius,
@@ -1639,7 +1675,43 @@ impl Game {
             contact_damage,
             slow_timer: 0.0,
             no_xp: false,
+            spawn_grace: SPAWN_GRACE,
         });
+    }
+
+    fn maybe_fire_wave_event(&mut self) {
+        if self.wave_event_fired {
+            return;
+        }
+        self.wave_event_fired = true;
+        match self.wave {
+            12 => {
+                // Siege: 4 Emitters from cardinal directions + 2 flanking Brutes.
+                for i in 0..4 {
+                    let angle = i as f32 * std::f32::consts::TAU / 4.0;
+                    self.spawn_enemy_at(EnemyKind::Emitter, angle);
+                }
+                let a = self.rng.angle();
+                self.spawn_enemy_at(EnemyKind::Brute, a);
+                self.spawn_enemy_at(EnemyKind::Brute, a + std::f32::consts::PI);
+            }
+            15 => {
+                // Veil: 5 Umbras phase in from random angles simultaneously.
+                for _ in 0..5 {
+                    let angle = self.rng.angle();
+                    self.spawn_enemy_at(EnemyKind::Umbra, angle);
+                }
+            }
+            18 => {
+                // Cluster: 4 Splitters in two tight pairs (each splits into 3 on death).
+                let base = self.rng.angle();
+                for i in 0..4 {
+                    let spread = (i as f32 - 1.5) * 0.2;
+                    self.spawn_enemy_at(EnemyKind::Splitter, base + spread);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn pick_enemy_kind(&mut self) -> EnemyKind {

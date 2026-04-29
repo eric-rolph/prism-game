@@ -31,10 +31,10 @@ const SHARDS: ShardMeta[] = [
   { name: 'HALO',         color: '#f5f5bc', desc: 'orbital beads strike on contact',     synergies: ['FROST → FROZEN ORBIT'] },
   { name: 'CASCADE',      color: '#ff6f91', desc: 'kills fork into secondary beams',     synergies: ['SPLIT → CHAIN REACTION'] },
   { name: 'INTERFERENCE', color: '#9a9dff', desc: 'standing-wave pulses ripple outward', synergies: ['BARRIER → RESONANCE'] },
-  { name: 'SIPHON',       color: '#a3ffdb', desc: 'beams heal you on every hit',         synergies: ['THORNS → BLOOD PACT'] },
+  { name: 'SIPHON',       color: '#a3ffdb', desc: 'beams heal you on every hit',         synergies: ['THORNS → BLOOD PACT (close-range only)'] },
   { name: 'FROST',        color: '#b3e5fc', desc: 'beams slow enemies on hit',           synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
   { name: 'BARRIER',      color: '#64b5f6', desc: 'energy shield absorbs + deals damage',synergies: ['INTERFERENCE → RESONANCE'] },
-  { name: 'THORNS',       color: '#ef5350', desc: 'taking damage fires retaliatory beams',synergies: ['SIPHON → BLOOD PACT', 'CASCADE → MARTYRDOM'] },
+  { name: 'THORNS',       color: '#ef5350', desc: 'taking damage fires retaliatory beams',synergies: ['SIPHON → BLOOD PACT (close-range heal)', 'CASCADE → MARTYRDOM'] },
   { name: 'MAGNET',       color: '#7cffd4', desc: 'pull radiance gems from farther away', synergies: ['INTERFERENCE → GRAVITY WELL'] },
   { name: 'MOMENTUM',     color: '#d7ff6f', desc: 'move faster and dash more often',     synergies: ['HALO → EVENT HORIZON'] },
 ];
