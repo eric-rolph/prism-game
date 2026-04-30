@@ -271,6 +271,13 @@ async function main(): Promise<void> {
       levelupCardsEl.appendChild(card);
     }
 
+    const skipBtn = document.createElement('button');
+    skipBtn.className = 'levelup-skip';
+    skipBtn.type = 'button';
+    skipBtn.textContent = 'SKIP [S]  +6 HP';
+    skipBtn.addEventListener('click', () => { game.skip_level_up(); });
+    levelupCardsEl.appendChild(skipBtn);
+
     levelupEl.classList.add('shown');
     modalShown = true;
   };
@@ -288,11 +295,17 @@ async function main(): Promise<void> {
       game.select_shard(n - 1);
       e.preventDefault();
     }
+    if (e.key === 's' || e.key === 'S') {
+      game.skip_level_up();
+      e.preventDefault();
+    }
   });
 
   // --- Death screen ------------------------------------------------------
 
   let deathShown = false;
+
+  const ENEMY_KIND_NAMES = ['DRONE', 'BRUTE', 'DASHER', 'SPLITTER', 'ORBITER', 'EMITTER', 'PULSAR', 'UMBRA'];
 
   const showDeathScreen = (victory: boolean = false): void => {
     if (victory) {
@@ -306,10 +319,33 @@ async function main(): Promise<void> {
     const t = game.timer();
     const mins = Math.floor(t / 60);
     const secs = Math.floor(t % 60);
+    const timeStr = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    const dmgTaken = Math.round(game.damage_taken());
+    const barrierAbs = Math.round(game.barrier_absorbed());
+    const gems = game.gems_collected();
+    const bossKills = game.boss_kills_count();
     deathStatsEl.innerHTML =
-      `RANK ${game.rank()}<br>${game.kills_total()} KILLS<br>${mins}:${secs < 10 ? '0' : ''}${secs} SURVIVED`;
+      `RANK ${game.rank()}  /  PEAK ${game.peak_rank()}<br>` +
+      `${game.kills_total()} KILLS  /  ${timeStr} SURVIVED<br>` +
+      `${dmgTaken} DMG TAKEN  /  ${barrierAbs} ABSORBED<br>` +
+      `${gems} GEMS  /  ${bossKills} BOSSES`;
     deathScreenEl.classList.add('shown');
     deathShown = true;
+
+    // Debug run summary.
+    const killsByKind = ENEMY_KIND_NAMES.map((n, i) => `${n}: ${game.kills_by_kind(i)}`).join(', ');
+    const shardSummary = SHARDS.map((s, i) => {
+      const lvl = game.inventory_level(i);
+      return lvl > 0 ? `${s.name} ${lvl}` : null;
+    }).filter(Boolean).join(', ');
+    console.log(
+      `[PRISM RUN SUMMARY]\n` +
+      `  outcome: ${victory ? 'VICTORY' : 'DEATH'}  |  time: ${timeStr}  |  score: ${game.score()}\n` +
+      `  rank: ${game.rank()} (peak ${game.peak_rank()})  |  kills: ${game.kills_total()}  |  bosses: ${bossKills}\n` +
+      `  dmg taken: ${dmgTaken}  |  barrier absorbed: ${barrierAbs}  |  gems: ${gems}\n` +
+      `  kills by kind: ${killsByKind}\n` +
+      `  shards: ${shardSummary || 'none'}`
+    );
   };
 
   const hideDeathScreen = (): void => {

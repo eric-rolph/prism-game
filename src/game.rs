@@ -67,6 +67,13 @@ pub struct Game {
     boss_breather_timer: f32,
     boss_kills: u32,
 
+    // Run telemetry (reset on restart, read at death/victory).
+    damage_taken: f32,
+    barrier_absorbed: f32,
+    gems_collected: u32,
+    kills_by_kind: [u32; 8],
+    peak_rank: u32,
+
     // Screen shake (accumulated amplitude, decays per frame).
     shake_amount: f32,
     shake_offset: Vec2,
@@ -143,6 +150,10 @@ const ORBITER_INWARD_SPEED_PER_WAVE: f32 = 0.55;
 // Crystal obstacles.
 const MAX_CRYSTALS: usize = 6;
 const CRYSTAL_SPAWN_INTERVAL: f32 = 45.0;
+
+const BOSS_PROJ_SPEED: f32 = 210.0;
+const BOSS_PROJ_DAMAGE: f32 = 18.0;
+const BOSS_SHIELD_BURST_COUNT: u32 = 5;
 
 // Boss milestones.
 const SENTINEL_SPAWN_TIME: f32 = 300.0;
@@ -461,6 +472,11 @@ impl Game {
             halo_trail_timer: 0.0,
             wave_event_fired: false,
             prism_cannon_timer: 0.0,
+            damage_taken: 0.0,
+            barrier_absorbed: 0.0,
+            gems_collected: 0,
+            kills_by_kind: [0; 8],
+            peak_rank: 0,
             sentinel_spawned: false,
             boss_breather_timer: 0.0,
             boss_kills: 0,
@@ -636,6 +652,25 @@ impl Game {
         }
         // If slot was None (empty), do nothing — don't close the modal.
     }
+
+    pub fn skip_level_up(&mut self) {
+        if !self.leveling_up {
+            return;
+        }
+        self.leveling_up = false;
+        self.level_choices = [None; 3];
+        self.player.hp = (self.player.hp + 6.0).min(self.player.max_hp);
+    }
+
+    // Run telemetry accessors.
+    pub fn damage_taken(&self) -> f32 { self.damage_taken }
+    pub fn barrier_absorbed(&self) -> f32 { self.barrier_absorbed }
+    pub fn gems_collected(&self) -> u32 { self.gems_collected }
+    pub fn kills_by_kind(&self, kind_idx: u8) -> u32 {
+        self.kills_by_kind.get(kind_idx as usize).copied().unwrap_or(0)
+    }
+    pub fn peak_rank(&self) -> u32 { self.peak_rank }
+    pub fn boss_kills_count(&self) -> u32 { self.boss_kills }
 
     pub fn restart(&mut self) {
         let w = self.screen_size.x;
@@ -1262,6 +1297,7 @@ impl Game {
         });
         if collected_xp > 0 {
             self.xp += collected_xp;
+            self.gems_collected += 1;
             self.check_for_level_up();
         }
 
@@ -1408,7 +1444,7 @@ impl Game {
                         let kind = match boss.phase {
                             0 => EnemyKind::Drone,
                             1 => EnemyKind::Dasher,
-                            _ => EnemyKind::Drone,
+                            _ => EnemyKind::Emitter,
                         };
                         let count = match boss.phase {
                             0 => 2,
@@ -1530,13 +1566,14 @@ impl Game {
         pos
     }
 
+    /// Returns Some((impact_pos, shield_broken)) on hit, None on miss.
     fn damage_boss_with_beam(
         &mut self,
         start: Vec2,
         end: Vec2,
         cap_half: f32,
         damage: f32,
-    ) -> Option<Vec2> {
+    ) -> Option<(Vec2, bool)> {
         let boss = self.boss.as_mut()?;
         if boss.state != BossState::Active {
             return None;
@@ -1554,18 +1591,47 @@ impl Game {
                 shield_pos,
                 SENTINEL_SHIELD_RADIUS,
             ) {
+                let was_alive = boss.shield_hp[i] > 0.0;
                 boss.shield_hp[i] = (boss.shield_hp[i] - damage).max(0.0);
+                let just_broken = was_alive && boss.shield_hp[i] <= 0.0;
                 self.hit_flash_positions.push(shield_pos);
-                return Some(shield_pos);
+                return Some((shield_pos, just_broken));
             }
         }
 
         if capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius) {
             boss.hp -= damage;
             self.hit_flash_positions.push(boss.pos);
-            return Some(boss.pos);
+            return Some((boss.pos, false));
         }
         None
+    }
+
+    fn fire_shield_break_burst(&mut self, shield_pos: Vec2) {
+        for i in 0..BOSS_SHIELD_BURST_COUNT {
+            let angle = (i as f32 / BOSS_SHIELD_BURST_COUNT as f32) * std::f32::consts::TAU;
+            let dir = Vec2::new(angle.cos(), angle.sin());
+            self.projectiles.push(Projectile {
+                pos: shield_pos,
+                vel: dir * BOSS_PROJ_SPEED,
+                radius: PROJ_RADIUS,
+                damage: BOSS_PROJ_DAMAGE * 0.6,
+                life: 0.0,
+            });
+        }
+        self.shake_amount += 4.0;
+        for _ in 0..20 {
+            let a = self.rng.angle();
+            let speed = self.rng.range(90.0, 240.0);
+            self.particles.push(Particle {
+                pos: shield_pos,
+                vel: Vec2::new(a.cos(), a.sin()) * speed,
+                life: 0.0,
+                max_life: self.rng.range(0.4, 0.9),
+                color: [1.0, 0.75, 0.3],
+                size: self.rng.range(2.0, 4.5),
+            });
+        }
     }
 
     fn damage_boss_direct_beam(&mut self, start: Vec2, end: Vec2, cap_half: f32, damage: f32) {
@@ -1690,12 +1756,15 @@ impl Game {
                 }
             }
         }
-        if let Some(impact) =
+        if let Some((impact, shield_broken)) =
             self.damage_boss_with_beam(start, end, req.thickness * 0.5, req.damage)
         {
             hit_count += 1;
             if diffract > 0 {
                 impacts.push(impact);
+            }
+            if shield_broken {
+                self.fire_shield_break_burst(impact);
             }
         }
 
@@ -1788,6 +1857,7 @@ impl Game {
         was_frozen: bool,
     ) {
         self.kills_total += 1;
+        self.kills_by_kind[kind as usize] = self.kills_by_kind[kind as usize].saturating_add(1);
         self.spawn_death_particles(pos, kind);
 
         // Blizzard: frozen enemy death leaves a lingering frost slow-field.
@@ -1929,6 +1999,7 @@ impl Game {
         if self.xp >= needed {
             self.xp -= needed;
             self.rank += 1;
+            self.peak_rank = self.peak_rank.max(self.rank);
             // Heal on level up — diminishing with rank.
             let heal = (20.0 - self.rank as f32 * 1.0).max(5.0);
             self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
@@ -1964,6 +2035,7 @@ impl Game {
             let absorbed = remaining.min(self.player.barrier_hp);
             self.player.barrier_hp -= absorbed;
             remaining -= absorbed;
+            self.barrier_absorbed += absorbed;
 
             // Synergy: RESONANCE (Barrier+Interference 3+) — emit a pulse when barrier absorbs.
             if self
@@ -1981,6 +2053,7 @@ impl Game {
 
         if remaining > 0.0 {
             self.player.hp -= remaining;
+            self.damage_taken += remaining;
         }
 
         // Thorns: fire retaliatory beams.
@@ -2028,12 +2101,18 @@ impl Game {
                     }
                 }
             }
-            if self
-                .damage_boss_with_beam(start, end, THORNS_BEAM_THICKNESS * 0.5, THORNS_BEAM_DAMAGE)
-                .is_some()
-                && siphon_heal > 0.0
-            {
-                self.player.hp = (self.player.hp + siphon_heal).min(self.player.max_hp);
+            if let Some((impact, shield_broken)) = self.damage_boss_with_beam(
+                start,
+                end,
+                THORNS_BEAM_THICKNESS * 0.5,
+                THORNS_BEAM_DAMAGE,
+            ) {
+                if siphon_heal > 0.0 {
+                    self.player.hp = (self.player.hp + siphon_heal).min(self.player.max_hp);
+                }
+                if shield_broken {
+                    self.fire_shield_break_burst(impact);
+                }
             }
 
             self.beams.push(Beam {

@@ -203,4 +203,31 @@ impl Game {
     pub fn arena_radius(&self) -> f32 {
         self.inner.arena_radius()
     }
+
+    // --- Level-up skip ---
+
+    pub fn skip_level_up(&mut self) {
+        self.inner.skip_level_up();
+    }
+
+    // --- Run telemetry ---
+
+    pub fn damage_taken(&self) -> f32 {
+        self.inner.damage_taken()
+    }
+    pub fn barrier_absorbed(&self) -> f32 {
+        self.inner.barrier_absorbed()
+    }
+    pub fn gems_collected(&self) -> u32 {
+        self.inner.gems_collected()
+    }
+    pub fn kills_by_kind(&self, kind_idx: u8) -> u32 {
+        self.inner.kills_by_kind(kind_idx)
+    }
+    pub fn peak_rank(&self) -> u32 {
+        self.inner.peak_rank()
+    }
+    pub fn boss_kills_count(&self) -> u32 {
+        self.inner.boss_kills_count()
+    }
 }
