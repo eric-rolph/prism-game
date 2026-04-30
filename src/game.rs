@@ -133,6 +133,12 @@ const GEM_VISUAL_RADIUS: f32 = 4.5; // Half the starter Drone radius.
 const PLAYER_MAX_HP: f32 = 100.0;
 const IFRAME_DURATION: f32 = 0.33;
 
+// Passive shard scaling.
+const ARMOR_DR_PER_LEVEL: f32 = 0.08;       // up to 48% DR at L6
+const PRISM_HEART_HP_PER_LEVEL: f32 = 15.0; // +15 max HP and instant heal per level
+const PRISM_HEART_HEAL_MULT_PER_LEVEL: f32 = 0.10; // +10% level-up heal per level
+const PHASE_STEP_IFRAME_PER_LEVEL: f32 = 0.18; // +0.18s i-frames per level during dash
+
 // Screen shake.
 const SHAKE_DEATH_PX: f32 = 3.5;
 const SHAKE_HIT_PX: f32 = 5.0;
@@ -701,6 +707,10 @@ impl Game {
                 self.player.barrier_hp = (self.player.barrier_hp + self.player.barrier_max * 0.5)
                     .min(self.player.barrier_max);
             }
+            if kind == ShardKind::PrismHeart {
+                self.player.max_hp += PRISM_HEART_HP_PER_LEVEL;
+                self.player.hp = (self.player.hp + PRISM_HEART_HP_PER_LEVEL).min(self.player.max_hp);
+            }
             self.leveling_up = false;
             self.level_choices = [None; 3];
             // A single on_death can earn multiple ranks' worth of XP.
@@ -715,7 +725,9 @@ impl Game {
         }
         self.leveling_up = false;
         self.level_choices = [None; 3];
-        self.player.hp = (self.player.hp + 6.0).min(self.player.max_hp);
+        let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
+        let heal = 6.0 * (1.0 + prism_heart * PRISM_HEART_HEAL_MULT_PER_LEVEL);
+        self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
     }
 
     pub fn reroll_level_up(&mut self) {
@@ -788,10 +800,27 @@ impl Game {
             } else {
                 Vec2::new(1.0, 0.0) // default right
             };
+            let phase_step = self.inventory.level(ShardKind::PhaseStep);
+            let dash_start_pos = self.player.pos;
             self.player.dash_dir = dir;
             self.player.dash_timer = DASH_DURATION;
             self.player.dash_cooldown = self.dash_cooldown_duration();
-            self.player.iframe_timer = DASH_DURATION; // i-frames during dash
+            self.player.iframe_timer =
+                DASH_DURATION + phase_step as f32 * PHASE_STEP_IFRAME_PER_LEVEL;
+            // Phase Step L3+: leave a brief particle afterimage at the start position.
+            if phase_step >= 3 {
+                for _ in 0..8 {
+                    let a = self.rng.angle();
+                    self.particles.push(Particle {
+                        pos: dash_start_pos,
+                        vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(30.0, 90.0),
+                        life: 0.0,
+                        max_life: 0.32,
+                        color: [0.55, 1.0, 0.85],
+                        size: self.rng.range(2.5, 5.0),
+                    });
+                }
+            }
         }
         self.dash_input = false; // consume
 
@@ -2431,8 +2460,10 @@ impl Game {
             self.rank += 1;
             self.peak_rank = self.peak_rank.max(self.rank);
             self.audio_event_bits |= AUDIO_RANK_UP;
-            // Heal on level up — diminishing with rank.
-            let heal = (20.0 - self.rank as f32 * 1.0).max(5.0);
+            // Heal on level up — diminishing with rank, boosted by Prism Heart.
+            let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
+            let heal = (20.0 - self.rank as f32 * 1.0).max(5.0)
+                * (1.0 + prism_heart * PRISM_HEART_HEAL_MULT_PER_LEVEL);
             self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
             self.level_choices = self.inventory.roll_choices(&mut self.rng);
             // If every shard is maxed, silently skip the picker.
@@ -2459,7 +2490,8 @@ impl Game {
 
     /// Damage the player, absorbing with Barrier first, then triggering Thorns.
     fn apply_damage_to_player(&mut self, raw_damage: f32) {
-        let mut remaining = raw_damage;
+        let armor = self.inventory.level(ShardKind::Armor) as f32;
+        let mut remaining = raw_damage * (1.0 - armor * ARMOR_DR_PER_LEVEL).max(0.10);
 
         // Barrier absorbs damage first.
         if self.player.barrier_hp > 0.0 {

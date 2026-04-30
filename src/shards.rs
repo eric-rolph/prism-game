@@ -32,9 +32,14 @@ pub enum ShardKind {
     Thorns = 13,
     Magnet = 14,
     Momentum = 15,
+    // Passive shards.
+    Armor = 16,
+    Luck = 17,
+    PrismHeart = 18,
+    PhaseStep = 19,
 }
 
-pub const SHARD_COUNT: usize = 16;
+pub const SHARD_COUNT: usize = 20;
 pub const MAX_SHARD_LEVEL: u8 = 6;
 
 impl ShardKind {
@@ -56,6 +61,10 @@ impl ShardKind {
             13 => Some(Self::Thorns),
             14 => Some(Self::Magnet),
             15 => Some(Self::Momentum),
+            16 => Some(Self::Armor),
+            17 => Some(Self::Luck),
+            18 => Some(Self::PrismHeart),
+            19 => Some(Self::PhaseStep),
             _ => None,
         }
     }
@@ -89,30 +98,42 @@ impl Inventory {
         self.levels[kind.as_index()] >= MAX_SHARD_LEVEL
     }
 
-    /// Three random shard kinds to offer at the next level-up. Defensive
-    /// shards (Siphon, Barrier) are offered less frequently after level 2.
-    /// At least one offensive shard is always included if possible.
+    /// Three random shard kinds to offer at the next level-up.
+    /// Luck level boosts rare/legendary shard weights; passive shards appear
+    /// slightly less often than active ones; at least one active (non-passive,
+    /// non-defensive) shard is always included if possible.
     pub fn roll_choices(&self, rng: &mut Rng) -> [Option<ShardKind>; 3] {
         let defensive = [
             ShardKind::Siphon,
             ShardKind::Barrier,
             ShardKind::Frost,
             ShardKind::Thorns,
+            ShardKind::Armor,
+            ShardKind::PrismHeart,
         ];
+        let rare_shards = [
+            ShardKind::Refract, ShardKind::Diffract, ShardKind::Echo,
+            ShardKind::Halo, ShardKind::Thorns, ShardKind::Luck, ShardKind::PhaseStep,
+        ];
+        let legendary_shards = [ShardKind::Cascade, ShardKind::Interference];
+        let luck = self.levels[ShardKind::Luck as usize];
 
         let mut candidates: Vec<(ShardKind, f32)> = (0..SHARD_COUNT as u8)
             .filter_map(ShardKind::from_index)
             .filter(|s| !self.is_maxed(*s))
             .map(|s| {
-                let weight = match s {
-                    ShardKind::Siphon | ShardKind::Barrier => {
-                        if self.levels[s.as_index()] >= 2 {
-                            0.4
-                        } else {
-                            1.0
-                        }
-                    }
-                    _ => 1.0,
+                let weight = if matches!(s, ShardKind::Siphon | ShardKind::Barrier)
+                    && self.levels[s.as_index()] >= 2
+                {
+                    0.4
+                } else if matches!(s, ShardKind::Armor | ShardKind::PrismHeart) {
+                    0.65
+                } else if legendary_shards.contains(&s) {
+                    1.0 + luck as f32 * 0.50
+                } else if rare_shards.contains(&s) {
+                    1.0 + luck as f32 * 0.25
+                } else {
+                    1.0
                 };
                 (s, weight)
             })
@@ -139,19 +160,19 @@ impl Inventory {
             *slot = Some(candidates.swap_remove(pick).0);
         }
 
-        // Guarantee at least one offensive option if all 3 are defensive.
+        // Guarantee at least one active (non-passive, non-defensive) option.
         if result
             .iter()
             .filter_map(|r| *r)
             .all(|s| defensive.contains(&s))
         {
-            let offensive: Vec<ShardKind> = (0..SHARD_COUNT as u8)
+            let active: Vec<ShardKind> = (0..SHARD_COUNT as u8)
                 .filter_map(ShardKind::from_index)
                 .filter(|s| !self.is_maxed(*s) && !defensive.contains(s))
                 .collect();
-            if !offensive.is_empty() {
-                let pick = (rng.next_u32() as usize) % offensive.len();
-                result[0] = Some(offensive[pick]);
+            if !active.is_empty() {
+                let pick = (rng.next_u32() as usize) % active.len();
+                result[0] = Some(active[pick]);
             }
         }
 

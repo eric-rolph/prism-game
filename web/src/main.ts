@@ -40,6 +40,10 @@ const SHARDS: ShardMeta[] = [
   { name: 'THORNS',       color: '#ef5350', rarity: 'rare',      desc: 'taking damage fires retaliatory beams',synergies: ['SIPHON → BLOOD PACT (close-range heal)', 'CASCADE → MARTYRDOM'] },
   { name: 'MAGNET',       color: '#7cffd4', rarity: 'common',    desc: 'pull radiance gems from farther away', synergies: ['INTERFERENCE → GRAVITY WELL'] },
   { name: 'MOMENTUM',     color: '#d7ff6f', rarity: 'common',    desc: 'move faster and dash more often',      synergies: ['HALO → EVENT HORIZON'] },
+  { name: 'ARMOR',        color: '#9ab8d0', rarity: 'common',    desc: 'reduce all incoming damage by 8% per level', synergies: [] },
+  { name: 'LUCK',         color: '#ffd740', rarity: 'rare',      desc: 'rare and legendary shards appear more often', synergies: [] },
+  { name: 'PRISM HEART',  color: '#ff7eb3', rarity: 'common',    desc: '+15 max HP per level; level-up heals more',   synergies: [] },
+  { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: 'dash grants longer i-frames; L3: afterimage', synergies: [] },
 ];
 
 async function main(): Promise<void> {

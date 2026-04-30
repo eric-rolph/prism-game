@@ -92,11 +92,11 @@ Goal: give level-ups short-term tactics and long-term build planning.
 - ✅ Add skip: closes the level-up modal and grants a small heal or radiance payout.
 - ✅ Add reroll: two charges per run by default; later affected by Luck.
 - Add banish/lock only if playtests show bad-offer frustration after reroll/skip exists.
-- Add passive shards:
-  - Armor: reduces contact and projectile damage.
-  - Luck: improves rare/legendary/evolution offer chances and reroll quality.
-  - Prism Heart: increases max HP and improves level-up healing.
-  - Phase Step: extends dash i-frames or leaves a short afterimage.
+- ✅ Add passive shards:
+  - ✅ Armor: reduces all incoming damage by 8% per level (up to 48% at L6).
+  - ✅ Luck: boosts rare shard weight ×0.25/level and legendary ×0.50/level in rolls.
+  - ✅ Prism Heart: +15 max HP per level (instant heal on pick); level-up heals 10% more per level.
+  - ✅ Phase Step: +0.18s dash i-frames per level; L3+: particle afterimage on dash start.
 - Add evolution offers: when two linked shards reach level 6, the next level-up can offer a named super-shard instead of another normal upgrade.
 - Keep active synergies at level 3; evolutions are the level-6 “capstone” layer, not a replacement for synergies.
 
