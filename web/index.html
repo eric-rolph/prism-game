@@ -415,8 +415,8 @@
         color: rgba(255, 215, 64, 0.35);
       }
 
-      /* Level-up skip button */
-      .levelup-skip {
+      /* Level-up action buttons (skip / reroll) */
+      .levelup-action {
         margin-top: 4px;
         padding: 8px 24px;
         border: 1px solid var(--faint);
@@ -429,9 +429,13 @@
         cursor: pointer;
         transition: color 180ms ease, border-color 180ms ease;
       }
-      .levelup-skip:hover {
+      .levelup-action:hover:not(:disabled) {
         color: var(--ink);
         border-color: var(--dim);
+      }
+      .levelup-action:disabled {
+        opacity: 0.25;
+        cursor: default;
       }
     </style>
   </head>

@@ -209,6 +209,12 @@ impl Game {
     pub fn skip_level_up(&mut self) {
         self.inner.skip_level_up();
     }
+    pub fn reroll_level_up(&mut self) {
+        self.inner.reroll_level_up();
+    }
+    pub fn reroll_charges(&self) -> u32 {
+        self.inner.reroll_charges()
+    }
 
     // --- Run telemetry ---
 

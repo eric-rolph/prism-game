@@ -41,11 +41,11 @@ Design principles for the next passes:
 
 Immediate senior-dev execution sequence:
 
-1. Make radiance gems visually unmistakable as pickups.
-2. Add debug run summaries for balance evidence.
-3. Improve Sentinel shield feedback and add one explicit attack pattern.
+1. ✅ Make radiance gems visually unmistakable as pickups.
+2. ✅ Add debug run summaries for balance evidence.
+3. ✅ Improve Sentinel shield feedback and add one explicit attack pattern.
 4. Extract boss/wave/progression modules from `game.rs` before Hydra.
-5. Add procedural audio for beams, pickups, shield cracks, rank-up, boss warnings, death, and victory.
+5. ✅ Add procedural audio for beams, pickups, shield cracks, rank-up, boss warnings, death, and victory.
 
 ## Slice 1: Boss Milestones
 
@@ -82,12 +82,12 @@ Goal: make the run feel like a beginning, middle, and finale rather than one con
 
 ## Slice 2: Upgrade Economy
 
-Status: queued after Sentinel or in parallel if boss work stalls.
+Status: in progress.
 
 Goal: give level-ups short-term tactics and long-term build planning.
 
-- Add skip: closes the level-up modal and grants a small heal or radiance payout.
-- Add reroll: one or two charges per run by default; later affected by Luck.
+- ✅ Add skip: closes the level-up modal and grants a small heal or radiance payout.
+- ✅ Add reroll: two charges per run by default; later affected by Luck.
 - Add banish/lock only if playtests show bad-offer frustration after reroll/skip exists.
 - Add passive shards:
   - Armor: reduces contact and projectile damage.
@@ -107,7 +107,7 @@ Candidate evolutions:
 
 ## Slice 3: Audio Event System
 
-Status: unstarted.
+Status: ✅ complete.
 
 Goal: make Prism feel physical without shipping a sound-asset pipeline.
 

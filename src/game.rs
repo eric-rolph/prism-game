@@ -55,6 +55,7 @@ pub struct Game {
     // Level-up modal state.
     leveling_up: bool,
     level_choices: [Option<ShardKind>; 3],
+    reroll_charges: u32,
 
     // Death / game-over state.
     dead: bool,
@@ -477,6 +478,7 @@ impl Game {
             interference_timer: 0.0,
             leveling_up: false,
             level_choices: [None; 3],
+            reroll_charges: 2,
             dead: false,
             score: 0,
             shake_amount: 0.0,
@@ -678,6 +680,16 @@ impl Game {
         self.level_choices = [None; 3];
         self.player.hp = (self.player.hp + 6.0).min(self.player.max_hp);
     }
+
+    pub fn reroll_level_up(&mut self) {
+        if !self.leveling_up || self.reroll_charges == 0 {
+            return;
+        }
+        self.reroll_charges -= 1;
+        self.level_choices = self.inventory.roll_choices(&mut self.rng);
+    }
+
+    pub fn reroll_charges(&self) -> u32 { self.reroll_charges }
 
     // Run telemetry accessors.
     pub fn damage_taken(&self) -> f32 { self.damage_taken }

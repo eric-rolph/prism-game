@@ -240,8 +240,7 @@ async function main(): Promise<void> {
 
   let modalShown = false;
 
-  const showLevelUpModal = (): void => {
-    levelupRankEl.textContent = 'RANK ' + game.rank();
+  const renderLevelUpCards = (): void => {
     levelupCardsEl.innerHTML = '';
 
     for (let slot = 0; slot < 3; slot++) {
@@ -257,7 +256,6 @@ async function main(): Promise<void> {
       if (meta.rarity === 'rare') card.style.borderColor = 'rgba(127,211,255,0.3)';
       if (meta.rarity === 'legendary') card.style.borderColor = 'rgba(255,215,64,0.4)';
 
-      // Build synergy hint for this shard.
       let synergyHtml = '';
       if (meta.synergies.length > 0) {
         synergyHtml = `<div class="shard-synergy">${meta.synergies.map(s => `<span>⚡ ${s}</span>`).join('')}</div>`;
@@ -271,20 +269,33 @@ async function main(): Promise<void> {
         `<div class="shard-desc">${meta.desc}</div>` +
         synergyHtml +
         `<div class="shard-hotkey">${slot + 1}</div>`;
-      // `slot` captured per-card via the const.
-      card.addEventListener('click', () => {
-        game.select_shard(slot);
-      });
+      card.addEventListener('click', () => { game.select_shard(slot); });
       levelupCardsEl.appendChild(card);
     }
 
+    const charges = game.reroll_charges();
+    const rerollBtn = document.createElement('button');
+    rerollBtn.className = 'levelup-action';
+    rerollBtn.type = 'button';
+    rerollBtn.disabled = charges === 0;
+    rerollBtn.textContent = `REROLL [R]  ×${charges}`;
+    rerollBtn.addEventListener('click', () => {
+      game.reroll_level_up();
+      renderLevelUpCards();
+    });
+    levelupCardsEl.appendChild(rerollBtn);
+
     const skipBtn = document.createElement('button');
-    skipBtn.className = 'levelup-skip';
+    skipBtn.className = 'levelup-action';
     skipBtn.type = 'button';
     skipBtn.textContent = 'SKIP [S]  +6 HP';
     skipBtn.addEventListener('click', () => { game.skip_level_up(); });
     levelupCardsEl.appendChild(skipBtn);
+  };
 
+  const showLevelUpModal = (): void => {
+    levelupRankEl.textContent = 'RANK ' + game.rank();
+    renderLevelUpCards();
     levelupEl.classList.add('shown');
     audio.duck(true);
     modalShown = true;
@@ -306,6 +317,11 @@ async function main(): Promise<void> {
     }
     if (e.key === 's' || e.key === 'S') {
       game.skip_level_up();
+      e.preventDefault();
+    }
+    if (e.key === 'r' || e.key === 'R') {
+      game.reroll_level_up();
+      renderLevelUpCards();
       e.preventDefault();
     }
   });
