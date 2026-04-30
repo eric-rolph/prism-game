@@ -84,6 +84,7 @@ pub struct Crystal {
 pub enum BossKind {
     Sentinel,
     Hydra,
+    VoidPrism,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -153,6 +154,24 @@ pub struct InterferencePulse {
 impl InterferencePulse {
     pub fn current_radius(&self) -> f32 {
         (self.life / self.max_life).min(1.0) * self.max_radius
+    }
+}
+
+/// Expanding shockwave ring emitted by the Void Prism boss. Damages the player
+/// when the ring front passes through them; rendered as a dark fading ring.
+pub struct VoidShockwave {
+    pub pos: Vec2,
+    pub life: f32,
+    pub max_life: f32,
+    pub max_radius: f32,
+    pub damage: f32,
+    /// Tracks whether the player has already been hit by this shockwave.
+    pub hit_player: bool,
+}
+
+impl VoidShockwave {
+    pub fn current_radius(&self) -> f32 {
+        (self.life / self.max_life).clamp(0.0, 1.0) * self.max_radius
     }
 }
 

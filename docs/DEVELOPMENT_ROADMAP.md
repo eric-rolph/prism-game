@@ -78,9 +78,10 @@ Goal: make the run feel like a beginning, middle, and finale rather than one con
 
 ### 1.4 15:00 Void Prism
 
-- Final globe-bound boss with a dark core and bright rim.
-- Pulls enemies inward, emits expanding shockwaves, and grows more dangerous in the final phase.
-- Killing it ends the run immediately; otherwise survival at 15:00 still grants victory once the boss system is tuned.
+- ✅ Final globe-bound boss with a dark core and bright violet rim.
+- ✅ Pulls all enemies inward, emits expanding player-damaging shockwave rings at intervals.
+- ✅ Phase 2 (≤ 50% HP): faster movement, shorter shockwave interval, larger rings.
+- ✅ Killing it ends the run immediately with a victory; surviving to 15:00 also grants victory.
 
 ## Slice 2: Upgrade Economy
 

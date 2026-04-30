@@ -6,7 +6,7 @@
 
 use crate::entities::{
     Beam, Boss, BossKind, BossState, Crystal, Enemy, EnemyKind, EnemyState, FrostField, Halo,
-    InterferencePulse, Particle, Player, Projectile, XpGem,
+    InterferencePulse, Particle, Player, Projectile, VoidShockwave, XpGem,
 };
 use crate::math::Rng;
 use crate::shards::{compose_salvo, BeamRequest, Inventory, ShardKind};
@@ -66,8 +66,11 @@ pub struct Game {
     prism_cannon_timer: f32,
     sentinel_spawned: bool,
     hydra_spawned: bool,
+    void_prism_spawned: bool,
+    void_victory: bool,
     boss_breather_timer: f32,
     boss_kills: u32,
+    void_shockwaves: Vec<VoidShockwave>,
 
     // Run telemetry (reset on restart, read at death/victory).
     damage_taken: f32,
@@ -200,6 +203,15 @@ const SENTINEL_SHIELD_HP: f32 = 800.0;
 const SENTINEL_SHIELD_RADIUS: f32 = 12.0;
 const SENTINEL_SHIELD_ORBIT: f32 = 72.0;
 const SENTINEL_SHIELD_SPIN: f32 = 1.35;
+const VOID_PRISM_SPAWN_TIME: f32 = 780.0; // 13:00
+const VOID_PRISM_HP: f32 = 14000.0;
+const VOID_PRISM_RADIUS: f32 = 50.0;
+const VOID_PRISM_CONTACT_DAMAGE: f32 = 40.0;
+const VOID_PRISM_SHOCKWAVE_INTERVAL_P1: f32 = 3.5;
+const VOID_PRISM_SHOCKWAVE_INTERVAL_P2: f32 = 2.0;
+const VOID_PRISM_SHOCKWAVE_MAX_RADIUS: f32 = 380.0;
+const VOID_PRISM_SHOCKWAVE_DAMAGE: f32 = 22.0;
+const VOID_PRISM_PULL_STRENGTH: f32 = 55.0;
 
 // Traversable globe.
 // World x/y coordinates are arc lengths on an equirectangular chart:
@@ -517,8 +529,11 @@ impl Game {
             audio_event_bits: 0,
             sentinel_spawned: false,
             hydra_spawned: false,
+            void_prism_spawned: false,
+            void_victory: false,
             boss_breather_timer: 0.0,
             boss_kills: 0,
+            void_shockwaves: Vec::new(),
             circle_buf: Vec::with_capacity(1024),
             beam_buf: Vec::with_capacity(256),
         }
@@ -568,7 +583,7 @@ impl Game {
     }
 
     pub fn is_victory(&self) -> bool {
-        self.dead && self.time >= SESSION_LENGTH
+        self.dead && (self.time >= SESSION_LENGTH || self.void_victory)
     }
 
     pub fn boss_active(&self) -> bool {
@@ -579,6 +594,7 @@ impl Game {
         match self.boss.as_ref().map(|b| b.kind) {
             Some(BossKind::Sentinel) => 0,
             Some(BossKind::Hydra) => 1,
+            Some(BossKind::VoidPrism) => 2,
             None => -1,
         }
     }
@@ -820,7 +836,9 @@ impl Game {
         }
         self.maybe_spawn_sentinel();
         self.maybe_spawn_hydra();
+        self.maybe_spawn_void_prism();
         self.update_boss(dt);
+        self.update_void_shockwaves(dt);
 
         // Spawn enemies (wave-based).
         let enemy_cap = self.enemy_cap_for_wave();
@@ -847,6 +865,9 @@ impl Game {
         // Enemy AI.
         let player_pos = self.player.pos;
         let minute = self.time / 60.0;
+        let void_pull_pos: Option<Vec2> = self.boss.as_ref().and_then(|b| {
+            (b.kind == BossKind::VoidPrism && b.state == BossState::Active).then_some(b.pos)
+        });
         for e in &mut self.enemies {
             if e.spawn_grace > 0.0 {
                 e.spawn_grace = (e.spawn_grace - dt).max(0.0);
@@ -994,6 +1015,14 @@ impl Game {
                     }
                 }
             }
+            // Void Prism gravitational pull — all enemies drawn toward boss center.
+            if let Some(vp_pos) = void_pull_pos {
+                let delta = nearest_globe_delta(e.pos, vp_pos);
+                if delta.length() > VOID_PRISM_RADIUS + e.radius {
+                    let pull_dir = delta.normalize_or_zero();
+                    move_on_globe(&mut e.pos, pull_dir * VOID_PRISM_PULL_STRENGTH * dt);
+                }
+            }
         }
 
         // Spawn emitter projectiles (separate pass to avoid borrow conflict).
@@ -1118,7 +1147,7 @@ impl Game {
             if let Some(boss) = &self.boss {
                 if boss.state == BossState::Active {
                     let hit = match boss.kind {
-                        BossKind::Sentinel => {
+                        BossKind::Sentinel | BossKind::VoidPrism => {
                             globe_distance(boss.pos, self.player.pos) < boss.radius + self.player.radius
                         }
                         BossKind::Hydra => (0..3usize).any(|i| {
@@ -1275,6 +1304,11 @@ impl Game {
                                         boss.lobe_hp[i] -= BARRIER_CONTACT_DPS * dt;
                                     }
                                 }
+                            }
+                        }
+                        BossKind::VoidPrism => {
+                            if globe_distance(boss.pos, self.player.pos) < BARRIER_RADIUS + boss.radius {
+                                boss.hp -= BARRIER_CONTACT_DPS * dt;
                             }
                         }
                     }
@@ -1517,6 +1551,39 @@ impl Game {
         self.audio_event_bits |= AUDIO_BOSS_SPAWN;
     }
 
+    fn maybe_spawn_void_prism(&mut self) {
+        if self.void_prism_spawned || self.time < VOID_PRISM_SPAWN_TIME || self.boss.is_some() {
+            return;
+        }
+        self.void_prism_spawned = true;
+        let angle = self.rng.angle();
+        let dir = Vec2::new(angle.cos(), angle.sin());
+        let mut pos = self.player.pos;
+        move_on_globe(&mut pos, dir * self.screen_size.length() * 0.48);
+        self.boss = Some(Boss {
+            kind: BossKind::VoidPrism,
+            pos,
+            radius: VOID_PRISM_RADIUS,
+            hp: VOID_PRISM_HP,
+            max_hp: VOID_PRISM_HP,
+            speed: 0.0,
+            contact_damage: 0.0,
+            state: BossState::Telegraphing,
+            state_timer: BOSS_TELEGRAPH_TIME,
+            phase: 0,
+            shield_angle: 0.0,
+            shield_hp: [0.0; 3],
+            lobe_hp: [0.0; 3],
+            lobe_alive: [false; 3],
+            lobe_orbit: 0.0,
+            fire_timer: VOID_PRISM_SHOCKWAVE_INTERVAL_P1,
+        });
+        self.projectiles.clear();
+        self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
+        self.shake_amount += 10.0;
+        self.audio_event_bits |= AUDIO_BOSS_SPAWN;
+    }
+
     fn hydra_lobe_pos(boss: &Boss, i: usize) -> Vec2 {
         let a = boss.lobe_orbit + (i as f32) * std::f32::consts::TAU / 3.0;
         let mut pos = boss.pos;
@@ -1531,6 +1598,7 @@ impl Game {
         let mut hydra_fire_positions: Vec<Vec2> = Vec::new();
         let mut lobes_died: Vec<(Vec2, usize)> = Vec::new();
         let mut finish_death = false;
+        let mut void_shockwave_origin: Option<Vec2> = None;
 
         if let Some(boss) = &mut self.boss {
             match boss.state {
@@ -1539,6 +1607,7 @@ impl Game {
                     let init_radius = match boss.kind {
                         BossKind::Sentinel => SENTINEL_RADIUS,
                         BossKind::Hydra => HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
+                        BossKind::VoidPrism => VOID_PRISM_RADIUS,
                     };
                     let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
                     boss.radius = init_radius * (0.35 + t * 0.65);
@@ -1555,6 +1624,10 @@ impl Game {
                             BossKind::Hydra => {
                                 boss.speed = HYDRA_BODY_SPEED;
                                 boss.contact_damage = HYDRA_CONTACT_DAMAGE;
+                            }
+                            BossKind::VoidPrism => {
+                                boss.speed = 26.0;
+                                boss.contact_damage = VOID_PRISM_CONTACT_DAMAGE;
                             }
                         }
                     }
@@ -1611,6 +1684,26 @@ impl Game {
                                 }
                             }
                         }
+                        BossKind::VoidPrism => {
+                            let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
+                            let next_phase: u8 = if hp_pct > 0.50 { 0 } else { 1 };
+                            if next_phase != boss.phase {
+                                boss.phase = next_phase;
+                                phase_changed = true;
+                            }
+                            if boss.phase == 1 {
+                                boss.speed = 42.0;
+                            }
+                            boss.fire_timer -= dt;
+                            if boss.fire_timer <= 0.0 {
+                                boss.fire_timer = if boss.phase == 0 {
+                                    VOID_PRISM_SHOCKWAVE_INTERVAL_P1
+                                } else {
+                                    VOID_PRISM_SHOCKWAVE_INTERVAL_P2
+                                };
+                                void_shockwave_origin = Some(boss.pos);
+                            }
+                        }
                     }
                 }
                 BossState::Dying => {
@@ -1618,6 +1711,7 @@ impl Game {
                     let init_radius = match boss.kind {
                         BossKind::Sentinel => SENTINEL_RADIUS,
                         BossKind::Hydra => HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
+                        BossKind::VoidPrism => VOID_PRISM_RADIUS,
                     };
                     let t = (boss.state_timer / BOSS_DEATH_TIME).clamp(0.0, 1.0);
                     boss.radius = init_radius * t;
@@ -1669,6 +1763,21 @@ impl Game {
                 damage: BOSS_PROJ_DAMAGE,
                 life: 0.0,
             });
+        }
+        // Void Prism: emit a player-damaging shockwave ring.
+        if let Some(origin) = void_shockwave_origin {
+            let phase = self.boss.as_ref().map(|b| b.phase).unwrap_or(0);
+            let max_radius = VOID_PRISM_SHOCKWAVE_MAX_RADIUS * if phase == 1 { 1.25 } else { 1.0 };
+            let duration = max_radius / 180.0;
+            self.void_shockwaves.push(VoidShockwave {
+                pos: origin,
+                life: 0.0,
+                max_life: duration,
+                max_radius,
+                damage: VOID_PRISM_SHOCKWAVE_DAMAGE,
+                hit_player: false,
+            });
+            self.shake_amount += 3.0;
         }
         if finish_death {
             self.finish_boss_death();
@@ -1738,6 +1847,12 @@ impl Game {
         self.boss_breather_timer = BOSS_POST_BREATHER;
         self.shake_amount += 18.0;
 
+        if boss.kind == BossKind::VoidPrism {
+            self.void_victory = true;
+            self.dead = true;
+            self.score = self.compute_score() + 1000;
+        }
+
         for _ in 0..44 {
             let angle = self.rng.angle();
             let speed = self.rng.range(120.0, 360.0);
@@ -1761,6 +1876,30 @@ impl Game {
                 life: 0.0,
             });
         }
+    }
+
+    fn update_void_shockwaves(&mut self, dt: f32) {
+        let player_pos = self.player.pos;
+        let player_r = self.player.radius;
+        for sw in &mut self.void_shockwaves {
+            let prev_r = sw.current_radius();
+            sw.life += dt;
+            let curr_r = sw.current_radius();
+            if !sw.hit_player && self.player.iframe_timer <= 0.0 {
+                let dist = nearest_globe_delta(sw.pos, player_pos).length();
+                if dist >= prev_r - player_r && dist <= curr_r + player_r {
+                    sw.hit_player = true;
+                    self.player.hp -= sw.damage;
+                    self.player.iframe_timer = 0.25;
+                    self.shake_amount += 4.0;
+                    self.audio_event_bits |= AUDIO_PLAYER_HIT;
+                    self.damage_taken += sw.damage;
+                }
+            }
+        }
+        self.void_shockwaves.retain(|sw| sw.life < sw.max_life);
+        let _ = player_pos;
+        let _ = player_r;
     }
 
     fn sentinel_shield_pos(boss: &Boss, idx: usize) -> Vec2 {
@@ -1820,6 +1959,13 @@ impl Game {
                     }
                 }
             }
+            BossKind::VoidPrism => {
+                if capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius) {
+                    boss.hp -= damage;
+                    self.hit_flash_positions.push(boss.pos);
+                    return Some((boss.pos, false));
+                }
+            }
         }
         None
     }
@@ -1872,6 +2018,11 @@ impl Game {
                                 break;
                             }
                         }
+                    }
+                }
+                BossKind::VoidPrism => {
+                    if capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius) {
+                        boss.hp -= damage;
                     }
                 }
             }
@@ -1939,6 +2090,23 @@ impl Game {
                                 });
                             }
                         }
+                    }
+                    BossKind::VoidPrism => {
+                        local_enemies.push(Enemy {
+                            pos: nearest_globe_pos(self.player.pos, boss.pos),
+                            radius: boss.radius,
+                            hp: boss.hp,
+                            speed: 0.0,
+                            kind: EnemyKind::Brute,
+                            state: EnemyState::Drifting,
+                            state_timer: 0.0,
+                            charge_dir: Vec2::ZERO,
+                            color: [1.0, 1.0, 1.0],
+                            contact_damage: 0.0,
+                            slow_timer: 0.0,
+                            no_xp: true,
+                            spawn_grace: 0.0,
+                        });
                     }
                 }
             }
@@ -2969,6 +3137,75 @@ impl Game {
                         }
                     }
                 }
+                BossKind::VoidPrism => {
+                    let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
+                    match boss.state {
+                        BossState::Telegraphing => {
+                            let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
+                            // Dark pulsing void core materializing.
+                            self.circle_buf.push(CircleInstance {
+                                x: pos.x, y: pos.y,
+                                radius: VOID_PRISM_RADIUS * (0.2 + t * 1.8),
+                                r: 0.6, g: 0.3, b: 1.0,
+                                a: 0.08 + t * 0.14, glow: 1.5 + t * 5.0,
+                            });
+                            self.circle_buf.push(CircleInstance {
+                                x: pos.x, y: pos.y,
+                                radius: VOID_PRISM_RADIUS * (0.35 + t * 0.65),
+                                r: 0.05, g: 0.0, b: 0.12,
+                                a: 0.55 + t * 0.35, glow: 2.0 + t * 3.0,
+                            });
+                        }
+                        BossState::Active | BossState::Dying => {
+                            let glow_base = if boss.phase == 1 { 6.0 } else { 4.5 };
+                            // Outer void aura — pale violet rim.
+                            self.circle_buf.push(CircleInstance {
+                                x: pos.x, y: pos.y,
+                                radius: boss.radius + 14.0,
+                                r: 0.7, g: 0.35, b: 1.0,
+                                a: (0.12 + hp_pct * 0.08) * dying_alpha,
+                                glow: glow_base * 1.2 * dying_alpha,
+                            });
+                            // Dark core body.
+                            self.circle_buf.push(CircleInstance {
+                                x: pos.x, y: pos.y,
+                                radius: boss.radius,
+                                r: 0.04, g: 0.0, b: 0.10,
+                                a: (0.88 + hp_pct * 0.12) * dying_alpha,
+                                glow: glow_base * dying_alpha,
+                            });
+                            // Bright inner rim ring.
+                            self.circle_buf.push(CircleInstance {
+                                x: pos.x, y: pos.y,
+                                radius: boss.radius * 0.72,
+                                r: 0.8, g: 0.55, b: 1.0,
+                                a: (0.35 + hp_pct * 0.25) * dying_alpha,
+                                glow: (glow_base * 0.8) * dying_alpha,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Void shockwaves — expanding dark rings.
+        for sw in &self.void_shockwaves {
+            let sw_pos = nearest_globe_pos(camera, sw.pos);
+            let r = sw.current_radius();
+            let fade = (1.0 - sw.life / sw.max_life).clamp(0.0, 1.0);
+            self.circle_buf.push(CircleInstance {
+                x: sw_pos.x, y: sw_pos.y,
+                radius: r,
+                r: 0.55, g: 0.2, b: 0.9,
+                a: fade * 0.22, glow: 2.5 * fade,
+            });
+            if r > 8.0 {
+                self.circle_buf.push(CircleInstance {
+                    x: sw_pos.x, y: sw_pos.y,
+                    radius: r - 6.0,
+                    r: 0.04, g: 0.0, b: 0.08,
+                    a: fade * 0.30, glow: 1.0,
+                });
             }
         }
 

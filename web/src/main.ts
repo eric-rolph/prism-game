@@ -18,7 +18,7 @@ const SYNERGY_NAMES: string[] = [
   'CHAIN REACTION', 'BLIZZARD', 'SUPERNOVA', 'PRISM CANNON', 'TRACKING ECHO',
   'FROZEN ORBIT', 'EVENT HORIZON', 'BLOOD PACT', 'MARTYRDOM', 'RESONANCE', 'GRAVITY WELL',
 ];
-const BOSS_NAMES: string[] = ['PRISM SENTINEL', 'HYDRA'];
+const BOSS_NAMES: string[] = ['PRISM SENTINEL', 'HYDRA', 'VOID PRISM'];
 
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
 type Rarity = 'common' | 'rare' | 'legendary';
