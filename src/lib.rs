@@ -230,4 +230,19 @@ impl Game {
     pub fn boss_kills_count(&self) -> u32 {
         self.inner.boss_kills_count()
     }
+
+    // --- Per-frame audio events ---
+
+    pub fn audio_beam_count(&self) -> u32 {
+        self.inner.audio_beam_count()
+    }
+    pub fn audio_kill_count(&self) -> u32 {
+        self.inner.audio_kill_count()
+    }
+    pub fn audio_gem_count(&self) -> u32 {
+        self.inner.audio_gem_count()
+    }
+    pub fn audio_event_bits(&self) -> u32 {
+        self.inner.audio_event_bits()
+    }
 }

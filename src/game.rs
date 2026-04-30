@@ -74,6 +74,12 @@ pub struct Game {
     kills_by_kind: [u32; 8],
     peak_rank: u32,
 
+    // Per-frame audio event counters — cleared at the top of every update().
+    audio_beam_count: u32,
+    audio_kill_count: u32,
+    audio_gem_count: u32,
+    audio_event_bits: u32,
+
     // Screen shake (accumulated amplitude, decays per frame).
     shake_amount: f32,
     shake_offset: Vec2,
@@ -154,6 +160,13 @@ const CRYSTAL_SPAWN_INTERVAL: f32 = 45.0;
 const BOSS_PROJ_SPEED: f32 = 210.0;
 const BOSS_PROJ_DAMAGE: f32 = 18.0;
 const BOSS_SHIELD_BURST_COUNT: u32 = 5;
+
+// Audio event bits (per-frame, cleared at top of update).
+pub const AUDIO_RANK_UP: u32      = 1 << 0;
+pub const AUDIO_PLAYER_HIT: u32   = 1 << 1;
+pub const AUDIO_BOSS_SPAWN: u32   = 1 << 2;
+pub const AUDIO_BOSS_PHASE: u32   = 1 << 3;
+pub const AUDIO_SHIELD_BREAK: u32 = 1 << 4;
 
 // Boss milestones.
 const SENTINEL_SPAWN_TIME: f32 = 300.0;
@@ -477,6 +490,10 @@ impl Game {
             gems_collected: 0,
             kills_by_kind: [0; 8],
             peak_rank: 0,
+            audio_beam_count: 0,
+            audio_kill_count: 0,
+            audio_gem_count: 0,
+            audio_event_bits: 0,
             sentinel_spawned: false,
             boss_breather_timer: 0.0,
             boss_kills: 0,
@@ -672,6 +689,12 @@ impl Game {
     pub fn peak_rank(&self) -> u32 { self.peak_rank }
     pub fn boss_kills_count(&self) -> u32 { self.boss_kills }
 
+    // Audio event accessors — read after update() each frame.
+    pub fn audio_beam_count(&self) -> u32 { self.audio_beam_count }
+    pub fn audio_kill_count(&self) -> u32 { self.audio_kill_count }
+    pub fn audio_gem_count(&self) -> u32 { self.audio_gem_count }
+    pub fn audio_event_bits(&self) -> u32 { self.audio_event_bits }
+
     pub fn restart(&mut self) {
         let w = self.screen_size.x;
         let h = self.screen_size.y;
@@ -682,6 +705,11 @@ impl Game {
     // --- Main update ----------------------------------------------------
 
     pub fn update(&mut self, dt: f32) {
+        self.audio_beam_count = 0;
+        self.audio_kill_count = 0;
+        self.audio_gem_count = 0;
+        self.audio_event_bits = 0;
+
         if self.leveling_up || self.dead {
             return;
         }
@@ -1298,6 +1326,7 @@ impl Game {
         if collected_xp > 0 {
             self.xp += collected_xp;
             self.gems_collected += 1;
+            self.audio_gem_count += 1;
             self.check_for_level_up();
         }
 
@@ -1388,6 +1417,7 @@ impl Game {
         self.projectiles.clear();
         self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
         self.shake_amount += 8.0;
+        self.audio_event_bits |= AUDIO_BOSS_SPAWN;
     }
 
     fn update_boss(&mut self, dt: f32) {
@@ -1470,6 +1500,7 @@ impl Game {
         }
         if phase_changed {
             self.shake_amount += 6.0;
+            self.audio_event_bits |= AUDIO_BOSS_PHASE;
         }
         if let Some((origin, kind, count)) = add_spawn {
             self.spawn_boss_adds(origin, kind, count);
@@ -1608,6 +1639,7 @@ impl Game {
     }
 
     fn fire_shield_break_burst(&mut self, shield_pos: Vec2) {
+        self.audio_event_bits |= AUDIO_SHIELD_BREAK;
         for i in 0..BOSS_SHIELD_BURST_COUNT {
             let angle = (i as f32 / BOSS_SHIELD_BURST_COUNT as f32) * std::f32::consts::TAU;
             let dir = Vec2::new(angle.cos(), angle.sin());
@@ -1721,6 +1753,7 @@ impl Game {
             }
         }
 
+        self.audio_beam_count += 1;
         true
     }
 
@@ -1858,6 +1891,7 @@ impl Game {
     ) {
         self.kills_total += 1;
         self.kills_by_kind[kind as usize] = self.kills_by_kind[kind as usize].saturating_add(1);
+        self.audio_kill_count += 1;
         self.spawn_death_particles(pos, kind);
 
         // Blizzard: frozen enemy death leaves a lingering frost slow-field.
@@ -2000,6 +2034,7 @@ impl Game {
             self.xp -= needed;
             self.rank += 1;
             self.peak_rank = self.peak_rank.max(self.rank);
+            self.audio_event_bits |= AUDIO_RANK_UP;
             // Heal on level up — diminishing with rank.
             let heal = (20.0 - self.rank as f32 * 1.0).max(5.0);
             self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
@@ -2054,6 +2089,7 @@ impl Game {
         if remaining > 0.0 {
             self.player.hp -= remaining;
             self.damage_taken += remaining;
+            self.audio_event_bits |= AUDIO_PLAYER_HIT;
         }
 
         // Thorns: fire retaliatory beams.

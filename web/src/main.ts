@@ -7,6 +7,7 @@
 import init, { Game } from '../wasm/prism.js';
 import { Renderer } from './renderer.js';
 import { Input } from './input.js';
+import { AudioManager } from './audio.js';
 
 const CIRCLE_STRIDE_FLOATS = 8;
 const BEAM_STRIDE_FLOATS = 10;
@@ -148,6 +149,12 @@ async function main(): Promise<void> {
 
   const renderer = new Renderer(canvas);
   const input = new Input(canvas);
+  const audio = new AudioManager();
+
+  // Initialize AudioContext on first user gesture (browser autoplay policy).
+  const initAudio = (): void => { audio.init(); audio.resume(); };
+  window.addEventListener('keydown', initAudio, { once: true });
+  window.addEventListener('pointerdown', initAudio, { once: true });
 
   // Canvas sizing — DPR-aware, capped at 2× so phones don't burn fill rate.
   // We track viewW/H (CSS pixels, = world units) and pixelW/H (backbuffer)
@@ -279,12 +286,14 @@ async function main(): Promise<void> {
     levelupCardsEl.appendChild(skipBtn);
 
     levelupEl.classList.add('shown');
+    audio.duck(true);
     modalShown = true;
   };
 
   const hideLevelUpModal = (): void => {
     levelupEl.classList.remove('shown');
     levelupCardsEl.innerHTML = '';
+    audio.duck(false);
     modalShown = false;
   };
 
@@ -331,6 +340,7 @@ async function main(): Promise<void> {
       `${gems} GEMS  /  ${bossKills} BOSSES`;
     deathScreenEl.classList.add('shown');
     deathShown = true;
+    if (victory) audio.playVictory(); else audio.playDeath();
 
     // Debug run summary.
     const killsByKind = ENEMY_KIND_NAMES.map((n, i) => `${n}: ${game.kills_by_kind(i)}`).join(', ');
@@ -401,6 +411,17 @@ async function main(): Promise<void> {
     game.set_input(ix, iy);
     game.set_dash_input(input.consumeDash());
     game.update(dt);
+
+    // Audio tick — reads per-frame counters set during game.update().
+    if (!deathShown && !modalShown) {
+      audio.tick(dt,
+        game.audio_beam_count(),
+        game.audio_kill_count(),
+        game.audio_gem_count(),
+        game.audio_event_bits(),
+        game.active_synergy_bits(),
+      );
+    }
 
     // Death / victory screen edges.
     const isDead = game.is_dead();
