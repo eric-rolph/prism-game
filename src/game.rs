@@ -1434,10 +1434,12 @@ impl Game {
         }
         // Collect gems touching player.
         let mut collected_xp: u32 = 0;
+        let mut collected_count: u32 = 0;
         self.gems.retain(|g| {
             let dist = globe_distance(g.pos, self.player.pos);
             if dist < GEM_COLLECT_RADIUS + self.player.radius {
                 collected_xp += g.value;
+                collected_count += 1;
                 false
             } else if g.life >= GEM_LIFETIME {
                 false // expired
@@ -1447,8 +1449,8 @@ impl Game {
         });
         if collected_xp > 0 {
             self.xp += collected_xp;
-            self.gems_collected += 1;
-            self.audio_gem_count += 1;
+            self.gems_collected += collected_count;
+            self.audio_gem_count += collected_count;
             self.check_for_level_up();
         }
 
@@ -1876,7 +1878,7 @@ impl Game {
         self.boss_breather_timer = BOSS_POST_BREATHER;
         self.shake_amount += 18.0;
 
-        if boss.kind == BossKind::VoidPrism {
+        if boss.kind == BossKind::VoidPrism && !self.dead {
             self.void_victory = true;
             self.dead = true;
             self.score = self.compute_score() + 1000;
@@ -1910,25 +1912,26 @@ impl Game {
     fn update_void_shockwaves(&mut self, dt: f32) {
         let player_pos = self.player.pos;
         let player_r = self.player.radius;
+        let iframe = self.player.iframe_timer;
+        let mut hit_damage = 0.0f32;
         for sw in &mut self.void_shockwaves {
             let prev_r = sw.current_radius();
             sw.life += dt;
             let curr_r = sw.current_radius();
-            if !sw.hit_player && self.player.iframe_timer <= 0.0 {
+            if !sw.hit_player && iframe <= 0.0 {
                 let dist = nearest_globe_delta(sw.pos, player_pos).length();
                 if dist >= prev_r - player_r && dist <= curr_r + player_r {
                     sw.hit_player = true;
-                    self.player.hp -= sw.damage;
-                    self.player.iframe_timer = 0.25;
-                    self.shake_amount += 4.0;
-                    self.audio_event_bits |= AUDIO_PLAYER_HIT;
-                    self.damage_taken += sw.damage;
+                    hit_damage += sw.damage;
                 }
             }
         }
         self.void_shockwaves.retain(|sw| sw.life < sw.max_life);
-        let _ = player_pos;
-        let _ = player_r;
+        if hit_damage > 0.0 {
+            self.apply_damage_to_player(hit_damage);
+            self.player.iframe_timer = 0.25;
+            self.shake_amount += 4.0;
+        }
     }
 
     fn sentinel_shield_pos(boss: &Boss, idx: usize) -> Vec2 {
@@ -1962,9 +1965,8 @@ impl Game {
                     }
                     let shield_pos = Self::sentinel_shield_pos(boss, i);
                     if capsule_circle_intersect_globe(start, end, cap_half, shield_pos, SENTINEL_SHIELD_RADIUS) {
-                        let was_alive = boss.shield_hp[i] > 0.0;
                         boss.shield_hp[i] = (boss.shield_hp[i] - damage).max(0.0);
-                        let just_broken = was_alive && boss.shield_hp[i] <= 0.0;
+                        let just_broken = boss.shield_hp[i] <= 0.0;
                         self.hit_flash_positions.push(shield_pos);
                         return Some((shield_pos, just_broken));
                     }
@@ -2476,11 +2478,10 @@ impl Game {
     fn rebuild_halos(&mut self) {
         let level = self.inventory.level(ShardKind::Halo) as usize;
         self.halos.clear();
-        let n = level.max(1);
         for i in 0..level {
             let even = i % 2 == 0;
             self.halos.push(Halo {
-                angle: (i as f32) * std::f32::consts::TAU / n as f32,
+                angle: (i as f32) * std::f32::consts::TAU / level as f32,
                 radius: 38.0 + 22.0 * i as f32,
                 size: 5.0,
                 angular_speed: if even { 1.8 } else { -1.4 },
@@ -2488,12 +2489,12 @@ impl Game {
         }
     }
 
-    /// Damage the player, absorbing with Barrier first, then triggering Thorns.
+    /// Damage the player. Barrier absorbs the full raw hit first; Armor reduces
+    /// whatever leaks through. Thorns fires after HP loss.
     fn apply_damage_to_player(&mut self, raw_damage: f32) {
-        let armor = self.inventory.level(ShardKind::Armor) as f32;
-        let mut remaining = raw_damage * (1.0 - armor * ARMOR_DR_PER_LEVEL).max(0.10);
+        let mut remaining = raw_damage;
 
-        // Barrier absorbs damage first.
+        // Barrier absorbs raw damage before any reduction.
         if self.player.barrier_hp > 0.0 {
             let absorbed = remaining.min(self.player.barrier_hp);
             self.player.barrier_hp -= absorbed;
@@ -2514,7 +2515,10 @@ impl Game {
             }
         }
 
+        // Armor reduces what leaks through barrier.
         if remaining > 0.0 {
+            let armor = self.inventory.level(ShardKind::Armor) as f32;
+            remaining *= (1.0 - armor * ARMOR_DR_PER_LEVEL).max(0.10);
             self.player.hp -= remaining;
             self.damage_taken += remaining;
             self.audio_event_bits |= AUDIO_PLAYER_HIT;
@@ -2793,7 +2797,7 @@ impl Game {
             }
             WaveShape::Crescendo if self.wave >= 14 => {
                 // Late crescendos mix ranged pressure into the density spike.
-                match self.rng.next_u32() % 4 {
+                return match self.rng.next_u32() % 4 {
                     0 => EnemyKind::Emitter,
                     1 => EnemyKind::Orbiter,
                     2 => EnemyKind::Pulsar,

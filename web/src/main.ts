@@ -292,7 +292,7 @@ async function main(): Promise<void> {
     const skipBtn = document.createElement('button');
     skipBtn.className = 'levelup-action';
     skipBtn.type = 'button';
-    skipBtn.textContent = 'SKIP [S]  +6 HP';
+    skipBtn.textContent = 'SKIP [X]  +6 HP';
     skipBtn.addEventListener('click', () => { game.skip_level_up(); });
     levelupCardsEl.appendChild(skipBtn);
   };
@@ -319,7 +319,7 @@ async function main(): Promise<void> {
       game.select_shard(n - 1);
       e.preventDefault();
     }
-    if (e.key === 's' || e.key === 'S') {
+    if (e.key === 'x' || e.key === 'X') {
       game.skip_level_up();
       e.preventDefault();
     }
@@ -446,7 +446,7 @@ async function main(): Promise<void> {
     // Death / victory screen edges.
     const isDead = game.is_dead();
     const isVictory = game.is_victory();
-    if ((isDead || isVictory) && !deathShown) showDeathScreen(isVictory);
+    if (isDead && !deathShown) showDeathScreen(isVictory);
 
     // Dash cooldown indicator.
     const dashPct = game.dash_cooldown_pct();
