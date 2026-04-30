@@ -1519,8 +1519,9 @@ impl Game {
 
     fn hydra_lobe_pos(boss: &Boss, i: usize) -> Vec2 {
         let a = boss.lobe_orbit + (i as f32) * std::f32::consts::TAU / 3.0;
-        let offset = Vec2::new(a.cos(), a.sin()) * HYDRA_ORBIT_RADIUS;
-        boss.pos + offset
+        let mut pos = boss.pos;
+        move_on_globe(&mut pos, Vec2::new(a.cos(), a.sin()) * HYDRA_ORBIT_RADIUS);
+        pos
     }
 
     fn update_boss(&mut self, dt: f32) {
@@ -1528,7 +1529,7 @@ impl Game {
         let mut phase_changed = false;
         let mut add_spawn: Option<(Vec2, EnemyKind, u32)> = None;
         let mut hydra_fire_positions: Vec<Vec2> = Vec::new();
-        let mut lobe_died: Option<(Vec2, usize)> = None;
+        let mut lobes_died: Vec<(Vec2, usize)> = Vec::new();
         let mut finish_death = false;
 
         if let Some(boss) = &mut self.boss {
@@ -1596,7 +1597,7 @@ impl Game {
                             for i in 0..3usize {
                                 if boss.lobe_alive[i] && boss.lobe_hp[i] <= 0.0 {
                                     boss.lobe_alive[i] = false;
-                                    lobe_died = Some((Self::hydra_lobe_pos(boss, i), i));
+                                    lobes_died.push((Self::hydra_lobe_pos(boss, i), i));
                                 }
                             }
                             // Periodic projectile volley from surviving lobes.
@@ -1637,16 +1638,16 @@ impl Game {
         if let Some((origin, kind, count)) = add_spawn {
             self.spawn_boss_adds(origin, kind, count);
         }
-        // Hydra: lobe death — spawn adds and particle burst.
-        if let Some((lobe_pos, lobe_idx)) = lobe_died {
+        // Hydra: lobe death — spawn adds and particle burst for each dead lobe.
+        for (lobe_pos, lobe_idx) in lobes_died {
             let add_kind = HYDRA_LOBE_ADDS[lobe_idx];
             self.spawn_boss_adds(lobe_pos, add_kind, 3);
             self.shake_amount += 7.0;
             self.audio_event_bits |= AUDIO_BOSS_PHASE;
+            let color = HYDRA_LOBE_COLORS[lobe_idx];
             for _ in 0..24 {
                 let a = self.rng.angle();
                 let speed = self.rng.range(100.0, 280.0);
-                let color = HYDRA_LOBE_COLORS[lobe_idx];
                 self.particles.push(Particle {
                     pos: lobe_pos,
                     vel: Vec2::new(a.cos(), a.sin()) * speed,
@@ -1853,10 +1854,26 @@ impl Game {
 
     fn damage_boss_direct_beam(&mut self, start: Vec2, end: Vec2, cap_half: f32, damage: f32) {
         if let Some(boss) = &mut self.boss {
-            if boss.state == BossState::Active
-                && capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius)
-            {
-                boss.hp -= damage;
+            if boss.state != BossState::Active {
+                return;
+            }
+            match boss.kind {
+                BossKind::Sentinel => {
+                    if capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius) {
+                        boss.hp -= damage;
+                    }
+                }
+                BossKind::Hydra => {
+                    for i in 0..3usize {
+                        if boss.lobe_hp[i] > 0.0 {
+                            let lp = Self::hydra_lobe_pos(boss, i);
+                            if capsule_circle_intersect_globe(start, end, cap_half, lp, HYDRA_LOBE_RADIUS) {
+                                boss.lobe_hp[i] = (boss.lobe_hp[i] - damage).max(0.0);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1883,21 +1900,47 @@ impl Game {
             .collect();
         if let Some(boss) = &self.boss {
             if boss.state == BossState::Active {
-                local_enemies.push(Enemy {
-                    pos: nearest_globe_pos(self.player.pos, boss.pos),
-                    radius: boss.radius,
-                    hp: boss.hp,
-                    speed: 0.0,
-                    kind: EnemyKind::Brute,
-                    state: EnemyState::Drifting,
-                    state_timer: 0.0,
-                    charge_dir: Vec2::ZERO,
-                    color: [1.0, 1.0, 1.0],
-                    contact_damage: 0.0,
-                    slow_timer: 0.0,
-                    no_xp: true,
-                    spawn_grace: 0.0,
-                });
+                match boss.kind {
+                    BossKind::Sentinel => {
+                        local_enemies.push(Enemy {
+                            pos: nearest_globe_pos(self.player.pos, boss.pos),
+                            radius: boss.radius,
+                            hp: boss.hp,
+                            speed: 0.0,
+                            kind: EnemyKind::Brute,
+                            state: EnemyState::Drifting,
+                            state_timer: 0.0,
+                            charge_dir: Vec2::ZERO,
+                            color: [1.0, 1.0, 1.0],
+                            contact_damage: 0.0,
+                            slow_timer: 0.0,
+                            no_xp: true,
+                            spawn_grace: 0.0,
+                        });
+                    }
+                    BossKind::Hydra => {
+                        for i in 0..3usize {
+                            if boss.lobe_alive[i] {
+                                let lp = Self::hydra_lobe_pos(boss, i);
+                                local_enemies.push(Enemy {
+                                    pos: nearest_globe_pos(self.player.pos, lp),
+                                    radius: HYDRA_LOBE_RADIUS,
+                                    hp: boss.lobe_hp[i],
+                                    speed: 0.0,
+                                    kind: EnemyKind::Brute,
+                                    state: EnemyState::Drifting,
+                                    state_timer: 0.0,
+                                    charge_dir: Vec2::ZERO,
+                                    color: [1.0, 1.0, 1.0],
+                                    contact_damage: 0.0,
+                                    slow_timer: 0.0,
+                                    no_xp: true,
+                                    spawn_grace: 0.0,
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
         let salvo = compose_salvo(self.player.pos, target, &local_enemies, &self.inventory);
