@@ -83,6 +83,7 @@ pub struct Crystal {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BossKind {
     Sentinel,
+    Hydra,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -103,8 +104,14 @@ pub struct Boss {
     pub state: BossState,
     pub state_timer: f32,
     pub phase: u8,
+    // Sentinel fields
     pub shield_angle: f32,
     pub shield_hp: [f32; 3],
+    // Hydra fields
+    pub lobe_hp: [f32; 3],
+    pub lobe_alive: [bool; 3],
+    pub lobe_orbit: f32,
+    pub fire_timer: f32,
 }
 
 pub struct Beam {

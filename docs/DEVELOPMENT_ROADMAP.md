@@ -70,8 +70,10 @@ Goal: make the run feel like a beginning, middle, and finale rather than one con
 
 ### 1.3 10:00 Hydra
 
-- Splitter boss that sheds minions at HP thresholds.
-- Three colored lobes or linked bodies, each changing the fight when destroyed.
+- ✅ Three colored lobes (red/green/blue) orbiting a shared center, each with 4500 HP.
+- ✅ Lobe death spawns 3 type-specific adds (Dasher/Emitter/Orbiter) and a particle burst.
+- ✅ Formation speeds up as lobes die; surviving lobes fire projectiles periodically.
+- ✅ Boss HP bar reflects total remaining lobe health.
 - Intended lesson: target priority matters under late-wave pressure.
 
 ### 1.4 15:00 Void Prism
