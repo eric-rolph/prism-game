@@ -46,6 +46,136 @@ const SHARDS: ShardMeta[] = [
   { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: 'dash grants longer i-frames; L3: afterimage', synergies: [] },
 ];
 
+type RunOutcome = 'VICTORY' | 'DEATH';
+
+interface StoredShard {
+  name: string;
+  level: number;
+}
+
+interface StoredRunSummary {
+  version: 1;
+  savedAt: string;
+  outcome: RunOutcome;
+  score: number;
+  timeSeconds: number;
+  rank: number;
+  peakRank: number;
+  kills: number;
+  bossKills: number;
+  damageTaken: number;
+  barrierAbsorbed: number;
+  gems: number;
+  synergies: string[];
+  topShards: StoredShard[];
+}
+
+const BEST_RUNS_STORAGE_KEY = 'prism.bestRuns.v1';
+const MAX_STORED_RUNS = 5;
+
+const formatTime = (secondsRaw: number): string => {
+  const secondsTotal = Math.max(0, Math.floor(secondsRaw));
+  const mins = Math.floor(secondsTotal / 60);
+  const secs = secondsTotal % 60;
+  return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+};
+
+const escapeHtml = (text: string): string =>
+  text.replace(/[&<>"']/g, (ch) => {
+    switch (ch) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      default: return '&#39;';
+    }
+  });
+
+const isStoredShard = (value: unknown): value is StoredShard => {
+  if (typeof value !== 'object' || value === null) return false;
+  const shard = value as Partial<StoredShard>;
+  return typeof shard.name === 'string' && typeof shard.level === 'number';
+};
+
+const isStoredRunSummary = (value: unknown): value is StoredRunSummary => {
+  if (typeof value !== 'object' || value === null) return false;
+  const run = value as Partial<StoredRunSummary>;
+  return run.version === 1 &&
+    (run.outcome === 'VICTORY' || run.outcome === 'DEATH') &&
+    typeof run.savedAt === 'string' &&
+    typeof run.score === 'number' &&
+    typeof run.timeSeconds === 'number' &&
+    typeof run.rank === 'number' &&
+    typeof run.peakRank === 'number' &&
+    typeof run.kills === 'number' &&
+    typeof run.bossKills === 'number' &&
+    typeof run.damageTaken === 'number' &&
+    typeof run.barrierAbsorbed === 'number' &&
+    typeof run.gems === 'number' &&
+    Array.isArray(run.synergies) &&
+    run.synergies.every((s) => typeof s === 'string') &&
+    Array.isArray(run.topShards) &&
+    run.topShards.every(isStoredShard);
+};
+
+const compareRuns = (a: StoredRunSummary, b: StoredRunSummary): number => {
+  if (a.score !== b.score) return b.score - a.score;
+  if (a.outcome !== b.outcome) return a.outcome === 'VICTORY' ? -1 : 1;
+  if (a.timeSeconds !== b.timeSeconds) return b.timeSeconds - a.timeSeconds;
+  if (a.peakRank !== b.peakRank) return b.peakRank - a.peakRank;
+  return b.kills - a.kills;
+};
+
+const readStoredRuns = (): StoredRunSummary[] => {
+  try {
+    const raw = window.localStorage.getItem(BEST_RUNS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isStoredRunSummary).sort(compareRuns).slice(0, MAX_STORED_RUNS);
+  } catch {
+    return [];
+  }
+};
+
+const writeStoredRuns = (runs: StoredRunSummary[]): void => {
+  try {
+    window.localStorage.setItem(BEST_RUNS_STORAGE_KEY, JSON.stringify(runs));
+  } catch {
+    // Private browsing and full storage can reject localStorage writes.
+  }
+};
+
+const saveRunSummary = (summary: StoredRunSummary): { runs: StoredRunSummary[]; isNewBest: boolean } => {
+  const previousRuns = readStoredRuns();
+  const previousBest = previousRuns[0];
+  const isNewBest = !previousBest || compareRuns(summary, previousBest) < 0;
+  const runs = [...previousRuns, summary].sort(compareRuns).slice(0, MAX_STORED_RUNS);
+  writeStoredRuns(runs);
+  return { runs, isNewBest };
+};
+
+const renderBestRuns = (
+  runs: StoredRunSummary[],
+  currentSavedAt: string,
+  isNewBest: boolean,
+): string => {
+  if (runs.length === 0) return '';
+  const lines = runs.slice(0, 3).map((run, idx) => {
+    const currentClass = run.savedAt === currentSavedAt ? ' current-run' : '';
+    const shardText = run.topShards.length > 0
+      ? ` / ${run.topShards.slice(0, 2).map((s) => `${escapeHtml(s.name)} ${s.level}`).join(', ')}`
+      : '';
+    return `<div class="best-run-line${currentClass}">` +
+      `${idx + 1}. ${run.score} / ${formatTime(run.timeSeconds)} / ${run.outcome}${shardText}` +
+      `</div>`;
+  }).join('');
+  return `<div class="best-run-panel">` +
+    `<div class="best-run-title">${isNewBest ? 'NEW BEST' : 'LOCAL BEST'}</div>` +
+    lines +
+    `</div>`;
+};
+
 async function main(): Promise<void> {
   // Narrow each DOM node through an intermediate variable so TS preserves the
   // non-null guarantee inside closures (the fix from step 1).
@@ -349,22 +479,50 @@ async function main(): Promise<void> {
     }
     deathScoreEl.textContent = String(game.score());
     const t = game.timer();
-    const mins = Math.floor(t / 60);
-    const secs = Math.floor(t % 60);
-    const timeStr = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    const timeStr = formatTime(t);
     const dmgTaken = Math.round(game.damage_taken());
     const barrierAbs = Math.round(game.barrier_absorbed());
     const gems = game.gems_collected();
     const bossKills = game.boss_kills_count();
+    const activeSynergies = SYNERGY_NAMES.filter((_, i) => ((game.active_synergy_bits() >>> i) & 1) === 1);
+    const topShards: StoredShard[] = SHARDS.map((s, i) => ({
+      name: s.name,
+      level: game.inventory_level(i),
+    }))
+      .filter((s) => s.level > 0)
+      .sort((a, b) => b.level - a.level || a.name.localeCompare(b.name))
+      .slice(0, 5);
+    const summary: StoredRunSummary = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      outcome: victory ? 'VICTORY' : 'DEATH',
+      score: game.score(),
+      timeSeconds: Math.floor(t),
+      rank: game.rank(),
+      peakRank: game.peak_rank(),
+      kills: game.kills_total(),
+      bossKills,
+      damageTaken: dmgTaken,
+      barrierAbsorbed: barrierAbs,
+      gems,
+      synergies: activeSynergies,
+      topShards,
+    };
+    const { runs, isNewBest } = saveRunSummary(summary);
     const shardSummary = SHARDS.map((s, i) => {
       const lvl = game.inventory_level(i);
       return lvl > 0 ? `<span style="color:${s.color}">${s.name} ${lvl}</span>` : null;
     }).filter(Boolean).join('  ');
+    const synergySummary = activeSynergies.length > 0
+      ? `<br>SYNERGIES ${activeSynergies.map(escapeHtml).join(' / ')}`
+      : '';
     deathStatsEl.innerHTML =
       `RANK ${game.rank()}  /  PEAK ${game.peak_rank()}<br>` +
       `${game.kills_total()} KILLS  /  ${timeStr} SURVIVED<br>` +
       `${dmgTaken} DMG TAKEN  /  ${barrierAbs} ABSORBED<br>` +
       `${gems} GEMS  /  ${bossKills} BOSSES` +
+      synergySummary +
+      renderBestRuns(runs, summary.savedAt, isNewBest) +
       (shardSummary ? `<br><br>${shardSummary}` : '');
     deathScreenEl.classList.add('shown');
     deathShown = true;
@@ -382,6 +540,7 @@ async function main(): Promise<void> {
       `  rank: ${game.rank()} (peak ${game.peak_rank()})  |  kills: ${game.kills_total()}  |  bosses: ${bossKills}\n` +
       `  dmg taken: ${dmgTaken}  |  barrier absorbed: ${barrierAbs}  |  gems: ${gems}\n` +
       `  kills by kind: ${killsByKind}\n` +
+      `  synergies: ${activeSynergies.join(', ') || 'none'}\n` +
       `  shards: ${shardSummaryText || 'none'}`
     );
   };

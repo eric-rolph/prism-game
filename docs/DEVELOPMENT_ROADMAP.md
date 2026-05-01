@@ -131,37 +131,36 @@ Goal: make Prism feel physical without shipping a sound-asset pipeline.
 
 ## Slice 4: Run Goals And Persistence
 
-Status: unstarted.
+Status: in progress; post-run stat storytelling and local best runs are implemented.
 
 Goal: make every run leave a footprint.
 
-- Expand post-run stats:
-  - time survived
-  - peak rank
-  - kills
-  - active synergies
-  - top-level shards
-  - boss kills
-  - damage taken
-  - barrier damage absorbed
-  - gems collected
-- Save local high scores in `localStorage`.
-- Add a “best run” panel on the death/victory screen.
+- ✅ Expand post-run stats:
+  - ✅ time survived
+  - ✅ peak rank
+  - ✅ kills
+  - ✅ active synergies
+  - ✅ top-level shards
+  - ✅ boss kills
+  - ✅ damage taken
+  - ✅ barrier damage absorbed
+  - ✅ gems collected
+- ✅ Save local high scores in `localStorage`.
+- ✅ Add a “best run” panel on the death/victory screen.
 - Add optional endless mode after a 15:00 victory once bosses are stable.
 - Add lightweight meta-progression only after high scores prove replay interest. Avoid permanent upgrades until base balance feels good without them.
 
 ## Slice 5: Playtest Telemetry And Balance
 
-Status: needed before heavy tuning.
+Status: partial; a console run summary exists, but high-granularity balance telemetry is still needed before heavy tuning.
 
 Goal: tune from run evidence, not vibes.
 
-- Add a debug run summary export to console or clipboard:
+- ✅ Add a debug run summary export to console with outcome, duration, score, rank/peak rank, total kills, boss kills, enemy kills by kind, damage totals, gems collected, active synergies, and final shard levels.
+- Add high-granularity telemetry:
   - seed
-  - duration
-  - death cause or victory
+  - death cause
   - rank timeline
-  - enemy kills by kind
   - damage taken by source
   - shard pick order
   - active synergy times

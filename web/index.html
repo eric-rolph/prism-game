@@ -246,6 +246,26 @@
         color: var(--dim);
         text-align: center;
         line-height: 1.8;
+        width: min(720px, calc(100vw - 32px));
+      }
+      .best-run-panel {
+        margin: 12px auto 0;
+        padding-top: 10px;
+        border-top: 1px solid var(--faint);
+        color: rgba(234, 234, 245, 0.5);
+        line-height: 1.7;
+      }
+      .best-run-title {
+        color: var(--ink);
+        letter-spacing: 4px;
+        margin-bottom: 4px;
+      }
+      .best-run-line {
+        white-space: normal;
+      }
+      .best-run-line.current-run {
+        color: #ffd740;
+        text-shadow: 0 0 8px rgba(255, 215, 64, 0.45);
       }
       #death-restart {
         margin-top: 12px;
