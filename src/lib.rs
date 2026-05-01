@@ -247,6 +247,45 @@ impl Game {
     pub fn boss_kills_count(&self) -> u32 {
         self.inner.boss_kills_count()
     }
+    pub fn damage_by_source(&self, source_idx: u8) -> f32 {
+        self.inner.damage_by_source(source_idx)
+    }
+    pub fn death_cause(&self) -> i32 {
+        self.inner.death_cause()
+    }
+    pub fn rank_at_minute(&self, minute_idx: u8) -> u32 {
+        self.inner.rank_at_minute(minute_idx)
+    }
+    pub fn upgrade_pick_count(&self) -> u32 {
+        self.inner.upgrade_pick_count()
+    }
+    pub fn upgrade_pick_type(&self, pick_idx: u32) -> i32 {
+        self.inner.upgrade_pick_type(pick_idx)
+    }
+    pub fn upgrade_pick_index(&self, pick_idx: u32) -> i32 {
+        self.inner.upgrade_pick_index(pick_idx)
+    }
+    pub fn upgrade_pick_time(&self, pick_idx: u32) -> f32 {
+        self.inner.upgrade_pick_time(pick_idx)
+    }
+    pub fn skip_count(&self) -> u32 {
+        self.inner.skip_count()
+    }
+    pub fn reroll_count(&self) -> u32 {
+        self.inner.reroll_count()
+    }
+    pub fn synergy_time(&self, synergy_idx: u8) -> f32 {
+        self.inner.synergy_time(synergy_idx)
+    }
+    pub fn max_enemies_observed(&self) -> u32 {
+        self.inner.max_enemies_observed()
+    }
+    pub fn max_circles_observed(&self) -> u32 {
+        self.inner.max_circles_observed()
+    }
+    pub fn max_beams_observed(&self) -> u32 {
+        self.inner.max_beams_observed()
+    }
 
     // --- Per-frame audio events ---
 

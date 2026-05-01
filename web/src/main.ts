@@ -19,6 +19,11 @@ const SYNERGY_NAMES: string[] = [
   'FROZEN ORBIT', 'EVENT HORIZON', 'BLOOD PACT', 'MARTYRDOM', 'RESONANCE', 'GRAVITY WELL',
 ];
 const BOSS_NAMES: string[] = ['PRISM SENTINEL', 'HYDRA', 'VOID PRISM'];
+const DAMAGE_SOURCE_NAMES: string[] = ['ENEMY CONTACT', 'PROJECTILE', 'BOSS CONTACT', 'VOID SHOCKWAVE'];
+const RANK_TIMELINE_BUCKETS = 16;
+const UPGRADE_PICK_SHARD = 0;
+const UPGRADE_PICK_EVOLUTION = 1;
+const UPGRADE_PICK_SKIP = 2;
 
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
 type Rarity = 'common' | 'rare' | 'legendary' | 'evolution';
@@ -69,6 +74,7 @@ interface StoredRunSummary {
   savedAt: string;
   outcome: RunOutcome;
   seed?: number;
+  deathCause?: string;
   score: number;
   timeSeconds: number;
   rank: number;
@@ -78,6 +84,13 @@ interface StoredRunSummary {
   damageTaken: number;
   barrierAbsorbed: number;
   gems: number;
+  skips?: number;
+  rerolls?: number;
+  maxObserved?: {
+    enemies: number;
+    circles: number;
+    beams: number;
+  };
   synergies: string[];
   evolutions?: string[];
   topShards: StoredShard[];
@@ -117,6 +130,7 @@ const isStoredRunSummary = (value: unknown): value is StoredRunSummary => {
     (run.outcome === 'VICTORY' || run.outcome === 'DEATH') &&
     typeof run.savedAt === 'string' &&
     (run.seed === undefined || typeof run.seed === 'number') &&
+    (run.deathCause === undefined || typeof run.deathCause === 'string') &&
     typeof run.score === 'number' &&
     typeof run.timeSeconds === 'number' &&
     typeof run.rank === 'number' &&
@@ -126,6 +140,13 @@ const isStoredRunSummary = (value: unknown): value is StoredRunSummary => {
     typeof run.damageTaken === 'number' &&
     typeof run.barrierAbsorbed === 'number' &&
     typeof run.gems === 'number' &&
+    (run.skips === undefined || typeof run.skips === 'number') &&
+    (run.rerolls === undefined || typeof run.rerolls === 'number') &&
+    (run.maxObserved === undefined ||
+      (typeof run.maxObserved === 'object' && run.maxObserved !== null &&
+        typeof run.maxObserved.enemies === 'number' &&
+        typeof run.maxObserved.circles === 'number' &&
+        typeof run.maxObserved.beams === 'number')) &&
     Array.isArray(run.synergies) &&
     run.synergies.every((s) => typeof s === 'string') &&
     (run.evolutions === undefined ||
@@ -199,6 +220,43 @@ const renderBestRuns = (
     (storageOk ? '' : `<div class="best-run-line">storage unavailable this session</div>`) +
     `</div>`;
 };
+
+const describeDamageSource = (sourceIdx: number): string =>
+  DAMAGE_SOURCE_NAMES[sourceIdx] ?? 'UNKNOWN';
+
+const collectDamageBreakdown = (game: Game): string[] =>
+  DAMAGE_SOURCE_NAMES
+    .map((name, i) => ({ name, amount: Math.round(game.damage_by_source(i)) }))
+    .filter((entry) => entry.amount > 0)
+    .map((entry) => `${entry.name}: ${entry.amount}`);
+
+const collectRankTimeline = (game: Game): string =>
+  Array.from({ length: RANK_TIMELINE_BUCKETS }, (_, i) => `m${i}:${game.rank_at_minute(i)}`)
+    .join(', ');
+
+const collectUpgradePickOrder = (game: Game): string[] => {
+  const picks: string[] = [];
+  const count = game.upgrade_pick_count();
+  for (let i = 0; i < count; i++) {
+    const offerType = game.upgrade_pick_type(i);
+    const offerIdx = game.upgrade_pick_index(i);
+    const time = formatTime(game.upgrade_pick_time(i));
+    if (offerType === UPGRADE_PICK_SHARD) {
+      picks.push(`${time} ${SHARDS[offerIdx]?.name ?? `SHARD ${offerIdx}`}`);
+    } else if (offerType === UPGRADE_PICK_EVOLUTION) {
+      picks.push(`${time} ${EVOLUTIONS[offerIdx]?.name ?? `EVOLUTION ${offerIdx}`}`);
+    } else if (offerType === UPGRADE_PICK_SKIP) {
+      picks.push(`${time} SKIP`);
+    }
+  }
+  return picks;
+};
+
+const collectSynergyTimes = (game: Game): string[] =>
+  SYNERGY_NAMES
+    .map((name, i) => ({ name, time: game.synergy_time(i) }))
+    .filter((entry) => entry.time >= 0)
+    .map((entry) => `${formatTime(entry.time)} ${entry.name}`);
 
 async function main(): Promise<void> {
   // Narrow each DOM node through an intermediate variable so TS preserves the
@@ -524,6 +582,19 @@ async function main(): Promise<void> {
     const barrierAbs = Math.round(game.barrier_absorbed());
     const gems = game.gems_collected();
     const bossKills = game.boss_kills_count();
+    const deathCauseIdx = game.death_cause();
+    const deathCause = !victory && deathCauseIdx >= 0
+      ? describeDamageSource(deathCauseIdx)
+      : undefined;
+    const damageBreakdown = collectDamageBreakdown(game);
+    const rankTimeline = collectRankTimeline(game);
+    const upgradePickOrder = collectUpgradePickOrder(game);
+    const synergyTimes = collectSynergyTimes(game);
+    const maxObserved = {
+      enemies: game.max_enemies_observed(),
+      circles: game.max_circles_observed(),
+      beams: game.max_beams_observed(),
+    };
     const activeSynergies = SYNERGY_NAMES.filter((_, i) => ((game.active_synergy_bits() >>> i) & 1) === 1);
     const activeEvolutions = EVOLUTIONS
       .filter((_, i) => ((game.active_evolution_bits() >>> i) & 1) === 1)
@@ -540,6 +611,7 @@ async function main(): Promise<void> {
       savedAt: new Date().toISOString(),
       outcome: victory ? 'VICTORY' : 'DEATH',
       seed: game.seed(),
+      deathCause,
       score: game.score(),
       timeSeconds: Math.floor(t),
       rank: game.rank(),
@@ -549,6 +621,9 @@ async function main(): Promise<void> {
       damageTaken: dmgTaken,
       barrierAbsorbed: barrierAbs,
       gems,
+      skips: game.skip_count(),
+      rerolls: game.reroll_count(),
+      maxObserved,
       synergies: activeSynergies,
       evolutions: activeEvolutions,
       topShards,
@@ -564,11 +639,13 @@ async function main(): Promise<void> {
     const evolutionSummary = activeEvolutions.length > 0
       ? `<br>EVOLUTIONS ${activeEvolutions.map(escapeHtml).join(' / ')}`
       : '';
+    const deathCauseSummary = deathCause ? `<br>CAUSE ${escapeHtml(deathCause)}` : '';
     deathStatsEl.innerHTML =
       `RANK ${game.rank()}  /  PEAK ${game.peak_rank()}<br>` +
       `${game.kills_total()} KILLS  /  ${timeStr} SURVIVED<br>` +
       `${dmgTaken} DMG TAKEN  /  ${barrierAbs} ABSORBED<br>` +
       `${gems} GEMS  /  ${bossKills} BOSSES` +
+      deathCauseSummary +
       synergySummary +
       evolutionSummary +
       renderBestRuns(runs, summary.savedAt, isNewBest, storageOk) +
@@ -587,11 +664,18 @@ async function main(): Promise<void> {
       `[PRISM RUN SUMMARY]\n` +
       `  seed: ${game.seed()}\n` +
       `  outcome: ${victory ? 'VICTORY' : 'DEATH'}  |  time: ${timeStr}  |  score: ${game.score()}\n` +
+      `  death cause: ${deathCause ?? 'none'}\n` +
       `  rank: ${game.rank()} (peak ${game.peak_rank()})  |  kills: ${game.kills_total()}  |  bosses: ${bossKills}\n` +
       `  dmg taken: ${dmgTaken}  |  barrier absorbed: ${barrierAbs}  |  gems: ${gems}\n` +
+      `  damage by source: ${damageBreakdown.join(', ') || 'none'}\n` +
       `  kills by kind: ${killsByKind}\n` +
+      `  rank timeline: ${rankTimeline}\n` +
+      `  shard picks: ${upgradePickOrder.join(' -> ') || 'none'}\n` +
+      `  skips/rerolls: ${game.skip_count()} / ${game.reroll_count()}\n` +
       `  synergies: ${activeSynergies.join(', ') || 'none'}\n` +
+      `  synergy times: ${synergyTimes.join(', ') || 'none'}\n` +
       `  evolutions: ${activeEvolutions.join(', ') || 'none'}\n` +
+      `  max observed: enemies ${maxObserved.enemies}, circles ${maxObserved.circles}, beams ${maxObserved.beams}\n` +
       `  shards: ${shardSummaryText || 'none'}`
     );
   };

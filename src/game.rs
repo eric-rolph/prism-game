@@ -9,9 +9,39 @@ use crate::entities::{
     InterferencePulse, Particle, Player, Projectile, VoidShockwave, XpGem,
 };
 use crate::math::Rng;
-use crate::shards::{compose_salvo, BeamRequest, EvolutionKind, Inventory, ShardKind, UpgradeOffer};
+use crate::shards::{
+    compose_salvo, BeamRequest, EvolutionKind, Inventory, ShardKind, UpgradeOffer, SYNERGY_COUNT,
+};
 use crate::{BeamInstance, CircleInstance};
 use glam::{Vec2, Vec3};
+
+const DAMAGE_SOURCE_COUNT: usize = 4;
+const RANK_TIMELINE_BUCKETS: usize = 16; // minute buckets 0..15 for a 15-minute run.
+
+const UPGRADE_PICK_SHARD: u8 = 0;
+const UPGRADE_PICK_EVOLUTION: u8 = 1;
+const UPGRADE_PICK_SKIP: u8 = 2;
+
+#[derive(Copy, Clone)]
+enum DamageSource {
+    EnemyContact = 0,
+    Projectile = 1,
+    BossContact = 2,
+    VoidShockwave = 3,
+}
+
+impl DamageSource {
+    fn as_index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Copy, Clone)]
+struct UpgradePick {
+    time: f32,
+    offer_type: u8,
+    offer_index: i32,
+}
 
 pub struct Game {
     time: f32,
@@ -80,6 +110,16 @@ pub struct Game {
     gems_collected: u32,
     kills_by_kind: [u32; 8],
     peak_rank: u32,
+    damage_by_source: [f32; DAMAGE_SOURCE_COUNT],
+    death_cause: Option<DamageSource>,
+    rank_timeline: [u32; RANK_TIMELINE_BUCKETS],
+    upgrade_pick_order: Vec<UpgradePick>,
+    skip_count: u32,
+    reroll_count: u32,
+    synergy_times: [f32; SYNERGY_COUNT],
+    max_enemies_observed: u32,
+    max_circles_observed: u32,
+    max_beams_observed: u32,
 
     // Per-frame audio event counters — cleared at the top of every update().
     audio_beam_count: u32,
@@ -136,7 +176,7 @@ const PLAYER_MAX_HP: f32 = 100.0;
 const IFRAME_DURATION: f32 = 0.33;
 
 // Passive shard scaling.
-const ARMOR_DR_PER_LEVEL: f32 = 0.08;       // up to 48% DR at L6
+const ARMOR_DR_PER_LEVEL: f32 = 0.08; // up to 48% DR at L6
 const PRISM_HEART_HP_PER_LEVEL: f32 = 15.0; // +15 max HP and instant heal per level
 const PRISM_HEART_HEAL_MULT_PER_LEVEL: f32 = 0.10; // +10% level-up heal per level
 const PHASE_STEP_IFRAME_PER_LEVEL: f32 = 0.12; // +0.12s i-frames per level during dash
@@ -175,10 +215,10 @@ const BOSS_PROJ_DAMAGE: f32 = 18.0;
 const BOSS_SHIELD_BURST_COUNT: u32 = 5;
 
 // Audio event bits (per-frame, cleared at top of update).
-pub const AUDIO_RANK_UP: u32      = 1 << 0;
-pub const AUDIO_PLAYER_HIT: u32   = 1 << 1;
-pub const AUDIO_BOSS_SPAWN: u32   = 1 << 2;
-pub const AUDIO_BOSS_PHASE: u32   = 1 << 3;
+pub const AUDIO_RANK_UP: u32 = 1 << 0;
+pub const AUDIO_PLAYER_HIT: u32 = 1 << 1;
+pub const AUDIO_BOSS_SPAWN: u32 = 1 << 2;
+pub const AUDIO_BOSS_PHASE: u32 = 1 << 3;
 pub const AUDIO_SHIELD_BREAK: u32 = 1 << 4;
 
 // Boss milestones.
@@ -191,16 +231,8 @@ const HYDRA_LOBE_RADIUS: f32 = 20.0;
 const HYDRA_CONTACT_DAMAGE: f32 = 30.0;
 const HYDRA_BODY_SPEED: f32 = 50.0;
 const HYDRA_FIRE_INTERVAL: f32 = 2.0;
-const HYDRA_LOBE_COLORS: [[f32; 3]; 3] = [
-    [1.0, 0.22, 0.18],
-    [0.18, 1.0, 0.32],
-    [0.28, 0.52, 1.0],
-];
-const HYDRA_LOBE_ADDS: [EnemyKind; 3] = [
-    EnemyKind::Dasher,
-    EnemyKind::Emitter,
-    EnemyKind::Orbiter,
-];
+const HYDRA_LOBE_COLORS: [[f32; 3]; 3] = [[1.0, 0.22, 0.18], [0.18, 1.0, 0.32], [0.28, 0.52, 1.0]];
+const HYDRA_LOBE_ADDS: [EnemyKind; 3] = [EnemyKind::Dasher, EnemyKind::Emitter, EnemyKind::Orbiter];
 const BOSS_TELEGRAPH_TIME: f32 = 2.0;
 const BOSS_DEATH_TIME: f32 = 1.0;
 const BOSS_POST_BREATHER: f32 = 3.0;
@@ -540,6 +572,16 @@ impl Game {
             gems_collected: 0,
             kills_by_kind: [0; 8],
             peak_rank: 0,
+            damage_by_source: [0.0; DAMAGE_SOURCE_COUNT],
+            death_cause: None,
+            rank_timeline: [0; RANK_TIMELINE_BUCKETS],
+            upgrade_pick_order: Vec::new(),
+            skip_count: 0,
+            reroll_count: 0,
+            synergy_times: [-1.0; SYNERGY_COUNT],
+            max_enemies_observed: 0,
+            max_circles_observed: 0,
+            max_beams_observed: 0,
             audio_beam_count: 0,
             audio_kill_count: 0,
             audio_gem_count: 0,
@@ -725,6 +767,7 @@ impl Game {
             return;
         }
         if let Some(offer) = self.level_choices[slot as usize] {
+            self.record_upgrade_pick(offer);
             match offer {
                 UpgradeOffer::Shard(kind) => {
                     self.inventory.upgrade(kind);
@@ -734,9 +777,9 @@ impl Game {
                     if kind == ShardKind::Barrier {
                         self.player.barrier_max =
                             BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
-                        self.player.barrier_hp =
-                            (self.player.barrier_hp + self.player.barrier_max * 0.5)
-                                .min(self.player.barrier_max);
+                        self.player.barrier_hp = (self.player.barrier_hp
+                            + self.player.barrier_max * 0.5)
+                            .min(self.player.barrier_max);
                     }
                     if kind == ShardKind::PrismHeart {
                         self.player.max_hp += PRISM_HEART_HP_PER_LEVEL;
@@ -749,6 +792,7 @@ impl Game {
                     self.spawn_evolution_particles(evolution);
                 }
             }
+            self.record_new_synergies();
             self.leveling_up = false;
             self.level_choices = [None; 3];
             // A single on_death can earn multiple ranks' worth of XP.
@@ -763,6 +807,7 @@ impl Game {
         }
         self.leveling_up = false;
         self.level_choices = [None; 3];
+        self.record_skip_pick();
         let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
         let heal = 6.0 * (1.0 + prism_heart * PRISM_HEART_HEAL_MULT_PER_LEVEL);
         self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
@@ -774,32 +819,149 @@ impl Game {
             return;
         }
         self.reroll_charges -= 1;
+        self.reroll_count += 1;
         self.level_choices = self.inventory.roll_choices(&mut self.rng);
     }
 
-    pub fn reroll_charges(&self) -> u32 { self.reroll_charges }
+    pub fn reroll_charges(&self) -> u32 {
+        self.reroll_charges
+    }
 
     // Run telemetry accessors.
-    pub fn damage_taken(&self) -> f32 { self.damage_taken }
-    pub fn barrier_absorbed(&self) -> f32 { self.barrier_absorbed }
-    pub fn gems_collected(&self) -> u32 { self.gems_collected }
-    pub fn kills_by_kind(&self, kind_idx: u8) -> u32 {
-        self.kills_by_kind.get(kind_idx as usize).copied().unwrap_or(0)
+    pub fn damage_taken(&self) -> f32 {
+        self.damage_taken
     }
-    pub fn peak_rank(&self) -> u32 { self.peak_rank }
-    pub fn boss_kills_count(&self) -> u32 { self.boss_kills }
+    pub fn barrier_absorbed(&self) -> f32 {
+        self.barrier_absorbed
+    }
+    pub fn gems_collected(&self) -> u32 {
+        self.gems_collected
+    }
+    pub fn kills_by_kind(&self, kind_idx: u8) -> u32 {
+        self.kills_by_kind
+            .get(kind_idx as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+    pub fn peak_rank(&self) -> u32 {
+        self.peak_rank
+    }
+    pub fn boss_kills_count(&self) -> u32 {
+        self.boss_kills
+    }
+    pub fn damage_by_source(&self, source_idx: u8) -> f32 {
+        self.damage_by_source
+            .get(source_idx as usize)
+            .copied()
+            .unwrap_or(0.0)
+    }
+    pub fn death_cause(&self) -> i32 {
+        self.death_cause.map(|source| source as i32).unwrap_or(-1)
+    }
+    pub fn rank_at_minute(&self, minute_idx: u8) -> u32 {
+        self.rank_timeline
+            .get(minute_idx as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+    pub fn upgrade_pick_count(&self) -> u32 {
+        self.upgrade_pick_order.len() as u32
+    }
+    pub fn upgrade_pick_type(&self, pick_idx: u32) -> i32 {
+        self.upgrade_pick_order
+            .get(pick_idx as usize)
+            .map(|p| p.offer_type as i32)
+            .unwrap_or(-1)
+    }
+    pub fn upgrade_pick_index(&self, pick_idx: u32) -> i32 {
+        self.upgrade_pick_order
+            .get(pick_idx as usize)
+            .map(|p| p.offer_index)
+            .unwrap_or(-1)
+    }
+    pub fn upgrade_pick_time(&self, pick_idx: u32) -> f32 {
+        self.upgrade_pick_order
+            .get(pick_idx as usize)
+            .map(|p| p.time)
+            .unwrap_or(0.0)
+    }
+    pub fn skip_count(&self) -> u32 {
+        self.skip_count
+    }
+    pub fn reroll_count(&self) -> u32 {
+        self.reroll_count
+    }
+    pub fn synergy_time(&self, synergy_idx: u8) -> f32 {
+        self.synergy_times
+            .get(synergy_idx as usize)
+            .copied()
+            .unwrap_or(-1.0)
+    }
+    pub fn max_enemies_observed(&self) -> u32 {
+        self.max_enemies_observed
+    }
+    pub fn max_circles_observed(&self) -> u32 {
+        self.max_circles_observed
+    }
+    pub fn max_beams_observed(&self) -> u32 {
+        self.max_beams_observed
+    }
 
     // Audio event accessors — read after update() each frame.
-    pub fn audio_beam_count(&self) -> u32 { self.audio_beam_count }
-    pub fn audio_kill_count(&self) -> u32 { self.audio_kill_count }
-    pub fn audio_gem_count(&self) -> u32 { self.audio_gem_count }
-    pub fn audio_event_bits(&self) -> u32 { self.audio_event_bits }
+    pub fn audio_beam_count(&self) -> u32 {
+        self.audio_beam_count
+    }
+    pub fn audio_kill_count(&self) -> u32 {
+        self.audio_kill_count
+    }
+    pub fn audio_gem_count(&self) -> u32 {
+        self.audio_gem_count
+    }
+    pub fn audio_event_bits(&self) -> u32 {
+        self.audio_event_bits
+    }
 
     pub fn restart(&mut self) {
         let w = self.screen_size.x;
         let h = self.screen_size.y;
         let seed = self.rng.next_u32();
         *self = Self::new(w, h, seed);
+    }
+
+    fn record_upgrade_pick(&mut self, offer: UpgradeOffer) {
+        let (offer_type, offer_index) = match offer {
+            UpgradeOffer::Shard(kind) => (UPGRADE_PICK_SHARD, kind as i32),
+            UpgradeOffer::Evolution(evolution) => (UPGRADE_PICK_EVOLUTION, evolution as i32),
+        };
+        self.upgrade_pick_order.push(UpgradePick {
+            time: self.time,
+            offer_type,
+            offer_index,
+        });
+    }
+
+    fn record_skip_pick(&mut self) {
+        self.skip_count += 1;
+        self.upgrade_pick_order.push(UpgradePick {
+            time: self.time,
+            offer_type: UPGRADE_PICK_SKIP,
+            offer_index: -1,
+        });
+    }
+
+    fn record_new_synergies(&mut self) {
+        let active_bits = self.inventory.active_synergy_bits();
+        for i in 0..SYNERGY_COUNT {
+            if ((active_bits >> i) & 1) == 1 && self.synergy_times[i] < 0.0 {
+                self.synergy_times[i] = self.time;
+            }
+        }
+    }
+
+    fn record_rank_timeline(&mut self) {
+        let minute = (self.time / 60.0).floor() as usize;
+        let bucket = minute.min(RANK_TIMELINE_BUCKETS - 1);
+        self.rank_timeline[bucket] = self.rank_timeline[bucket].max(self.rank);
     }
 
     // --- Main update ----------------------------------------------------
@@ -815,6 +977,7 @@ impl Game {
         }
 
         self.time += dt;
+        self.record_rank_timeline();
         self.hit_flash_positions.clear();
 
         // i-frame cooldown.
@@ -860,9 +1023,13 @@ impl Game {
                     });
                 }
             }
-            if self.inventory.has_evolution(EvolutionKind::AfterimageEngine) {
+            if self
+                .inventory
+                .has_evolution(EvolutionKind::AfterimageEngine)
+            {
                 for delay in AFTERIMAGE_ENGINE_DELAYS {
-                    self.pending_afterimages.push((self.time + delay, dash_start_pos));
+                    self.pending_afterimages
+                        .push((self.time + delay, dash_start_pos));
                 }
                 for _ in 0..AFTERIMAGE_ENGINE_PARTICLES {
                     let a = self.rng.angle();
@@ -1146,7 +1313,7 @@ impl Game {
                 }
             }
             if proj_damage > 0.0 {
-                self.apply_damage_to_player(proj_damage);
+                self.apply_damage_to_player(proj_damage, DamageSource::Projectile);
                 self.player.iframe_timer = IFRAME_DURATION;
                 self.shake_amount += SHAKE_HIT_PX;
             }
@@ -1223,7 +1390,7 @@ impl Game {
                 }
             }
             if contact_dmg > 0.0 {
-                self.apply_damage_to_player(contact_dmg);
+                self.apply_damage_to_player(contact_dmg, DamageSource::EnemyContact);
                 self.player.iframe_timer = IFRAME_DURATION;
                 self.shake_amount += SHAKE_HIT_PX;
             }
@@ -1233,7 +1400,8 @@ impl Game {
                 if boss.state == BossState::Active {
                     let hit = match boss.kind {
                         BossKind::Sentinel | BossKind::VoidPrism => {
-                            globe_distance(boss.pos, self.player.pos) < boss.radius + self.player.radius
+                            globe_distance(boss.pos, self.player.pos)
+                                < boss.radius + self.player.radius
                         }
                         BossKind::Hydra => (0..3usize).any(|i| {
                             boss.lobe_hp[i] > 0.0
@@ -1243,7 +1411,7 @@ impl Game {
                     };
                     if hit {
                         let dmg = boss.contact_damage;
-                        self.apply_damage_to_player(dmg);
+                        self.apply_damage_to_player(dmg, DamageSource::BossContact);
                         self.player.iframe_timer = IFRAME_DURATION;
                         self.shake_amount += SHAKE_HIT_PX * 1.6;
                     }
@@ -1346,6 +1514,9 @@ impl Game {
         }
         if let Some(boss) = &mut self.boss {
             if boss.state == BossState::Active {
+                // Auras are intentionally unblockable: Sentinel shields teach
+                // beam positioning, while close-range orbitals reward risky
+                // movement into the boss space.
                 for (hpos, hsize) in &halo_snapshots {
                     if globe_distance(boss.pos, *hpos) < boss.radius + hsize {
                         boss.hp -= HALO_DPS * dt;
@@ -1386,9 +1557,13 @@ impl Game {
             }
             if let Some(boss) = &mut self.boss {
                 if boss.state == BossState::Active {
+                    // Barrier contact is aura damage, not a beam, so it bypasses
+                    // Sentinel shields by design.
                     match boss.kind {
                         BossKind::Sentinel => {
-                            if globe_distance(boss.pos, self.player.pos) < BARRIER_RADIUS + boss.radius {
+                            if globe_distance(boss.pos, self.player.pos)
+                                < BARRIER_RADIUS + boss.radius
+                            {
                                 boss.hp -= BARRIER_CONTACT_DPS * dt;
                             }
                         }
@@ -1396,14 +1571,18 @@ impl Game {
                             for i in 0..3usize {
                                 if boss.lobe_hp[i] > 0.0 {
                                     let lp = Self::hydra_lobe_pos(boss, i);
-                                    if globe_distance(lp, self.player.pos) < BARRIER_RADIUS + HYDRA_LOBE_RADIUS {
+                                    if globe_distance(lp, self.player.pos)
+                                        < BARRIER_RADIUS + HYDRA_LOBE_RADIUS
+                                    {
                                         boss.lobe_hp[i] -= BARRIER_CONTACT_DPS * dt;
                                     }
                                 }
                             }
                         }
                         BossKind::VoidPrism => {
-                            if globe_distance(boss.pos, self.player.pos) < BARRIER_RADIUS + boss.radius {
+                            if globe_distance(boss.pos, self.player.pos)
+                                < BARRIER_RADIUS + boss.radius
+                            {
                                 boss.hp -= BARRIER_CONTACT_DPS * dt;
                             }
                         }
@@ -1465,6 +1644,8 @@ impl Game {
             }
             if let Some(boss) = &mut self.boss {
                 if boss.state == BossState::Active {
+                    // Interference is a radial field effect, intentionally not
+                    // blocked by Sentinel shields.
                     let d = globe_distance(boss.pos, *ppos);
                     if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + boss.radius {
                         boss.hp -= INTERFERENCE_DPS * dt;
@@ -1737,7 +1918,13 @@ impl Game {
                     match boss.kind {
                         BossKind::Sentinel => {
                             let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
-                            let next_phase = if hp_pct > 0.60 { 0 } else if hp_pct > 0.30 { 1 } else { 2 };
+                            let next_phase = if hp_pct > 0.60 {
+                                0
+                            } else if hp_pct > 0.30 {
+                                1
+                            } else {
+                                2
+                            };
                             if next_phase != boss.phase {
                                 boss.phase = next_phase;
                                 phase_changed = true;
@@ -1746,19 +1933,33 @@ impl Game {
                             boss.radius = SENTINEL_RADIUS + phase_scale * 5.0;
                             boss.speed = SENTINEL_BASE_SPEED + phase_scale * 12.0;
                             boss.contact_damage = 35.0 + phase_scale * 7.0;
-                            boss.shield_angle += SENTINEL_SHIELD_SPIN * (1.0 + phase_scale * 0.25) * dt;
+                            boss.shield_angle +=
+                                SENTINEL_SHIELD_SPIN * (1.0 + phase_scale * 0.25) * dt;
                             boss.state_timer -= dt;
                             if boss.state_timer <= 0.0 {
-                                boss.state_timer = match boss.phase { 0 => 3.0, 1 => 2.4, _ => 1.8 };
-                                let kind = match boss.phase { 0 => EnemyKind::Drone, 1 => EnemyKind::Dasher, _ => EnemyKind::Emitter };
-                                let count = match boss.phase { 0 => 2, 1 => 1, _ => 3 };
+                                boss.state_timer = match boss.phase {
+                                    0 => 3.0,
+                                    1 => 2.4,
+                                    _ => 1.8,
+                                };
+                                let kind = match boss.phase {
+                                    0 => EnemyKind::Drone,
+                                    1 => EnemyKind::Dasher,
+                                    _ => EnemyKind::Emitter,
+                                };
+                                let count = match boss.phase {
+                                    0 => 2,
+                                    1 => 1,
+                                    _ => 3,
+                                };
                                 add_spawn = Some((boss.pos, kind, count));
                             }
                         }
                         BossKind::Hydra => {
                             boss.lobe_orbit += HYDRA_ORBIT_SPEED * dt;
                             boss.hp = boss.lobe_hp[0] + boss.lobe_hp[1] + boss.lobe_hp[2];
-                            let dead_count = boss.lobe_hp.iter().filter(|&&h| h <= 0.0).count() as u8;
+                            let dead_count =
+                                boss.lobe_hp.iter().filter(|&&h| h <= 0.0).count() as u8;
                             if dead_count != boss.phase {
                                 boss.phase = dead_count;
                                 phase_changed = true;
@@ -1996,7 +2197,7 @@ impl Game {
         }
         self.void_shockwaves.retain(|sw| sw.life < sw.max_life);
         if hit_damage > 0.0 {
-            self.apply_damage_to_player(hit_damage);
+            self.apply_damage_to_player(hit_damage, DamageSource::VoidShockwave);
             self.player.iframe_timer = VOID_SHOCKWAVE_IFRAME_DURATION;
             self.shake_amount += 4.0;
         }
@@ -2032,7 +2233,13 @@ impl Game {
                         continue;
                     }
                     let shield_pos = Self::sentinel_shield_pos(boss, i);
-                    if capsule_circle_intersect_globe(start, end, cap_half, shield_pos, SENTINEL_SHIELD_RADIUS) {
+                    if capsule_circle_intersect_globe(
+                        start,
+                        end,
+                        cap_half,
+                        shield_pos,
+                        SENTINEL_SHIELD_RADIUS,
+                    ) {
                         boss.shield_hp[i] = (boss.shield_hp[i] - damage).max(0.0);
                         let just_broken = boss.shield_hp[i] <= 0.0;
                         self.hit_flash_positions.push(shield_pos);
@@ -2051,7 +2258,13 @@ impl Game {
                         continue;
                     }
                     let lobe_pos = Self::hydra_lobe_pos(boss, i);
-                    if capsule_circle_intersect_globe(start, end, cap_half, lobe_pos, HYDRA_LOBE_RADIUS) {
+                    if capsule_circle_intersect_globe(
+                        start,
+                        end,
+                        cap_half,
+                        lobe_pos,
+                        HYDRA_LOBE_RADIUS,
+                    ) {
                         boss.lobe_hp[i] = (boss.lobe_hp[i] - damage).max(0.0);
                         self.hit_flash_positions.push(lobe_pos);
                         return Some((lobe_pos, false));
@@ -2097,33 +2310,18 @@ impl Game {
         }
     }
 
-    fn damage_boss_direct_beam(&mut self, start: Vec2, end: Vec2, cap_half: f32, damage: f32) {
-        if let Some(boss) = &mut self.boss {
-            if boss.state != BossState::Active {
-                return;
-            }
-            match boss.kind {
-                BossKind::Sentinel => {
-                    if capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius) {
-                        boss.hp -= damage;
-                    }
-                }
-                BossKind::Hydra => {
-                    for i in 0..3usize {
-                        if boss.lobe_hp[i] > 0.0 {
-                            let lp = Self::hydra_lobe_pos(boss, i);
-                            if capsule_circle_intersect_globe(start, end, cap_half, lp, HYDRA_LOBE_RADIUS) {
-                                boss.lobe_hp[i] = (boss.lobe_hp[i] - damage).max(0.0);
-                                break;
-                            }
-                        }
-                    }
-                }
-                BossKind::VoidPrism => {
-                    if capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius) {
-                        boss.hp -= damage;
-                    }
-                }
+    fn damage_boss_with_secondary_beam(
+        &mut self,
+        start: Vec2,
+        end: Vec2,
+        cap_half: f32,
+        damage: f32,
+    ) {
+        if let Some((impact, shield_broken)) =
+            self.damage_boss_with_beam(start, end, cap_half, damage)
+        {
+            if shield_broken {
+                self.fire_shield_break_burst(impact);
             }
         }
     }
@@ -2363,7 +2561,7 @@ impl Game {
                         e.hp -= DIFFRACT_MINI_DAMAGE;
                     }
                 }
-                self.damage_boss_direct_beam(
+                self.damage_boss_with_secondary_beam(
                     impact,
                     end,
                     diffract_thick * 0.5,
@@ -2513,7 +2711,12 @@ impl Game {
                         e.hp -= CASCADE_DAMAGE;
                     }
                 }
-                self.damage_boss_direct_beam(origin, end, CASCADE_THICKNESS * 0.5, CASCADE_DAMAGE);
+                self.damage_boss_with_secondary_beam(
+                    origin,
+                    end,
+                    CASCADE_THICKNESS * 0.5,
+                    CASCADE_DAMAGE,
+                );
                 self.beams.push(Beam {
                     start: origin,
                     end,
@@ -2535,6 +2738,7 @@ impl Game {
             self.xp -= needed;
             self.rank += 1;
             self.peak_rank = self.peak_rank.max(self.rank);
+            self.record_rank_timeline();
             self.audio_event_bits |= AUDIO_RANK_UP;
             let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
             let heal = (20.0 - self.rank as f32 * 1.0).max(5.0)
@@ -2582,7 +2786,7 @@ impl Game {
 
     /// Damage the player. Barrier absorbs the full raw hit first; Armor reduces
     /// whatever leaks through. Thorns fires after HP loss.
-    fn apply_damage_to_player(&mut self, raw_damage: f32) {
+    fn apply_damage_to_player(&mut self, raw_damage: f32, source: DamageSource) {
         let mut remaining = raw_damage;
 
         // Barrier absorbs raw damage before any reduction.
@@ -2612,6 +2816,10 @@ impl Game {
             remaining *= (1.0 - armor * ARMOR_DR_PER_LEVEL).max(0.10);
             self.player.hp -= remaining;
             self.damage_taken += remaining;
+            self.damage_by_source[source.as_index()] += remaining;
+            if self.player.hp <= 0.0 && self.death_cause.is_none() {
+                self.death_cause = Some(source);
+            }
             self.audio_event_bits |= AUDIO_PLAYER_HIT;
         }
 
@@ -2691,7 +2899,11 @@ impl Game {
                 .inventory
                 .has_synergy(ShardKind::Split, ShardKind::Cascade);
             let fan_count = if chain_reaction { 3u32 } else { 1 };
-            let color = if chain_reaction { [0.25, 1.0, 0.88] } else { [1.0, 0.5, 0.3] };
+            let color = if chain_reaction {
+                [0.25, 1.0, 0.88]
+            } else {
+                [1.0, 0.5, 0.3]
+            };
             let kills: Vec<Vec2> = self
                 .enemies
                 .iter()
@@ -3177,57 +3389,79 @@ impl Game {
             };
 
             match boss.kind {
-                BossKind::Sentinel => {
-                    match boss.state {
-                        BossState::Telegraphing => {
-                            let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
-                            self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y,
-                                radius: SENTINEL_RADIUS * (1.0 + t * 1.6),
-                                r: 1.0, g: 0.95, b: 0.75,
-                                a: 0.10 + t * 0.18, glow: 2.0 + t * 4.0,
-                            });
-                            self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y,
-                                radius: boss.radius,
-                                r: 1.0, g: 1.0, b: 1.0,
-                                a: 0.65, glow: 4.0,
-                            });
-                        }
-                        BossState::Active | BossState::Dying => {
-                            let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
-                            let (r, g, b, glow) = match boss.phase {
-                                0 => (1.0_f32, 0.96, 0.88, 4.0_f32),
-                                1 => (1.0, 0.48, 0.18, 4.8),
-                                _ => (1.0, 0.12, 0.12, 5.5),
-                            };
-                            self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y, radius: boss.radius + 8.0,
-                                r, g, b, a: 0.18 * dying_alpha, glow: glow * 1.1 * dying_alpha,
-                            });
-                            self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y, radius: boss.radius,
-                                r, g, b,
-                                a: (0.72 + hp_pct * 0.18) * dying_alpha,
-                                glow: glow * dying_alpha,
-                            });
-                            if boss.state == BossState::Active {
-                                for i in 0..boss.shield_hp.len() {
-                                    if boss.shield_hp[i] <= 0.0 { continue; }
-                                    let shield_fill = boss.shield_hp[i] / SENTINEL_SHIELD_HP;
-                                    let sp = nearest_globe_pos(camera, Self::sentinel_shield_pos(boss, i));
-                                    self.circle_buf.push(CircleInstance {
-                                        x: sp.x, y: sp.y,
-                                        radius: SENTINEL_SHIELD_RADIUS + 4.0 * shield_fill,
-                                        r: 0.55, g: 0.9, b: 1.0,
-                                        a: 0.55 + shield_fill * 0.25,
-                                        glow: 3.0 + shield_fill * 2.0,
-                                    });
+                BossKind::Sentinel => match boss.state {
+                    BossState::Telegraphing => {
+                        let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
+                        self.circle_buf.push(CircleInstance {
+                            x: pos.x,
+                            y: pos.y,
+                            radius: SENTINEL_RADIUS * (1.0 + t * 1.6),
+                            r: 1.0,
+                            g: 0.95,
+                            b: 0.75,
+                            a: 0.10 + t * 0.18,
+                            glow: 2.0 + t * 4.0,
+                        });
+                        self.circle_buf.push(CircleInstance {
+                            x: pos.x,
+                            y: pos.y,
+                            radius: boss.radius,
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 0.65,
+                            glow: 4.0,
+                        });
+                    }
+                    BossState::Active | BossState::Dying => {
+                        let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
+                        let (r, g, b, glow) = match boss.phase {
+                            0 => (1.0_f32, 0.96, 0.88, 4.0_f32),
+                            1 => (1.0, 0.48, 0.18, 4.8),
+                            _ => (1.0, 0.12, 0.12, 5.5),
+                        };
+                        self.circle_buf.push(CircleInstance {
+                            x: pos.x,
+                            y: pos.y,
+                            radius: boss.radius + 8.0,
+                            r,
+                            g,
+                            b,
+                            a: 0.18 * dying_alpha,
+                            glow: glow * 1.1 * dying_alpha,
+                        });
+                        self.circle_buf.push(CircleInstance {
+                            x: pos.x,
+                            y: pos.y,
+                            radius: boss.radius,
+                            r,
+                            g,
+                            b,
+                            a: (0.72 + hp_pct * 0.18) * dying_alpha,
+                            glow: glow * dying_alpha,
+                        });
+                        if boss.state == BossState::Active {
+                            for i in 0..boss.shield_hp.len() {
+                                if boss.shield_hp[i] <= 0.0 {
+                                    continue;
                                 }
+                                let shield_fill = boss.shield_hp[i] / SENTINEL_SHIELD_HP;
+                                let sp =
+                                    nearest_globe_pos(camera, Self::sentinel_shield_pos(boss, i));
+                                self.circle_buf.push(CircleInstance {
+                                    x: sp.x,
+                                    y: sp.y,
+                                    radius: SENTINEL_SHIELD_RADIUS + 4.0 * shield_fill,
+                                    r: 0.55,
+                                    g: 0.9,
+                                    b: 1.0,
+                                    a: 0.55 + shield_fill * 0.25,
+                                    glow: 3.0 + shield_fill * 2.0,
+                                });
                             }
                         }
                     }
-                }
+                },
                 BossKind::Hydra => {
                     match boss.state {
                         BossState::Telegraphing => {
@@ -3236,32 +3470,45 @@ impl Game {
                                 let lp = nearest_globe_pos(camera, Self::hydra_lobe_pos(boss, i));
                                 let [r, g, b] = HYDRA_LOBE_COLORS[i];
                                 self.circle_buf.push(CircleInstance {
-                                    x: lp.x, y: lp.y,
+                                    x: lp.x,
+                                    y: lp.y,
                                     radius: HYDRA_LOBE_RADIUS * (0.4 + t * 0.6),
-                                    r, g, b, a: 0.30 + t * 0.45, glow: 2.0 + t * 3.5,
+                                    r,
+                                    g,
+                                    b,
+                                    a: 0.30 + t * 0.45,
+                                    glow: 2.0 + t * 3.5,
                                 });
                             }
                         }
                         BossState::Active | BossState::Dying => {
                             // Dim center orb.
                             self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y,
+                                x: pos.x,
+                                y: pos.y,
                                 radius: HYDRA_LOBE_RADIUS * 0.6,
-                                r: 0.5, g: 0.5, b: 0.5,
-                                a: 0.22 * dying_alpha, glow: 1.2 * dying_alpha,
+                                r: 0.5,
+                                g: 0.5,
+                                b: 0.5,
+                                a: 0.22 * dying_alpha,
+                                glow: 1.2 * dying_alpha,
                             });
                             // Living lobes.
                             for i in 0..3usize {
                                 if boss.lobe_hp[i] <= 0.0 && boss.state != BossState::Dying {
                                     continue;
                                 }
-                                let lobe_fill = (boss.lobe_hp[i] / HYDRA_HP_PER_LOBE).clamp(0.0, 1.0);
+                                let lobe_fill =
+                                    (boss.lobe_hp[i] / HYDRA_HP_PER_LOBE).clamp(0.0, 1.0);
                                 let lp = nearest_globe_pos(camera, Self::hydra_lobe_pos(boss, i));
                                 let [r, g, b] = HYDRA_LOBE_COLORS[i];
                                 self.circle_buf.push(CircleInstance {
-                                    x: lp.x, y: lp.y,
+                                    x: lp.x,
+                                    y: lp.y,
                                     radius: HYDRA_LOBE_RADIUS + 5.0 * lobe_fill,
-                                    r, g, b,
+                                    r,
+                                    g,
+                                    b,
                                     a: (0.55 + lobe_fill * 0.3) * dying_alpha,
                                     glow: (3.5 + lobe_fill * 2.5) * dying_alpha,
                                 });
@@ -3276,41 +3523,58 @@ impl Game {
                             let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
                             // Dark pulsing void core materializing.
                             self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y,
+                                x: pos.x,
+                                y: pos.y,
                                 radius: VOID_PRISM_RADIUS * (0.2 + t * 1.8),
-                                r: 0.6, g: 0.3, b: 1.0,
-                                a: 0.08 + t * 0.14, glow: 1.5 + t * 5.0,
+                                r: 0.6,
+                                g: 0.3,
+                                b: 1.0,
+                                a: 0.08 + t * 0.14,
+                                glow: 1.5 + t * 5.0,
                             });
                             self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y,
+                                x: pos.x,
+                                y: pos.y,
                                 radius: VOID_PRISM_RADIUS * (0.35 + t * 0.65),
-                                r: 0.05, g: 0.0, b: 0.12,
-                                a: 0.55 + t * 0.35, glow: 2.0 + t * 3.0,
+                                r: 0.05,
+                                g: 0.0,
+                                b: 0.12,
+                                a: 0.55 + t * 0.35,
+                                glow: 2.0 + t * 3.0,
                             });
                         }
                         BossState::Active | BossState::Dying => {
                             let glow_base = if boss.phase == 1 { 6.0 } else { 4.5 };
                             // Outer void aura — pale violet rim.
                             self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y,
+                                x: pos.x,
+                                y: pos.y,
                                 radius: boss.radius + 14.0,
-                                r: 0.7, g: 0.35, b: 1.0,
+                                r: 0.7,
+                                g: 0.35,
+                                b: 1.0,
                                 a: (0.12 + hp_pct * 0.08) * dying_alpha,
                                 glow: glow_base * 1.2 * dying_alpha,
                             });
                             // Dark core body.
                             self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y,
+                                x: pos.x,
+                                y: pos.y,
                                 radius: boss.radius,
-                                r: 0.04, g: 0.0, b: 0.10,
+                                r: 0.04,
+                                g: 0.0,
+                                b: 0.10,
                                 a: (0.88 + hp_pct * 0.12) * dying_alpha,
                                 glow: glow_base * dying_alpha,
                             });
                             // Bright inner rim ring.
                             self.circle_buf.push(CircleInstance {
-                                x: pos.x, y: pos.y,
+                                x: pos.x,
+                                y: pos.y,
                                 radius: boss.radius * 0.72,
-                                r: 0.8, g: 0.55, b: 1.0,
+                                r: 0.8,
+                                g: 0.55,
+                                b: 1.0,
                                 a: (0.35 + hp_pct * 0.25) * dying_alpha,
                                 glow: (glow_base * 0.8) * dying_alpha,
                             });
@@ -3326,17 +3590,25 @@ impl Game {
             let r = sw.current_radius();
             let fade = (1.0 - sw.life / sw.max_life).clamp(0.0, 1.0);
             self.circle_buf.push(CircleInstance {
-                x: sw_pos.x, y: sw_pos.y,
+                x: sw_pos.x,
+                y: sw_pos.y,
                 radius: r,
-                r: 0.55, g: 0.2, b: 0.9,
-                a: fade * 0.22, glow: 2.5 * fade,
+                r: 0.55,
+                g: 0.2,
+                b: 0.9,
+                a: fade * 0.22,
+                glow: 2.5 * fade,
             });
             if r > 8.0 {
                 self.circle_buf.push(CircleInstance {
-                    x: sw_pos.x, y: sw_pos.y,
+                    x: sw_pos.x,
+                    y: sw_pos.y,
                     radius: r - 6.0,
-                    r: 0.04, g: 0.0, b: 0.08,
-                    a: fade * 0.30, glow: 1.0,
+                    r: 0.04,
+                    g: 0.0,
+                    b: 0.08,
+                    a: fade * 0.30,
+                    glow: 1.0,
                 });
             }
         }
@@ -3519,6 +3791,10 @@ impl Game {
                 glow: 1.5,
             });
         }
+
+        self.max_enemies_observed = self.max_enemies_observed.max(self.enemies.len() as u32);
+        self.max_circles_observed = self.max_circles_observed.max(self.circle_buf.len() as u32);
+        self.max_beams_observed = self.max_beams_observed.max(self.beam_buf.len() as u32);
     }
 }
 
