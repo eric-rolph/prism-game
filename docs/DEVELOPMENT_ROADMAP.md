@@ -112,7 +112,7 @@ Goal: give level-ups short-term tactics and long-term build planning.
 Candidate evolutions:
 
 - Kaleidoscope: Split 6 + Mirror 6; radial fan salvos become patterned great-circle bursts.
-- Whiteout: Frost 6 + Diffract 6; kills emit freezing starbursts and longer frost fields.
+- ✅ Whiteout: Frost 6 + Diffract 6; frozen kills emit freezing starbursts and longer frost fields.
 - Singularity: Magnet 6 + Interference 6; pulse rings become stronger gravity wells with a dark center.
 - Solar Crown: Halo 6 + Barrier 6; orbitals reinforce the shield and flare on contact.
 - ✅ Afterimage Engine: Echo 6 + Momentum 6; dash leaves a temporary firing echo.

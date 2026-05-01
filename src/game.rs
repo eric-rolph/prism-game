@@ -475,6 +475,14 @@ const MOMENTUM_DASH_REDUCTION_PER_LEVEL: f32 = 0.075;
 const BLIZZARD_FIELD_RADIUS: f32 = 72.0;
 const BLIZZARD_FIELD_LIFETIME: f32 = 2.8;
 const MAX_FROST_FIELDS: usize = 12;
+const WHITEOUT_FIELD_RADIUS: f32 = 108.0;
+const WHITEOUT_FIELD_LIFETIME: f32 = 4.2;
+const WHITEOUT_STARBURST_BEAMS: u8 = 8;
+const WHITEOUT_STARBURST_REACH: f32 = 155.0;
+const WHITEOUT_STARBURST_DAMAGE: f32 = 28.0;
+const WHITEOUT_STARBURST_THICKNESS: f32 = 2.4;
+const WHITEOUT_STARBURST_LIFETIME: f32 = 0.16;
+const WHITEOUT_MAX_CHAIN_DEPTH: u32 = 3;
 
 const PRISM_CANNON_INTERVAL: f32 = 1.8;
 const PRISM_CANNON_DAMAGE_MULT: f32 = 4.0;
@@ -2593,31 +2601,20 @@ impl Game {
         self.audio_kill_count += 1;
         self.spawn_death_particles(pos, kind);
 
-        // Blizzard: frozen enemy death leaves a lingering frost slow-field.
-        if was_frozen
-            && self.frost_fields.len() < MAX_FROST_FIELDS
-            && self
+        // Blizzard leaves a slow field on frozen deaths. Whiteout upgrades
+        // that field and adds a capped freezing starburst chain.
+        if was_frozen {
+            let whiteout = self.inventory.has_evolution(EvolutionKind::Whiteout);
+            let blizzard = self
                 .inventory
-                .has_synergy(ShardKind::Split, ShardKind::Frost)
-        {
-            self.frost_fields.push(FrostField {
-                pos,
-                life: 0.0,
-                max_life: BLIZZARD_FIELD_LIFETIME,
-                radius: BLIZZARD_FIELD_RADIUS,
-            });
-            // Spawn extra frost-colored particles on shatter.
-            for _ in 0..14 {
-                let angle = self.rng.angle();
-                let speed = self.rng.range(80.0, 220.0);
-                self.particles.push(Particle {
-                    pos,
-                    vel: Vec2::new(angle.cos(), angle.sin()) * speed,
-                    life: 0.0,
-                    max_life: self.rng.range(0.5, 1.1),
-                    color: [0.5, 0.88, 1.0],
-                    size: self.rng.range(1.8, 3.5),
-                });
+                .has_synergy(ShardKind::Split, ShardKind::Frost);
+            if whiteout {
+                self.spawn_frost_field(pos, WHITEOUT_FIELD_RADIUS, WHITEOUT_FIELD_LIFETIME, 22);
+                if cascade_depth < WHITEOUT_MAX_CHAIN_DEPTH {
+                    self.fire_whiteout_starburst(pos);
+                }
+            } else if blizzard {
+                self.spawn_frost_field(pos, BLIZZARD_FIELD_RADIUS, BLIZZARD_FIELD_LIFETIME, 14);
             }
         }
 
@@ -2729,6 +2726,66 @@ impl Game {
         }
     }
 
+    fn spawn_frost_field(&mut self, pos: Vec2, radius: f32, lifetime: f32, particles: u32) {
+        if self.frost_fields.len() < MAX_FROST_FIELDS {
+            self.frost_fields.push(FrostField {
+                pos,
+                life: 0.0,
+                max_life: lifetime,
+                radius,
+            });
+        }
+
+        for _ in 0..particles {
+            let angle = self.rng.angle();
+            let speed = self.rng.range(80.0, 240.0);
+            self.particles.push(Particle {
+                pos,
+                vel: Vec2::new(angle.cos(), angle.sin()) * speed,
+                life: 0.0,
+                max_life: self.rng.range(0.5, 1.2),
+                color: [0.5, 0.88, 1.0],
+                size: self.rng.range(1.8, 3.8),
+            });
+        }
+    }
+
+    fn fire_whiteout_starburst(&mut self, origin: Vec2) {
+        let base_a = self.rng.angle();
+        let color = [0.72, 0.95, 1.0];
+        for i in 0..WHITEOUT_STARBURST_BEAMS {
+            let a = base_a + i as f32 * std::f32::consts::TAU / WHITEOUT_STARBURST_BEAMS as f32;
+            let dir = Vec2::new(a.cos(), a.sin());
+            let end = tangent_endpoint_on_globe(origin, dir * WHITEOUT_STARBURST_REACH);
+            for e in &mut self.enemies {
+                if capsule_circle_intersect_globe(
+                    origin,
+                    end,
+                    WHITEOUT_STARBURST_THICKNESS * 0.5,
+                    e.pos,
+                    e.radius,
+                ) {
+                    e.hp -= WHITEOUT_STARBURST_DAMAGE;
+                    e.slow_timer = e.slow_timer.max(FROST_SLOW_DURATION * 2.0);
+                }
+            }
+            self.damage_boss_with_secondary_beam(
+                origin,
+                end,
+                WHITEOUT_STARBURST_THICKNESS * 0.5,
+                WHITEOUT_STARBURST_DAMAGE,
+            );
+            self.beams.push(Beam {
+                start: origin,
+                end,
+                life: 0.0,
+                max_life: WHITEOUT_STARBURST_LIFETIME,
+                thickness: WHITEOUT_STARBURST_THICKNESS,
+                color,
+            });
+        }
+    }
+
     fn check_for_level_up(&mut self) {
         if self.leveling_up {
             return;
@@ -2755,6 +2812,7 @@ impl Game {
     fn spawn_evolution_particles(&mut self, evolution: EvolutionKind) {
         let color = match evolution {
             EvolutionKind::AfterimageEngine => [1.0, 0.72, 0.36],
+            EvolutionKind::Whiteout => [0.72, 0.95, 1.0],
         };
         self.shake_amount += 4.0;
         for _ in 0..32 {

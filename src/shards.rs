@@ -45,14 +45,16 @@ pub const MAX_SHARD_LEVEL: u8 = 6;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EvolutionKind {
     AfterimageEngine = 0,
+    Whiteout = 1,
 }
 
-pub const EVOLUTION_COUNT: usize = 1;
+pub const EVOLUTION_COUNT: usize = 2;
 
 impl EvolutionKind {
     pub fn from_index(i: u8) -> Option<Self> {
         match i {
             0 => Some(Self::AfterimageEngine),
+            1 => Some(Self::Whiteout),
             _ => None,
         }
     }
@@ -156,6 +158,9 @@ impl Inventory {
         match evolution {
             EvolutionKind::AfterimageEngine => {
                 self.is_maxed(ShardKind::Echo) && self.is_maxed(ShardKind::Momentum)
+            }
+            EvolutionKind::Whiteout => {
+                self.is_maxed(ShardKind::Frost) && self.is_maxed(ShardKind::Diffract)
             }
         }
     }
