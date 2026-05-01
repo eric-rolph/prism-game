@@ -60,6 +60,12 @@ const EVOLUTIONS: EvolutionMeta[] = [
     desc: 'dashing leaves firing echoes at your old position',
     recipe: 'ECHO 6 + MOMENTUM 6',
   },
+  {
+    name: 'WHITEOUT',
+    color: '#b9f4ff',
+    desc: 'frozen kills burst into freezing rays and longer frost fields',
+    recipe: 'FROST 6 + DIFFRACT 6',
+  },
 ];
 
 type RunOutcome = 'VICTORY' | 'DEATH';
