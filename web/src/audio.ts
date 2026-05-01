@@ -11,10 +11,14 @@ const AUDIO_SHIELD_BREAK = 1 << 4;
 export class AudioManager {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private beamBed: GainNode | null = null;
+  private beamOscA: OscillatorNode | null = null;
+  private beamOscB: OscillatorNode | null = null;
 
   private beamCd = 0;
   private killCd = 0;
   private gemCd  = 0;
+  private beamAccentIndex = 0;
 
   // Detect new synergy activations between frames.
   private prevSynergyBits = 0;
@@ -25,6 +29,7 @@ export class AudioManager {
     this.master = this.ctx.createGain();
     this.master.gain.value = 0.5;
     this.master.connect(this.ctx.destination);
+    this.createBeamBed();
   }
 
   resume(): void {
@@ -45,7 +50,11 @@ export class AudioManager {
     this.killCd = Math.max(0, this.killCd - dt);
     this.gemCd  = Math.max(0, this.gemCd  - dt);
 
-    if (beams > 0 && this.beamCd <= 0) { this.playBeam();        this.beamCd = 0.09; }
+    this.updateBeamBed(beams);
+    if (beams > 0 && this.beamCd <= 0) {
+      this.playBeamAccent(beams);
+      this.beamCd = 0.18 + Math.random() * 0.16;
+    }
     if (kills > 0 && this.killCd <= 0) { this.playKill(kills);   this.killCd = 0.04; }
     if (gems  > 0 && this.gemCd  <= 0) { this.playGem();         this.gemCd  = 0.07; }
 
@@ -78,8 +87,68 @@ export class AudioManager {
 
   // --- Private synthesis -------------------------------------------------
 
-  private playBeam(): void {
-    this.note(2200, 0, 0.04, 0.032, 1100);
+  private createBeamBed(): void {
+    const ctx = this.ctx!;
+    const master = this.master!;
+    const bed = ctx.createGain();
+    bed.gain.value = 0.0001;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 760;
+    filter.Q.value = 0.65;
+
+    const oscA = ctx.createOscillator();
+    oscA.type = 'triangle';
+    oscA.frequency.value = 185;
+
+    const oscB = ctx.createOscillator();
+    oscB.type = 'sine';
+    oscB.frequency.value = 372;
+
+    oscA.connect(filter);
+    oscB.connect(filter);
+    filter.connect(bed);
+    bed.connect(master);
+
+    oscA.start();
+    oscB.start();
+
+    this.beamBed = bed;
+    this.beamOscA = oscA;
+    this.beamOscB = oscB;
+  }
+
+  private updateBeamBed(beams: number): void {
+    if (!this.ctx || !this.beamBed || !this.beamOscA || !this.beamOscB) return;
+    const t = this.ctx.currentTime;
+    const active = beams > 0;
+    const target = active ? Math.min(0.018 + beams * 0.003, 0.034) : 0.0001;
+
+    this.beamBed.gain.cancelAndHoldAtTime(t);
+    this.beamBed.gain.exponentialRampToValueAtTime(target, t + (active ? 0.045 : 0.18));
+
+    if (active) {
+      const drift = Math.random() * 8 - 4;
+      this.beamOscA.frequency.setTargetAtTime(185 + drift, t, 0.08);
+      this.beamOscB.frequency.setTargetAtTime(372 - drift * 1.7, t, 0.08);
+    }
+  }
+
+  private playBeamAccent(beams: number): void {
+    // The weapon bed carries continuous feedback; accents are intentionally
+    // sparse and varied so the auto-fire never becomes a foreground metronome.
+    const palette = [
+      [880, 0.018, 0.055, 1180],
+      [660, 0.016, 0.070, 990],
+      [740, 0.014, 0.060, 520],
+      [1040, 0.012, 0.045, 1560],
+    ] as const;
+    const variant = palette[this.beamAccentIndex % palette.length]!;
+    this.beamAccentIndex += 1;
+    const pitch = 0.94 + Math.random() * 0.12;
+    const gain = variant[1] * Math.min(1.0 + beams * 0.08, 1.45);
+    this.note(variant[0] * pitch, 0, gain, variant[2], variant[3] * pitch, 'triangle');
   }
 
   private playKill(count: number): void {
