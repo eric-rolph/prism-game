@@ -2,6 +2,8 @@
 
 Auto-firing light, refracted through shards you collect. A Vampire-Survivors-paced action game rendered as geometric light, built in Rust + WASM, deployed to Cloudflare Workers.
 
+https://prism.ericrolph.workers.dev/
+
 **Controls:** WASD or arrow keys. On touch devices, drag anywhere — it becomes a virtual analog stick. When a rank-up modal appears, click a card or press `1` / `2` / `3`.
 
 ## Stack
