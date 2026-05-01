@@ -154,9 +154,9 @@ const DASH_COOLDOWN: f32 = 3.0;
 
 // Wave system.
 const WAVE_DURATION: f32 = 30.0;
-const BASE_ENEMY_CAP: usize = 140;
-const ENEMY_CAP_PER_WAVE: usize = 12;
-const MAX_ENEMIES: usize = 420;
+const BASE_ENEMY_CAP: usize = 210;
+const ENEMY_CAP_PER_WAVE: usize = 20;
+const MAX_ENEMIES: usize = 840;
 const MAX_SPAWNS_PER_FRAME: u32 = 4;
 const SESSION_LENGTH: f32 = 900.0; // 15 minutes
 const OVERDRIVE_START: f32 = 600.0; // 10 minutes
@@ -483,6 +483,22 @@ const WHITEOUT_STARBURST_DAMAGE: f32 = 28.0;
 const WHITEOUT_STARBURST_THICKNESS: f32 = 2.4;
 const WHITEOUT_STARBURST_LIFETIME: f32 = 0.16;
 const WHITEOUT_MAX_CHAIN_DEPTH: u32 = 3;
+
+// Kaleidoscope: radial great-circle burst on every primary fire.
+const KALEIDOSCOPE_BEAMS: usize = 12;
+const KALEIDOSCOPE_REACH: f32 = 260.0;
+const KALEIDOSCOPE_DAMAGE: f32 = 30.0;
+const KALEIDOSCOPE_THICKNESS: f32 = 2.2;
+const KALEIDOSCOPE_LIFETIME: f32 = 0.12;
+
+// Singularity: Interference pulses become powerful gravity wells.
+const SINGULARITY_PULL_MULT: f32 = 3.0;
+const SINGULARITY_PULL_RANGE_BONUS: f32 = 180.0;
+const SINGULARITY_DAMAGE_MULT: f32 = 1.75;
+
+// Solar Crown: Halo contacts regen barrier; barrier hits flare halos.
+const SOLAR_CROWN_BARRIER_REGEN_PER_CONTACT: f32 = 8.0;
+const SOLAR_CROWN_FLARE_PARTICLES: u32 = 6;
 
 const PRISM_CANNON_INTERVAL: f32 = 1.8;
 const PRISM_CANNON_DAMAGE_MULT: f32 = 4.0;
@@ -1493,6 +1509,7 @@ impl Game {
         let event_horizon = self
             .inventory
             .has_synergy(ShardKind::Halo, ShardKind::Momentum);
+        let solar_crown = self.inventory.has_evolution(EvolutionKind::SolarCrown);
         let halo_speed_mult = if event_horizon { 1.65 } else { 1.0 };
         let halo_radius_mult = if event_horizon { 0.72 } else { 1.0 };
         for h in &mut self.halos {
@@ -1516,6 +1533,12 @@ impl Game {
                     e.hp -= HALO_DPS * dt;
                     if frozen_orbit {
                         e.slow_timer = e.slow_timer.max(FROST_SLOW_DURATION);
+                    }
+                    // Solar Crown: halo contacts feed barrier HP.
+                    if solar_crown {
+                        self.player.barrier_hp = (self.player.barrier_hp
+                            + SOLAR_CROWN_BARRIER_REGEN_PER_CONTACT * dt)
+                            .min(self.player.barrier_max);
                     }
                 }
             }
@@ -1624,30 +1647,44 @@ impl Game {
             .iter()
             .map(|p| (p.pos, p.current_radius()))
             .collect();
+        let singularity = self.inventory.has_evolution(EvolutionKind::Singularity);
         let gravity_pull: Option<f32> = if self
             .inventory
             .has_synergy(ShardKind::Magnet, ShardKind::Interference)
+            || singularity
         {
-            Some(
-                70.0 + self.inventory.level(ShardKind::Magnet) as f32
-                    * MAGNET_SPEED_PER_LEVEL
-                    * 0.45,
-            )
+            let base = 70.0
+                + self.inventory.level(ShardKind::Magnet) as f32 * MAGNET_SPEED_PER_LEVEL * 0.45;
+            Some(if singularity {
+                base * SINGULARITY_PULL_MULT
+            } else {
+                base
+            })
         } else {
             None
+        };
+        let pull_range_bonus = if singularity {
+            SINGULARITY_PULL_RANGE_BONUS
+        } else {
+            110.0
+        };
+        let interference_dmg_mult = if singularity {
+            SINGULARITY_DAMAGE_MULT
+        } else {
+            1.0
         };
         for (ppos, pradius) in &pulse_snapshots {
             for e in &mut self.enemies {
                 let d = globe_distance(e.pos, *ppos);
                 if let Some(pull) = gravity_pull {
-                    if d > 1.0 && d < *pradius + 110.0 {
-                        let falloff = (1.0 - d / (*pradius + 110.0)).clamp(0.0, 1.0);
+                    if d > 1.0 && d < *pradius + pull_range_bonus {
+                        let falloff = (1.0 - d / (*pradius + pull_range_bonus)).clamp(0.0, 1.0);
                         let to_center = nearest_globe_delta(e.pos, *ppos).normalize_or_zero();
                         move_on_globe(&mut e.pos, to_center * pull * falloff * dt);
                     }
                 }
                 if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + e.radius {
-                    e.hp -= INTERFERENCE_DPS * dt;
+                    e.hp -= INTERFERENCE_DPS * interference_dmg_mult * dt;
                 }
             }
             if let Some(boss) = &mut self.boss {
@@ -2451,6 +2488,11 @@ impl Game {
             self.fire_beam(req.clone(), origin);
         }
 
+        // Kaleidoscope: after every primary salvo, emit a prismatic great-circle ring.
+        if self.inventory.has_evolution(EvolutionKind::Kaleidoscope) {
+            self.fire_kaleidoscope_burst(origin);
+        }
+
         // Echo: queue L delayed salvos (only from primary fire, not from echoes).
         if schedule_echo {
             let echo = self.inventory.level(ShardKind::Echo);
@@ -2786,6 +2828,45 @@ impl Game {
         }
     }
 
+    fn fire_kaleidoscope_burst(&mut self, origin: Vec2) {
+        let base_angle = self.rng.angle();
+        for i in 0..KALEIDOSCOPE_BEAMS {
+            let a = base_angle + i as f32 * std::f32::consts::TAU / KALEIDOSCOPE_BEAMS as f32;
+            let dir = Vec2::new(a.cos(), a.sin());
+            let end = tangent_endpoint_on_globe(origin, dir * KALEIDOSCOPE_REACH);
+            let color: [f32; 3] = match i % 3 {
+                0 => [0.5, 1.0, 0.92],
+                1 => [1.0, 0.45, 0.92],
+                _ => [1.0, 0.95, 0.45],
+            };
+            for e in &mut self.enemies {
+                if capsule_circle_intersect_globe(
+                    origin,
+                    end,
+                    KALEIDOSCOPE_THICKNESS * 0.5,
+                    e.pos,
+                    e.radius,
+                ) {
+                    e.hp -= KALEIDOSCOPE_DAMAGE;
+                }
+            }
+            self.damage_boss_with_secondary_beam(
+                origin,
+                end,
+                KALEIDOSCOPE_THICKNESS * 0.5,
+                KALEIDOSCOPE_DAMAGE,
+            );
+            self.beams.push(Beam {
+                start: origin,
+                end,
+                life: 0.0,
+                max_life: KALEIDOSCOPE_LIFETIME,
+                thickness: KALEIDOSCOPE_THICKNESS,
+                color,
+            });
+        }
+    }
+
     fn check_for_level_up(&mut self) {
         if self.leveling_up {
             return;
@@ -2813,6 +2894,9 @@ impl Game {
         let color = match evolution {
             EvolutionKind::AfterimageEngine => [1.0, 0.72, 0.36],
             EvolutionKind::Whiteout => [0.72, 0.95, 1.0],
+            EvolutionKind::Kaleidoscope => [0.9, 0.5, 1.0],
+            EvolutionKind::Singularity => [0.35, 0.25, 1.0],
+            EvolutionKind::SolarCrown => [1.0, 0.92, 0.42],
         };
         self.shake_amount += 4.0;
         for _ in 0..32 {
@@ -2865,6 +2949,35 @@ impl Game {
                     max_life: 0.6,
                     max_radius: 200.0,
                 });
+            }
+            // Solar Crown: barrier absorption flares all halo orbitals.
+            if self.inventory.has_evolution(EvolutionKind::SolarCrown) && !self.halos.is_empty() {
+                let halo_positions: Vec<Vec2> = self
+                    .halos
+                    .iter()
+                    .map(|h| {
+                        let mut p = self.player.pos;
+                        move_on_globe(
+                            &mut p,
+                            Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius,
+                        );
+                        p
+                    })
+                    .collect();
+                for hpos in halo_positions {
+                    for _ in 0..SOLAR_CROWN_FLARE_PARTICLES {
+                        let a = self.rng.angle();
+                        self.particles.push(Particle {
+                            pos: hpos,
+                            vel: Vec2::new(a.cos(), a.sin())
+                                * self.rng.range(80.0, 240.0),
+                            life: 0.0,
+                            max_life: self.rng.range(0.14, 0.32),
+                            color: [1.0, 0.92, 0.42],
+                            size: self.rng.range(2.0, 5.5),
+                        });
+                    }
+                }
             }
         }
 
@@ -3354,6 +3467,7 @@ impl Game {
         }
 
         // Interference pulses underneath everything else.
+        let singularity_visual = self.inventory.has_evolution(EvolutionKind::Singularity);
         for p in &self.pulses {
             let t = p.life / p.max_life;
             let r = p.current_radius();
@@ -3362,12 +3476,25 @@ impl Game {
                 x: pos.x,
                 y: pos.y,
                 radius: r,
-                r: 0.4,
-                g: 0.55,
+                r: if singularity_visual { 0.25 } else { 0.4 },
+                g: if singularity_visual { 0.18 } else { 0.55 },
                 b: 1.0,
-                a: 0.20 * (1.0 - t),
-                glow: 0.9 * (1.0 - t),
+                a: if singularity_visual { 0.35 } else { 0.20 } * (1.0 - t),
+                glow: (if singularity_visual { 1.4 } else { 0.9 }) * (1.0 - t),
             });
+            // Singularity: dark absorption core grows as the ring expands.
+            if singularity_visual {
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x,
+                    y: pos.y,
+                    radius: (r * 0.38).max(6.0),
+                    r: 0.06,
+                    g: 0.04,
+                    b: 0.18,
+                    a: 0.85 * (1.0 - t),
+                    glow: 0.0,
+                });
+            }
         }
 
         // Player (blink during i-frames).

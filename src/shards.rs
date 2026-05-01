@@ -46,15 +46,21 @@ pub const MAX_SHARD_LEVEL: u8 = 6;
 pub enum EvolutionKind {
     AfterimageEngine = 0,
     Whiteout = 1,
+    Kaleidoscope = 2,
+    Singularity = 3,
+    SolarCrown = 4,
 }
 
-pub const EVOLUTION_COUNT: usize = 2;
+pub const EVOLUTION_COUNT: usize = 5;
 
 impl EvolutionKind {
     pub fn from_index(i: u8) -> Option<Self> {
         match i {
             0 => Some(Self::AfterimageEngine),
             1 => Some(Self::Whiteout),
+            2 => Some(Self::Kaleidoscope),
+            3 => Some(Self::Singularity),
+            4 => Some(Self::SolarCrown),
             _ => None,
         }
     }
@@ -161,6 +167,15 @@ impl Inventory {
             }
             EvolutionKind::Whiteout => {
                 self.is_maxed(ShardKind::Frost) && self.is_maxed(ShardKind::Diffract)
+            }
+            EvolutionKind::Kaleidoscope => {
+                self.is_maxed(ShardKind::Split) && self.is_maxed(ShardKind::Mirror)
+            }
+            EvolutionKind::Singularity => {
+                self.is_maxed(ShardKind::Magnet) && self.is_maxed(ShardKind::Interference)
+            }
+            EvolutionKind::SolarCrown => {
+                self.is_maxed(ShardKind::Halo) && self.is_maxed(ShardKind::Barrier)
             }
         }
     }

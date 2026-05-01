@@ -66,6 +66,24 @@ const EVOLUTIONS: EvolutionMeta[] = [
     desc: 'frozen kills burst into freezing rays and longer frost fields',
     recipe: 'FROST 6 + DIFFRACT 6',
   },
+  {
+    name: 'KALEIDOSCOPE',
+    color: '#cc88ff',
+    desc: 'every salvo also fires a prismatic great-circle ring of 12 rays',
+    recipe: 'SPLIT 6 + MIRROR 6',
+  },
+  {
+    name: 'SINGULARITY',
+    color: '#5544ff',
+    desc: 'interference rings become gravity wells — enemies spiral inward, ring damage +75%',
+    recipe: 'MAGNET 6 + INTERFERENCE 6',
+  },
+  {
+    name: 'SOLAR CROWN',
+    color: '#ffec66',
+    desc: 'halo contacts recharge your barrier; barrier hits flare all orbitals',
+    recipe: 'HALO 6 + BARRIER 6',
+  },
 ];
 
 type RunOutcome = 'VICTORY' | 'DEATH';
