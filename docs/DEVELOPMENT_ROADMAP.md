@@ -1,6 +1,6 @@
 # Prism Development Roadmap
 
-Updated April 29, 2026.
+Updated May 1, 2026.
 
 This roadmap is the living source of truth for the next Prism pushes. It supersedes the early April review docs where they describe the game as missing health, waves, gems, enemy variety, a spatial background, or shard synergies; those foundations now exist. The next phase is about turning the 15-minute run into a deliberate arc with bosses, more expressive upgrade decisions, audio, replay goals, and playtest-driven balance.
 
@@ -18,13 +18,13 @@ Prism is now a playable browser bullet-heaven with:
 
 ## Current Diagnosis
 
-- The run now has its first milestone encounter at 5:00, but the full boss arc is not complete. Late-game pressure after Sentinel still comes mostly from density, cocktails, and events rather than Hydra/Void Prism rules.
-- The strongest senior-dev question is now: what does the player decide every 5 seconds? Each new feature should create a readable choice about positioning, target priority, route planning, or build direction.
+- The full boss arc now exists: Sentinel teaches shield positioning, Hydra teaches target priority, and Void Prism closes the run with pull/shockwave space control. The remaining boss work is balance/readability, not missing infrastructure.
+- The strongest senior-dev question remains: what does the player decide every 5 seconds? Each new feature should create a readable choice about positioning, target priority, route planning, or build direction.
 - Pickup readability needs to stay sacred. Radiance gems must be instantly distinct from enemies in shape, color, animation, and motion trail.
-- Upgrade choices are readable but still mostly “pick one of three.” There is no reroll, skip, banish, evolution offer, or long-horizon build target after a synergy activates.
-- The death/victory screen reports only score, rank, kills, and survival time. It does not yet tell the story of the build or give the player a saved target to beat.
-- Audio remains the biggest missing sensory layer. The visuals now have enough state changes to drive a good Web Audio event system without needing asset files.
-- Balance needs measured playtests at the new 15-minute length: time-to-death, rank curve, kill count, damage taken sources, and common winning shard clusters.
+- Upgrade choices now have skip, reroll, passives, and the first evolution offer. The remaining economy work is to add the planned level-6 capstones and only add banish/lock if playtests show persistent bad-offer frustration.
+- The death/victory screen now tells the build story and saves local best runs. The remaining replay work is optional endless mode and any meta-progression, both gated behind balance confidence.
+- Procedural audio is shipped. Future audio work should be tuning and new event voices for new mechanics, not a new asset pipeline.
+- Balance now needs measured playtests at the full 15-minute length: time-to-death, rank curve, kill count, damage sources, shard pick order, synergy/evolution timing, entity pressure, and common winning shard clusters.
 - Older docs still contain useful designs, but some status tables are stale. Treat `docs/ENEMY_WAVE_DESIGN.md` as a boss/enemy idea bank and `docs/GENRE_GAP_ANALYSIS.md` as historical context.
 
 ## Senior Game-Dev Direction
@@ -42,10 +42,13 @@ Design principles for the next passes:
 Immediate senior-dev execution sequence:
 
 1. ✅ Make radiance gems visually unmistakable as pickups.
-2. ✅ Add debug run summaries for balance evidence.
+2. ✅ Add basic debug run summaries for balance evidence.
 3. ✅ Improve Sentinel shield feedback and add one explicit attack pattern.
-4. Extract boss/wave/progression modules from `game.rs` before Hydra.
+4. ✅ Ship Hydra and Void Prism before deeper extraction work.
 5. ✅ Add procedural audio for beams, pickups, shield cracks, rank-up, boss warnings, death, and victory.
+6. ✅ Add high-granularity telemetry before heavy balance tuning.
+7. Add the remaining level-6 evolutions as the next major gameplay content.
+8. Extract boss/wave/progression modules from `game.rs` once telemetry and capstones stop changing those surfaces every pass.
 
 ## Slice 1: Boss Milestones
 
@@ -82,6 +85,11 @@ Goal: make the run feel like a beginning, middle, and finale rather than one con
 - ✅ Pulls all enemies inward, emits expanding player-damaging shockwave rings at intervals.
 - ✅ Phase 2 (≤ 50% HP): faster movement, shorter shockwave interval, larger rings.
 - ✅ Killing it ends the run immediately with a victory; surviving to 15:00 also grants victory.
+
+### 1.5 Boss Damage Policy
+
+- ✅ Beam-like primary and secondary effects, including Diffract and Cascade, respect Sentinel shields and can trigger shield-break feedback.
+- ✅ Aura/field effects such as Halo, Barrier contact, and Interference intentionally bypass Sentinel shields because they reward risky positioning rather than aim angle.
 
 ## Slice 2: Upgrade Economy
 
@@ -153,18 +161,19 @@ Goal: make every run leave a footprint.
 
 ## Slice 5: Playtest Telemetry And Balance
 
-Status: partial; a console run summary exists, but high-granularity balance telemetry is still needed before heavy tuning.
+Status: in progress; high-granularity run summary telemetry is implemented, and balance playtests are next.
 
 Goal: tune from run evidence, not vibes.
 
 - ✅ Add a debug run summary export to console with seed, outcome, duration, score, rank/peak rank, total kills, boss kills, enemy kills by kind, damage totals, gems collected, active synergies/evolutions, and final shard levels.
-- Add high-granularity telemetry:
-  - death cause
-  - rank timeline
-  - damage taken by source
-  - shard pick order
-  - active synergy times
-  - max enemies/circles/beams observed
+- ✅ Add high-granularity telemetry:
+  - ✅ death cause
+  - ✅ rank timeline
+  - ✅ damage taken by source
+  - ✅ shard pick order
+  - ✅ skip/reroll counts
+  - ✅ active synergy times
+  - ✅ max enemies/circles/beams observed
 - Run three baseline 15-minute playtests:
   - no rerolls, normal input
   - aggressive close-range build
@@ -188,13 +197,14 @@ Status: opportunistic, but do before public sharing.
 
 ## Near-Term Order
 
-1. Play one 15-minute run and record how the 5:00 Sentinel changes the run texture.
-2. Add debug run summary output so balance changes have evidence.
-3. Tune Sentinel HP, shield HP, add cadence, and late-wave pressure from two or three full runs.
-4. Decide between 10:00 Hydra and upgrade-economy work based on the playtest:
-   - If the run still feels flat, build Hydra next.
-   - If choices feel stale before 10:00, build skip/reroll and first evolutions next.
-5. Add the Web Audio event system before polish work; it will make every later feature easier to evaluate.
+1. Play three baseline 15-minute runs using the exported telemetry:
+   - normal input, no forced build
+   - aggressive close-range Halo/Barrier/Siphon path
+   - runaway beam Split/Mirror/Cascade path
+2. Tune boss HP, shield/lobe HP, projectile cadence, and late-wave pressure from those runs.
+3. Add the remaining planned level-6 evolutions, one or two per pass, with each evolution creating a distinct build identity.
+4. Do technical hardening before public sharing: context loss/restore, Worker security headers, deterministic smoke tests, and selective `game.rs` extraction.
+5. Add endless mode only after the 15-minute arc and capstone economy feel stable.
 
 ## Done / Completed
 

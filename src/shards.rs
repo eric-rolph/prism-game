@@ -206,8 +206,12 @@ impl Inventory {
             ShardKind::PrismHeart,
         ];
         let rare_shards = [
-            ShardKind::Refract, ShardKind::Diffract, ShardKind::Echo,
-            ShardKind::Halo, ShardKind::Thorns, ShardKind::PhaseStep,
+            ShardKind::Refract,
+            ShardKind::Diffract,
+            ShardKind::Echo,
+            ShardKind::Halo,
+            ShardKind::Thorns,
+            ShardKind::PhaseStep,
         ];
         let legendary_shards = [ShardKind::Cascade, ShardKind::Interference];
         let luck = self.levels[ShardKind::Luck as usize];
@@ -285,7 +289,10 @@ impl Inventory {
                 let mut pick = active.len() - 1;
                 for (i, (_, w)) in active.iter().enumerate() {
                     roll -= w;
-                    if roll <= 0.0 { pick = i; break; }
+                    if roll <= 0.0 {
+                        pick = i;
+                        break;
+                    }
                 }
                 result[0] = Some(active[pick].0);
             }
@@ -332,6 +339,7 @@ impl Inventory {
 /// Canonical synergy table: (shard_a, shard_b, name). Bit i in
 /// `active_synergy_bits` / `near_synergy_bits` corresponds to entry i here.
 /// Must stay in index-lock with SYNERGY_NAMES in web/src/main.ts.
+pub const SYNERGY_COUNT: usize = 11;
 pub const SYNERGIES: &[(ShardKind, ShardKind, &'static str)] = &[
     (ShardKind::Split, ShardKind::Cascade, "CHAIN REACTION"),
     (ShardKind::Split, ShardKind::Frost, "BLIZZARD"),
