@@ -75,6 +75,6 @@ prism/
 3. ✅ Shard system — 16 operators, level-up picker, rarity tags, active/near synergy HUD
 4. ✅ Survival structure — 15-minute session, wave pressure, enemy roles, XP gems, dash, death/victory screens
 5. ✅ Boss milestones — Sentinel, Hydra, and Void Prism shipped
-6. Upgrade economy — skip/reroll, passive shards, level-6 evolutions
-7. Procedural audio — Web Audio event voices for beams, gems, rank-ups, synergies, bosses, victory/death
-8. Run goals — post-run stats and local high scores shipped; optional endless mode next
+6. Upgrade economy — skip/reroll/passives shipped; first level-6 evolution shipped
+7. ✅ Procedural audio — Web Audio event voices for beams, gems, rank-ups, synergies, bosses, victory/death
+8. ✅ Run goals — post-run stats and local high scores shipped; optional endless mode later

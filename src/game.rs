@@ -9,7 +9,7 @@ use crate::entities::{
     InterferencePulse, Particle, Player, Projectile, VoidShockwave, XpGem,
 };
 use crate::math::Rng;
-use crate::shards::{compose_salvo, BeamRequest, Inventory, ShardKind};
+use crate::shards::{compose_salvo, BeamRequest, EvolutionKind, Inventory, ShardKind, UpgradeOffer};
 use crate::{BeamInstance, CircleInstance};
 use glam::{Vec2, Vec3};
 
@@ -31,6 +31,7 @@ pub struct Game {
 
     input: Vec2,
     dash_input: bool,
+    seed: u32,
     rng: Rng,
 
     fire_timer: f32,
@@ -50,11 +51,12 @@ pub struct Game {
     kills_total: u32,
 
     pending_echoes: Vec<f32>,
+    pending_afterimages: Vec<(f32, Vec2)>,
     interference_timer: f32,
 
     // Level-up modal state.
     leveling_up: bool,
-    level_choices: [Option<ShardKind>; 3],
+    level_choices: [Option<UpgradeOffer>; 3],
     reroll_charges: u32,
 
     // Death / game-over state.
@@ -430,6 +432,8 @@ const THORNS_BEAM_THICKNESS: f32 = 2.0;
 const THORNS_BEAM_LIFETIME: f32 = 0.12;
 
 const ECHO_DELAY: f32 = 0.08;
+const AFTERIMAGE_ENGINE_DELAYS: [f32; 2] = [0.06, 0.16];
+const AFTERIMAGE_ENGINE_PARTICLES: u32 = 14;
 const MAGNET_RADIUS_PER_LEVEL: f32 = 45.0;
 const MAGNET_SPEED_PER_LEVEL: f32 = 70.0;
 const MOMENTUM_SPEED_PER_LEVEL: f32 = 0.05;
@@ -504,6 +508,7 @@ impl Game {
             boss: None,
             input: Vec2::ZERO,
             dash_input: false,
+            seed,
             rng: Rng::new(seed),
             fire_timer: 0.0,
             camera: Vec2::ZERO,
@@ -517,6 +522,7 @@ impl Game {
             rank: 0,
             kills_total: 0,
             pending_echoes: Vec::new(),
+            pending_afterimages: Vec::new(),
             interference_timer: 0.0,
             leveling_up: false,
             level_choices: [None; 3],
@@ -640,6 +646,9 @@ impl Game {
     pub fn kills_total(&self) -> u32 {
         self.kills_total
     }
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
     pub fn is_leveling_up(&self) -> bool {
         self.leveling_up
     }
@@ -687,12 +696,26 @@ impl Game {
     pub fn near_synergy_bits(&self) -> u32 {
         self.inventory.near_synergy_bits()
     }
+    pub fn active_evolution_bits(&self) -> u32 {
+        self.inventory.active_evolution_bits()
+    }
+    pub fn level_choice_type(&self, slot: u8) -> i32 {
+        if (slot as usize) >= 3 {
+            return -1;
+        }
+        match self.level_choices[slot as usize] {
+            Some(UpgradeOffer::Shard(_)) => 0,
+            Some(UpgradeOffer::Evolution(_)) => 1,
+            None => -1,
+        }
+    }
     pub fn level_choice(&self, slot: u8) -> i32 {
         if (slot as usize) >= 3 {
             return -1;
         }
         match self.level_choices[slot as usize] {
-            Some(k) => k as i32,
+            Some(UpgradeOffer::Shard(k)) => k as i32,
+            Some(UpgradeOffer::Evolution(e)) => e as i32,
             None => -1,
         }
     }
@@ -701,20 +724,30 @@ impl Game {
         if !self.leveling_up || (slot as usize) >= 3 {
             return;
         }
-        if let Some(kind) = self.level_choices[slot as usize] {
-            self.inventory.upgrade(kind);
-            if kind == ShardKind::Halo {
-                self.rebuild_halos();
-            }
-            if kind == ShardKind::Barrier {
-                self.player.barrier_max =
-                    BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
-                self.player.barrier_hp = (self.player.barrier_hp + self.player.barrier_max * 0.5)
-                    .min(self.player.barrier_max);
-            }
-            if kind == ShardKind::PrismHeart {
-                self.player.max_hp += PRISM_HEART_HP_PER_LEVEL;
-                self.player.hp = (self.player.hp + PRISM_HEART_HP_PER_LEVEL).min(self.player.max_hp);
+        if let Some(offer) = self.level_choices[slot as usize] {
+            match offer {
+                UpgradeOffer::Shard(kind) => {
+                    self.inventory.upgrade(kind);
+                    if kind == ShardKind::Halo {
+                        self.rebuild_halos();
+                    }
+                    if kind == ShardKind::Barrier {
+                        self.player.barrier_max =
+                            BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
+                        self.player.barrier_hp =
+                            (self.player.barrier_hp + self.player.barrier_max * 0.5)
+                                .min(self.player.barrier_max);
+                    }
+                    if kind == ShardKind::PrismHeart {
+                        self.player.max_hp += PRISM_HEART_HP_PER_LEVEL;
+                        self.player.hp =
+                            (self.player.hp + PRISM_HEART_HP_PER_LEVEL).min(self.player.max_hp);
+                    }
+                }
+                UpgradeOffer::Evolution(evolution) => {
+                    self.inventory.unlock_evolution(evolution);
+                    self.spawn_evolution_particles(evolution);
+                }
             }
             self.leveling_up = false;
             self.level_choices = [None; 3];
@@ -733,6 +766,7 @@ impl Game {
         let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
         let heal = 6.0 * (1.0 + prism_heart * PRISM_HEART_HEAL_MULT_PER_LEVEL);
         self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
+        self.check_for_level_up();
     }
 
     pub fn reroll_level_up(&mut self) {
@@ -823,6 +857,22 @@ impl Game {
                         max_life: 0.32,
                         color: [0.55, 1.0, 0.85],
                         size: self.rng.range(2.5, 5.0),
+                    });
+                }
+            }
+            if self.inventory.has_evolution(EvolutionKind::AfterimageEngine) {
+                for delay in AFTERIMAGE_ENGINE_DELAYS {
+                    self.pending_afterimages.push((self.time + delay, dash_start_pos));
+                }
+                for _ in 0..AFTERIMAGE_ENGINE_PARTICLES {
+                    let a = self.rng.angle();
+                    self.particles.push(Particle {
+                        pos: dash_start_pos,
+                        vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(45.0, 150.0),
+                        life: 0.0,
+                        max_life: 0.42,
+                        color: [1.0, 0.72, 0.36],
+                        size: self.rng.range(3.0, 6.5),
                     });
                 }
             }
@@ -1236,7 +1286,18 @@ impl Game {
                 } else {
                     None
                 };
-                self.fire_primary_inner(false, echo_target);
+                self.fire_primary_inner(false, echo_target, None);
+            } else {
+                i += 1;
+            }
+        }
+
+        let mut i = 0;
+        while i < self.pending_afterimages.len() {
+            if self.pending_afterimages[i].0 <= now {
+                let (_, origin) = self.pending_afterimages.swap_remove(i);
+                let target = self.find_nearest_enemy_pos_from(origin);
+                self.fire_primary_inner(false, target, Some(origin));
             } else {
                 i += 1;
             }
@@ -2070,11 +2131,17 @@ impl Game {
     // --- Firing ---------------------------------------------------------
 
     fn fire_primary(&mut self) -> bool {
-        self.fire_primary_inner(true, None)
+        self.fire_primary_inner(true, None, None)
     }
 
-    fn fire_primary_inner(&mut self, schedule_echo: bool, target_override: Option<Vec2>) -> bool {
-        let target = match target_override.or_else(|| self.find_nearest_enemy_pos()) {
+    fn fire_primary_inner(
+        &mut self,
+        schedule_echo: bool,
+        target_override: Option<Vec2>,
+        origin_override: Option<Vec2>,
+    ) -> bool {
+        let origin = origin_override.unwrap_or(self.player.pos);
+        let target = match target_override.or_else(|| self.find_nearest_enemy_pos_from(origin)) {
             Some(t) => t,
             None => return false,
         };
@@ -2083,7 +2150,7 @@ impl Game {
             .iter()
             .cloned()
             .map(|mut e| {
-                e.pos = nearest_globe_pos(self.player.pos, e.pos);
+                e.pos = nearest_globe_pos(origin, e.pos);
                 e
             })
             .collect();
@@ -2092,7 +2159,7 @@ impl Game {
                 match boss.kind {
                     BossKind::Sentinel => {
                         local_enemies.push(Enemy {
-                            pos: nearest_globe_pos(self.player.pos, boss.pos),
+                            pos: nearest_globe_pos(origin, boss.pos),
                             radius: boss.radius,
                             hp: boss.hp,
                             speed: 0.0,
@@ -2112,7 +2179,7 @@ impl Game {
                             if boss.lobe_alive[i] {
                                 let lp = Self::hydra_lobe_pos(boss, i);
                                 local_enemies.push(Enemy {
-                                    pos: nearest_globe_pos(self.player.pos, lp),
+                                    pos: nearest_globe_pos(origin, lp),
                                     radius: HYDRA_LOBE_RADIUS,
                                     hp: boss.lobe_hp[i],
                                     speed: 0.0,
@@ -2131,7 +2198,7 @@ impl Game {
                     }
                     BossKind::VoidPrism => {
                         local_enemies.push(Enemy {
-                            pos: nearest_globe_pos(self.player.pos, boss.pos),
+                            pos: nearest_globe_pos(origin, boss.pos),
                             radius: boss.radius,
                             hp: boss.hp,
                             speed: 0.0,
@@ -2149,7 +2216,7 @@ impl Game {
                 }
             }
         }
-        let salvo = compose_salvo(self.player.pos, target, &local_enemies, &self.inventory);
+        let salvo = compose_salvo(origin, target, &local_enemies, &self.inventory);
         if salvo.is_empty() {
             return false;
         }
@@ -2171,11 +2238,11 @@ impl Game {
                 damage: base.damage * PRISM_CANNON_DAMAGE_MULT,
                 color: [1.0, 1.0, 1.0],
             };
-            self.fire_beam(core);
+            self.fire_beam(core, origin);
         }
 
         for req in &salvo {
-            self.fire_beam(req.clone());
+            self.fire_beam(req.clone(), origin);
         }
 
         // Echo: queue L delayed salvos (only from primary fire, not from echoes).
@@ -2191,13 +2258,13 @@ impl Game {
         true
     }
 
-    fn fire_beam(&mut self, req: BeamRequest) {
+    fn fire_beam(&mut self, req: BeamRequest, origin: Vec2) {
         let diffract = self.inventory.level(ShardKind::Diffract);
         let siphon = self.inventory.level(ShardKind::Siphon);
         let frost = self.inventory.level(ShardKind::Frost);
         let mut impacts: Vec<Vec2> = Vec::new();
         let mut hit_count: u32 = 0;
-        let (start, end) = tangent_segment_on_globe(self.player.pos, req.start, req.end);
+        let (start, end) = tangent_segment_on_globe(origin, req.start, req.end);
 
         // Synergy: BLIZZARD (Split+Frost 3+) — frozen enemies take +40% damage.
         let blizzard = self
@@ -2478,6 +2545,24 @@ impl Game {
                 self.leveling_up = true;
                 break;
             }
+        }
+    }
+
+    fn spawn_evolution_particles(&mut self, evolution: EvolutionKind) {
+        let color = match evolution {
+            EvolutionKind::AfterimageEngine => [1.0, 0.72, 0.36],
+        };
+        self.shake_amount += 4.0;
+        for _ in 0..32 {
+            let a = self.rng.angle();
+            self.particles.push(Particle {
+                pos: self.player.pos,
+                vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(60.0, 220.0),
+                life: 0.0,
+                max_life: self.rng.range(0.35, 0.9),
+                color,
+                size: self.rng.range(2.5, 7.0),
+            });
         }
     }
 
@@ -2876,13 +2961,13 @@ impl Game {
         weighted_pick(&pool, &mut self.rng).unwrap_or(EnemyKind::Drone)
     }
 
-    fn find_nearest_enemy_pos(&self) -> Option<Vec2> {
+    fn find_nearest_enemy_pos_from(&self, origin: Vec2) -> Option<Vec2> {
         let nearest_enemy = self
             .enemies
             .iter()
             .map(|e| {
-                let delta = nearest_globe_delta(self.player.pos, e.pos);
-                (self.player.pos + delta, delta.length_squared())
+                let delta = nearest_globe_delta(origin, e.pos);
+                (origin + delta, delta.length_squared())
             })
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(p, d)| (p, d));
@@ -2891,8 +2976,8 @@ impl Game {
             if b.state != BossState::Active {
                 return None;
             }
-            let delta = nearest_globe_delta(self.player.pos, b.pos);
-            Some((self.player.pos + delta, delta.length_squared()))
+            let delta = nearest_globe_delta(origin, b.pos);
+            Some((origin + delta, delta.length_squared()))
         });
 
         match (nearest_enemy, nearest_boss) {

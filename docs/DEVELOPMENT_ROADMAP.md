@@ -85,7 +85,7 @@ Goal: make the run feel like a beginning, middle, and finale rather than one con
 
 ## Slice 2: Upgrade Economy
 
-Status: in progress.
+Status: in progress; skip/reroll, passive shards, and the first level-6 evolution are implemented.
 
 Goal: give level-ups short-term tactics and long-term build planning.
 
@@ -97,7 +97,8 @@ Goal: give level-ups short-term tactics and long-term build planning.
   - ✅ Luck: boosts rare shard weight ×0.25/level and legendary ×0.50/level in rolls.
   - ✅ Prism Heart: +15 max HP per level (instant heal on pick); level-up heals 10% more per level.
   - ✅ Phase Step: +0.18s dash i-frames per level; L3+: particle afterimage on dash start.
-- Add evolution offers: when two linked shards reach level 6, the next level-up can offer a named super-shard instead of another normal upgrade.
+- ✅ Add evolution-offer plumbing: when a linked pair reaches level 6, level-up can offer a named super-shard instead of another normal upgrade.
+- Add the remaining planned level-6 evolutions.
 - Keep active synergies at level 3; evolutions are the level-6 “capstone” layer, not a replacement for synergies.
 
 Candidate evolutions:
@@ -106,7 +107,7 @@ Candidate evolutions:
 - Whiteout: Frost 6 + Diffract 6; kills emit freezing starbursts and longer frost fields.
 - Singularity: Magnet 6 + Interference 6; pulse rings become stronger gravity wells with a dark center.
 - Solar Crown: Halo 6 + Barrier 6; orbitals reinforce the shield and flare on contact.
-- Afterimage Engine: Echo 6 + Momentum 6; dash leaves a temporary firing echo.
+- ✅ Afterimage Engine: Echo 6 + Momentum 6; dash leaves a temporary firing echo.
 
 ## Slice 3: Audio Event System
 
@@ -156,9 +157,8 @@ Status: partial; a console run summary exists, but high-granularity balance tele
 
 Goal: tune from run evidence, not vibes.
 
-- ✅ Add a debug run summary export to console with outcome, duration, score, rank/peak rank, total kills, boss kills, enemy kills by kind, damage totals, gems collected, active synergies, and final shard levels.
+- ✅ Add a debug run summary export to console with seed, outcome, duration, score, rank/peak rank, total kills, boss kills, enemy kills by kind, damage totals, gems collected, active synergies/evolutions, and final shard levels.
 - Add high-granularity telemetry:
-  - seed
   - death cause
   - rank timeline
   - damage taken by source

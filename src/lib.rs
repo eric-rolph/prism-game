@@ -107,11 +107,19 @@ impl Game {
     pub fn kills_total(&self) -> u32 {
         self.inner.kills_total()
     }
+    pub fn seed(&self) -> u32 {
+        self.inner.seed()
+    }
     pub fn is_leveling_up(&self) -> bool {
         self.inner.is_leveling_up()
     }
 
-    /// Shard kind index (0..16) for the given choice slot (0..3), or -1 if empty.
+    /// Offer type for the given choice slot: 0 = shard, 1 = evolution, -1 = empty.
+    pub fn level_choice_type(&self, slot: u8) -> i32 {
+        self.inner.level_choice_type(slot)
+    }
+
+    /// Offer index for the given choice slot, or -1 if empty.
     pub fn level_choice(&self, slot: u8) -> i32 {
         self.inner.level_choice(slot)
     }
@@ -127,6 +135,9 @@ impl Game {
     /// Bitmask: bit i set if SYNERGIES[i] is near-active (one shard ≥ 3, the other ≥ 1).
     pub fn near_synergy_bits(&self) -> u32 {
         self.inner.near_synergy_bits()
+    }
+    pub fn active_evolution_bits(&self) -> u32 {
+        self.inner.active_evolution_bits()
     }
 
     /// Commit a level-up choice by slot (0..3). No-op outside of a pause.

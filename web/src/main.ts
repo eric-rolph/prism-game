@@ -21,8 +21,9 @@ const SYNERGY_NAMES: string[] = [
 const BOSS_NAMES: string[] = ['PRISM SENTINEL', 'HYDRA', 'VOID PRISM'];
 
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
-type Rarity = 'common' | 'rare' | 'legendary';
+type Rarity = 'common' | 'rare' | 'legendary' | 'evolution';
 interface ShardMeta { name: string; color: string; desc: string; synergies: string[]; rarity: Rarity }
+interface EvolutionMeta { name: string; color: string; desc: string; recipe: string }
 const SHARDS: ShardMeta[] = [
   { name: 'SPLIT',        color: '#8effa3', rarity: 'common',    desc: 'fan out more beams per volley',        synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
   { name: 'REFRACT',      color: '#7fd3ff', rarity: 'rare',      desc: 'beams curve toward nearest enemy',     synergies: ['ECHO → TRACKING ECHO'] },
@@ -46,6 +47,16 @@ const SHARDS: ShardMeta[] = [
   { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: 'dash grants longer i-frames; L3: afterimage', synergies: [] },
 ];
 
+// Must stay in index-lock with Rust's EvolutionKind enum (src/shards.rs).
+const EVOLUTIONS: EvolutionMeta[] = [
+  {
+    name: 'AFTERIMAGE ENGINE',
+    color: '#ffb547',
+    desc: 'dashing leaves firing echoes at your old position',
+    recipe: 'ECHO 6 + MOMENTUM 6',
+  },
+];
+
 type RunOutcome = 'VICTORY' | 'DEATH';
 
 interface StoredShard {
@@ -57,6 +68,7 @@ interface StoredRunSummary {
   version: 1;
   savedAt: string;
   outcome: RunOutcome;
+  seed?: number;
   score: number;
   timeSeconds: number;
   rank: number;
@@ -67,6 +79,7 @@ interface StoredRunSummary {
   barrierAbsorbed: number;
   gems: number;
   synergies: string[];
+  evolutions?: string[];
   topShards: StoredShard[];
 }
 
@@ -103,6 +116,7 @@ const isStoredRunSummary = (value: unknown): value is StoredRunSummary => {
   return run.version === 1 &&
     (run.outcome === 'VICTORY' || run.outcome === 'DEATH') &&
     typeof run.savedAt === 'string' &&
+    (run.seed === undefined || typeof run.seed === 'number') &&
     typeof run.score === 'number' &&
     typeof run.timeSeconds === 'number' &&
     typeof run.rank === 'number' &&
@@ -114,6 +128,8 @@ const isStoredRunSummary = (value: unknown): value is StoredRunSummary => {
     typeof run.gems === 'number' &&
     Array.isArray(run.synergies) &&
     run.synergies.every((s) => typeof s === 'string') &&
+    (run.evolutions === undefined ||
+      (Array.isArray(run.evolutions) && run.evolutions.every((s) => typeof s === 'string'))) &&
     Array.isArray(run.topShards) &&
     run.topShards.every(isStoredShard);
 };
@@ -138,30 +154,37 @@ const readStoredRuns = (): StoredRunSummary[] => {
   }
 };
 
-const writeStoredRuns = (runs: StoredRunSummary[]): void => {
+const writeStoredRuns = (runs: StoredRunSummary[]): boolean => {
   try {
     window.localStorage.setItem(BEST_RUNS_STORAGE_KEY, JSON.stringify(runs));
+    return true;
   } catch {
     // Private browsing and full storage can reject localStorage writes.
+    return false;
   }
 };
 
-const saveRunSummary = (summary: StoredRunSummary): { runs: StoredRunSummary[]; isNewBest: boolean } => {
+const saveRunSummary = (summary: StoredRunSummary): {
+  runs: StoredRunSummary[];
+  isNewBest: boolean;
+  storageOk: boolean;
+} => {
   const previousRuns = readStoredRuns();
   const previousBest = previousRuns[0];
   const isNewBest = !previousBest || compareRuns(summary, previousBest) < 0;
   const runs = [...previousRuns, summary].sort(compareRuns).slice(0, MAX_STORED_RUNS);
-  writeStoredRuns(runs);
-  return { runs, isNewBest };
+  const storageOk = writeStoredRuns(runs);
+  return { runs, isNewBest, storageOk };
 };
 
 const renderBestRuns = (
   runs: StoredRunSummary[],
   currentSavedAt: string,
   isNewBest: boolean,
+  storageOk: boolean,
 ): string => {
   if (runs.length === 0) return '';
-  const lines = runs.slice(0, 3).map((run, idx) => {
+  const lines = runs.map((run, idx) => {
     const currentClass = run.savedAt === currentSavedAt ? ' current-run' : '';
     const shardText = run.topShards.length > 0
       ? ` / ${run.topShards.slice(0, 2).map((s) => `${escapeHtml(s.name)} ${s.level}`).join(', ')}`
@@ -173,6 +196,7 @@ const renderBestRuns = (
   return `<div class="best-run-panel">` +
     `<div class="best-run-title">${isNewBest ? 'NEW BEST' : 'LOCAL BEST'}</div>` +
     lines +
+    (storageOk ? '' : `<div class="best-run-line">storage unavailable this session</div>`) +
     `</div>`;
 };
 
@@ -378,31 +402,47 @@ async function main(): Promise<void> {
     levelupCardsEl.innerHTML = '';
 
     for (let slot = 0; slot < 3; slot++) {
-      const kindIdx = game.level_choice(slot);
-      if (kindIdx < 0 || kindIdx >= SHARDS.length) continue;
-      const meta = SHARDS[kindIdx]!;
-      const currentLevel = game.inventory_level(kindIdx);
-      const nextLevel = currentLevel + 1;
+      const offerType = game.level_choice_type(slot);
+      const offerIdx = game.level_choice(slot);
+      if (offerType < 0 || offerIdx < 0) continue;
 
       const card = document.createElement('button');
       card.className = 'shard-card';
       card.type = 'button';
-      if (meta.rarity === 'rare') card.style.borderColor = 'rgba(127,211,255,0.3)';
-      if (meta.rarity === 'legendary') card.style.borderColor = 'rgba(255,215,64,0.4)';
+      if (offerType === 1) {
+        if (offerIdx >= EVOLUTIONS.length) continue;
+        const meta = EVOLUTIONS[offerIdx]!;
+        card.style.borderColor = 'rgba(255,181,71,0.5)';
+        card.style.boxShadow = '0 0 24px rgba(255,181,71,0.12)';
+        card.innerHTML =
+          `<div class="shard-rarity evolution">evolution</div>` +
+          `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
+          `<div class="shard-name">${meta.name}</div>` +
+          `<div class="shard-level">${meta.recipe}</div>` +
+          `<div class="shard-desc">${meta.desc}</div>` +
+          `<div class="shard-hotkey">${slot + 1}</div>`;
+      } else {
+        if (offerIdx >= SHARDS.length) continue;
+        const meta = SHARDS[offerIdx]!;
+        const currentLevel = game.inventory_level(offerIdx);
+        const nextLevel = currentLevel + 1;
+        if (meta.rarity === 'rare') card.style.borderColor = 'rgba(127,211,255,0.3)';
+        if (meta.rarity === 'legendary') card.style.borderColor = 'rgba(255,215,64,0.4)';
 
-      let synergyHtml = '';
-      if (meta.synergies.length > 0) {
-        synergyHtml = `<div class="shard-synergy">${meta.synergies.map(s => `<span>⚡ ${s}</span>`).join('')}</div>`;
+        let synergyHtml = '';
+        if (meta.synergies.length > 0) {
+          synergyHtml = `<div class="shard-synergy">${meta.synergies.map(s => `<span>⚡ ${s}</span>`).join('')}</div>`;
+        }
+
+        card.innerHTML =
+          `<div class="shard-rarity ${meta.rarity}">${meta.rarity}</div>` +
+          `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
+          `<div class="shard-name">${meta.name}</div>` +
+          `<div class="shard-level">LVL ${currentLevel} → ${nextLevel}</div>` +
+          `<div class="shard-desc">${meta.desc}</div>` +
+          synergyHtml +
+          `<div class="shard-hotkey">${slot + 1}</div>`;
       }
-
-      card.innerHTML =
-        `<div class="shard-rarity ${meta.rarity}">${meta.rarity}</div>` +
-        `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
-        `<div class="shard-name">${meta.name}</div>` +
-        `<div class="shard-level">LVL ${currentLevel} → ${nextLevel}</div>` +
-        `<div class="shard-desc">${meta.desc}</div>` +
-        synergyHtml +
-        `<div class="shard-hotkey">${slot + 1}</div>`;
       card.addEventListener('click', () => { game.select_shard(slot); });
       levelupCardsEl.appendChild(card);
     }
@@ -485,6 +525,9 @@ async function main(): Promise<void> {
     const gems = game.gems_collected();
     const bossKills = game.boss_kills_count();
     const activeSynergies = SYNERGY_NAMES.filter((_, i) => ((game.active_synergy_bits() >>> i) & 1) === 1);
+    const activeEvolutions = EVOLUTIONS
+      .filter((_, i) => ((game.active_evolution_bits() >>> i) & 1) === 1)
+      .map((e) => e.name);
     const topShards: StoredShard[] = SHARDS.map((s, i) => ({
       name: s.name,
       level: game.inventory_level(i),
@@ -496,6 +539,7 @@ async function main(): Promise<void> {
       version: 1,
       savedAt: new Date().toISOString(),
       outcome: victory ? 'VICTORY' : 'DEATH',
+      seed: game.seed(),
       score: game.score(),
       timeSeconds: Math.floor(t),
       rank: game.rank(),
@@ -506,9 +550,10 @@ async function main(): Promise<void> {
       barrierAbsorbed: barrierAbs,
       gems,
       synergies: activeSynergies,
+      evolutions: activeEvolutions,
       topShards,
     };
-    const { runs, isNewBest } = saveRunSummary(summary);
+    const { runs, isNewBest, storageOk } = saveRunSummary(summary);
     const shardSummary = SHARDS.map((s, i) => {
       const lvl = game.inventory_level(i);
       return lvl > 0 ? `<span style="color:${s.color}">${s.name} ${lvl}</span>` : null;
@@ -516,13 +561,17 @@ async function main(): Promise<void> {
     const synergySummary = activeSynergies.length > 0
       ? `<br>SYNERGIES ${activeSynergies.map(escapeHtml).join(' / ')}`
       : '';
+    const evolutionSummary = activeEvolutions.length > 0
+      ? `<br>EVOLUTIONS ${activeEvolutions.map(escapeHtml).join(' / ')}`
+      : '';
     deathStatsEl.innerHTML =
       `RANK ${game.rank()}  /  PEAK ${game.peak_rank()}<br>` +
       `${game.kills_total()} KILLS  /  ${timeStr} SURVIVED<br>` +
       `${dmgTaken} DMG TAKEN  /  ${barrierAbs} ABSORBED<br>` +
       `${gems} GEMS  /  ${bossKills} BOSSES` +
       synergySummary +
-      renderBestRuns(runs, summary.savedAt, isNewBest) +
+      evolutionSummary +
+      renderBestRuns(runs, summary.savedAt, isNewBest, storageOk) +
       (shardSummary ? `<br><br>${shardSummary}` : '');
     deathScreenEl.classList.add('shown');
     deathShown = true;
@@ -536,11 +585,13 @@ async function main(): Promise<void> {
     }).filter(Boolean).join(', ');
     console.log(
       `[PRISM RUN SUMMARY]\n` +
+      `  seed: ${game.seed()}\n` +
       `  outcome: ${victory ? 'VICTORY' : 'DEATH'}  |  time: ${timeStr}  |  score: ${game.score()}\n` +
       `  rank: ${game.rank()} (peak ${game.peak_rank()})  |  kills: ${game.kills_total()}  |  bosses: ${bossKills}\n` +
       `  dmg taken: ${dmgTaken}  |  barrier absorbed: ${barrierAbs}  |  gems: ${gems}\n` +
       `  kills by kind: ${killsByKind}\n` +
       `  synergies: ${activeSynergies.join(', ') || 'none'}\n` +
+      `  evolutions: ${activeEvolutions.join(', ') || 'none'}\n` +
       `  shards: ${shardSummaryText || 'none'}`
     );
   };
@@ -566,6 +617,7 @@ async function main(): Promise<void> {
   const doRestart = (): void => {
     if (!deathShown) return;
     game.restart();
+    input.clearKeys();
     hideDeathScreen();
   };
 

@@ -1,4 +1,4 @@
-//! Shard system: the 14 light-operator upgrades the player collects.
+//! Shard system: the light-operator upgrades the player collects.
 //!
 //! Shards fall into five trigger categories:
 //!  - Fire-time modifiers (Split, Refract, Mirror, Chromatic, Lens) — the
@@ -42,6 +42,32 @@ pub enum ShardKind {
 pub const SHARD_COUNT: usize = 20;
 pub const MAX_SHARD_LEVEL: u8 = 6;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EvolutionKind {
+    AfterimageEngine = 0,
+}
+
+pub const EVOLUTION_COUNT: usize = 1;
+
+impl EvolutionKind {
+    pub fn from_index(i: u8) -> Option<Self> {
+        match i {
+            0 => Some(Self::AfterimageEngine),
+            _ => None,
+        }
+    }
+
+    pub fn as_index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum UpgradeOffer {
+    Shard(ShardKind),
+    Evolution(EvolutionKind),
+}
+
 impl ShardKind {
     pub fn from_index(i: u8) -> Option<Self> {
         match i {
@@ -77,6 +103,7 @@ impl ShardKind {
 #[derive(Default, Clone)]
 pub struct Inventory {
     pub levels: [u8; SHARD_COUNT],
+    pub evolutions: [bool; EVOLUTION_COUNT],
 }
 
 impl Inventory {
@@ -98,11 +125,78 @@ impl Inventory {
         self.levels[kind.as_index()] >= MAX_SHARD_LEVEL
     }
 
+    pub fn has_evolution(&self, evolution: EvolutionKind) -> bool {
+        self.evolutions[evolution.as_index()]
+    }
+
+    pub fn unlock_evolution(&mut self, evolution: EvolutionKind) -> bool {
+        let i = evolution.as_index();
+        if self.evolutions[i] {
+            false
+        } else {
+            self.evolutions[i] = true;
+            true
+        }
+    }
+
+    pub fn active_evolution_bits(&self) -> u32 {
+        let mut bits = 0u32;
+        for (i, unlocked) in self.evolutions.iter().enumerate() {
+            if *unlocked {
+                bits |= 1 << i;
+            }
+        }
+        bits
+    }
+
+    pub fn evolution_ready(&self, evolution: EvolutionKind) -> bool {
+        if self.has_evolution(evolution) {
+            return false;
+        }
+        match evolution {
+            EvolutionKind::AfterimageEngine => {
+                self.is_maxed(ShardKind::Echo) && self.is_maxed(ShardKind::Momentum)
+            }
+        }
+    }
+
+    fn available_evolutions(&self) -> Vec<EvolutionKind> {
+        (0..EVOLUTION_COUNT as u8)
+            .filter_map(EvolutionKind::from_index)
+            .filter(|e| self.evolution_ready(*e))
+            .collect()
+    }
+
+    /// Three upgrade offers for the next level-up. Ready evolutions occupy one
+    /// slot, then remaining slots are filled with normal shard offers.
+    pub fn roll_choices(&self, rng: &mut Rng) -> [Option<UpgradeOffer>; 3] {
+        let mut result = [None, None, None];
+        let mut slot = 0usize;
+        let evolutions = self.available_evolutions();
+        if !evolutions.is_empty() {
+            let pick = (rng.next_u32() as usize) % evolutions.len();
+            result[slot] = Some(UpgradeOffer::Evolution(evolutions[pick]));
+            slot += 1;
+        }
+
+        for shard in self.roll_shard_choices(rng) {
+            if slot >= result.len() {
+                break;
+            }
+            if let Some(kind) = shard {
+                result[slot] = Some(UpgradeOffer::Shard(kind));
+                slot += 1;
+            }
+        }
+
+        result
+    }
+
     /// Three random shard kinds to offer at the next level-up.
     /// Luck level boosts rare/legendary shard weights; passive shards appear
     /// slightly less often than active ones; at least one active (non-passive,
     /// non-defensive) shard is always included if possible.
-    pub fn roll_choices(&self, rng: &mut Rng) -> [Option<ShardKind>; 3] {
+    fn roll_shard_choices(&self, rng: &mut Rng) -> [Option<ShardKind>; 3] {
         let defensive = [
             ShardKind::Siphon,
             ShardKind::Barrier,
