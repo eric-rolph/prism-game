@@ -34,8 +34,7 @@ export class AudioManager {
   duck(on: boolean): void {
     if (!this.master || !this.ctx) return;
     const t = this.ctx.currentTime;
-    this.master.gain.cancelScheduledValues(t);
-    this.master.gain.setValueAtTime(this.master.gain.value, t);
+    this.master.gain.cancelAndHoldAtTime(t);
     this.master.gain.linearRampToValueAtTime(on ? 0.1 : 0.5, t + 0.12);
   }
 
@@ -156,5 +155,6 @@ export class AudioManager {
 
     osc.start(t);
     osc.stop(t + duration + 0.02);
+    osc.onended = () => { osc.disconnect(); gain.disconnect(); };
   }
 }

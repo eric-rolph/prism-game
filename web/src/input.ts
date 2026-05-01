@@ -95,4 +95,9 @@ export class Input {
     this._dashPressed = false;
     return v;
   }
+
+  clearKeys(): void {
+    this.pressed.clear();
+    this._dashPressed = false;
+  }
 }

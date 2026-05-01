@@ -298,6 +298,7 @@ async function main(): Promise<void> {
   };
 
   const showLevelUpModal = (): void => {
+    input.clearKeys();
     levelupRankEl.textContent = 'RANK ' + game.rank();
     renderLevelUpCards();
     levelupEl.classList.add('shown');
@@ -324,8 +325,10 @@ async function main(): Promise<void> {
       e.preventDefault();
     }
     if (e.key === 'r' || e.key === 'R') {
-      game.reroll_level_up();
-      renderLevelUpCards();
+      if (game.reroll_charges() > 0) {
+        game.reroll_level_up();
+        renderLevelUpCards();
+      }
       e.preventDefault();
     }
   });
@@ -353,18 +356,23 @@ async function main(): Promise<void> {
     const barrierAbs = Math.round(game.barrier_absorbed());
     const gems = game.gems_collected();
     const bossKills = game.boss_kills_count();
+    const shardSummary = SHARDS.map((s, i) => {
+      const lvl = game.inventory_level(i);
+      return lvl > 0 ? `<span style="color:${s.color}">${s.name} ${lvl}</span>` : null;
+    }).filter(Boolean).join('  ');
     deathStatsEl.innerHTML =
       `RANK ${game.rank()}  /  PEAK ${game.peak_rank()}<br>` +
       `${game.kills_total()} KILLS  /  ${timeStr} SURVIVED<br>` +
       `${dmgTaken} DMG TAKEN  /  ${barrierAbs} ABSORBED<br>` +
-      `${gems} GEMS  /  ${bossKills} BOSSES`;
+      `${gems} GEMS  /  ${bossKills} BOSSES` +
+      (shardSummary ? `<br><br>${shardSummary}` : '');
     deathScreenEl.classList.add('shown');
     deathShown = true;
     if (victory) audio.playVictory(); else audio.playDeath();
 
     // Debug run summary.
     const killsByKind = ENEMY_KIND_NAMES.map((n, i) => `${n}: ${game.kills_by_kind(i)}`).join(', ');
-    const shardSummary = SHARDS.map((s, i) => {
+    const shardSummaryText = SHARDS.map((s, i) => {
       const lvl = game.inventory_level(i);
       return lvl > 0 ? `${s.name} ${lvl}` : null;
     }).filter(Boolean).join(', ');
@@ -374,7 +382,7 @@ async function main(): Promise<void> {
       `  rank: ${game.rank()} (peak ${game.peak_rank()})  |  kills: ${game.kills_total()}  |  bosses: ${bossKills}\n` +
       `  dmg taken: ${dmgTaken}  |  barrier absorbed: ${barrierAbs}  |  gems: ${gems}\n` +
       `  kills by kind: ${killsByKind}\n` +
-      `  shards: ${shardSummary || 'none'}`
+      `  shards: ${shardSummaryText || 'none'}`
     );
   };
 
@@ -479,6 +487,9 @@ async function main(): Promise<void> {
       ? Math.round(Math.min(100, (xp / xpNeeded) * 100))
       : 0;
     if (xpPct !== lastXpPct) {
+      // Suppress transition on wrap-around so the bar doesn't animate backwards.
+      if (xpPct < lastXpPct) xpFillEl.style.transition = 'none';
+      else xpFillEl.style.transition = '';
       xpFillEl.style.width = xpPct + '%';
       lastXpPct = xpPct;
     }

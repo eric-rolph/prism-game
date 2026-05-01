@@ -113,7 +113,7 @@ impl Inventory {
         ];
         let rare_shards = [
             ShardKind::Refract, ShardKind::Diffract, ShardKind::Echo,
-            ShardKind::Halo, ShardKind::Thorns, ShardKind::Luck, ShardKind::PhaseStep,
+            ShardKind::Halo, ShardKind::Thorns, ShardKind::PhaseStep,
         ];
         let legendary_shards = [ShardKind::Cascade, ShardKind::Interference];
         let luck = self.levels[ShardKind::Luck as usize];
@@ -128,6 +128,9 @@ impl Inventory {
                     0.4
                 } else if matches!(s, ShardKind::Armor | ShardKind::PrismHeart) {
                     0.65
+                } else if s == ShardKind::Luck {
+                    // Static reduced weight so Luck can't inflate its own offer rate.
+                    0.78
                 } else if legendary_shards.contains(&s) {
                     1.0 + luck as f32 * 0.50
                 } else if rare_shards.contains(&s) {
@@ -148,8 +151,8 @@ impl Inventory {
             if total <= 0.0 {
                 break;
             }
-            let mut roll = (rng.next_u32() as f64 / u32::MAX as f64) as f32 * total;
-            let mut pick = 0;
+            let mut roll = rng.unit() * total;
+            let mut pick = candidates.len() - 1;
             for (i, (_, w)) in candidates.iter().enumerate() {
                 roll -= w;
                 if roll <= 0.0 {
@@ -166,13 +169,31 @@ impl Inventory {
             .filter_map(|r| *r)
             .all(|s| defensive.contains(&s))
         {
-            let active: Vec<ShardKind> = (0..SHARD_COUNT as u8)
+            let active: Vec<(ShardKind, f32)> = (0..SHARD_COUNT as u8)
                 .filter_map(ShardKind::from_index)
                 .filter(|s| !self.is_maxed(*s) && !defensive.contains(s))
+                .map(|s| {
+                    let w = if legendary_shards.contains(&s) {
+                        1.0 + luck as f32 * 0.50
+                    } else if rare_shards.contains(&s) {
+                        1.0 + luck as f32 * 0.25
+                    } else if s == ShardKind::Luck {
+                        0.78
+                    } else {
+                        1.0
+                    };
+                    (s, w)
+                })
                 .collect();
             if !active.is_empty() {
-                let pick = (rng.next_u32() as usize) % active.len();
-                result[0] = Some(active[pick]);
+                let total: f32 = active.iter().map(|(_, w)| w).sum();
+                let mut roll = rng.unit() * total;
+                let mut pick = active.len() - 1;
+                for (i, (_, w)) in active.iter().enumerate() {
+                    roll -= w;
+                    if roll <= 0.0 { pick = i; break; }
+                }
+                result[0] = Some(active[pick].0);
             }
         }
 

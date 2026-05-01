@@ -137,7 +137,7 @@ const IFRAME_DURATION: f32 = 0.33;
 const ARMOR_DR_PER_LEVEL: f32 = 0.08;       // up to 48% DR at L6
 const PRISM_HEART_HP_PER_LEVEL: f32 = 15.0; // +15 max HP and instant heal per level
 const PRISM_HEART_HEAL_MULT_PER_LEVEL: f32 = 0.10; // +10% level-up heal per level
-const PHASE_STEP_IFRAME_PER_LEVEL: f32 = 0.18; // +0.18s i-frames per level during dash
+const PHASE_STEP_IFRAME_PER_LEVEL: f32 = 0.12; // +0.12s i-frames per level during dash
 
 // Screen shake.
 const SHAKE_DEATH_PX: f32 = 3.5;
@@ -182,7 +182,7 @@ pub const AUDIO_SHIELD_BREAK: u32 = 1 << 4;
 // Boss milestones.
 const SENTINEL_SPAWN_TIME: f32 = 300.0;
 const HYDRA_SPAWN_TIME: f32 = 600.0;
-const HYDRA_HP_PER_LOBE: f32 = 4500.0;
+const HYDRA_HP_PER_LOBE: f32 = 6500.0;
 const HYDRA_ORBIT_RADIUS: f32 = 58.0;
 const HYDRA_ORBIT_SPEED: f32 = 0.55;
 const HYDRA_LOBE_RADIUS: f32 = 20.0;
@@ -205,19 +205,24 @@ const BOSS_POST_BREATHER: f32 = 3.0;
 const BOSS_SPAWN_SOFT_CAP: usize = 45;
 const SENTINEL_HP: f32 = 9000.0;
 const SENTINEL_RADIUS: f32 = 46.0;
-const SENTINEL_SHIELD_HP: f32 = 800.0;
+const SENTINEL_BASE_SPEED: f32 = 34.0;
+const SENTINEL_SHIELD_HP: f32 = 1100.0;
 const SENTINEL_SHIELD_RADIUS: f32 = 12.0;
 const SENTINEL_SHIELD_ORBIT: f32 = 72.0;
 const SENTINEL_SHIELD_SPIN: f32 = 1.35;
 const VOID_PRISM_SPAWN_TIME: f32 = 780.0; // 13:00
-const VOID_PRISM_HP: f32 = 14000.0;
+const VOID_PRISM_HP: f32 = 21000.0;
 const VOID_PRISM_RADIUS: f32 = 50.0;
+const VOID_PRISM_BASE_SPEED: f32 = 26.0;
+const VOID_PRISM_P2_SPEED: f32 = 42.0;
 const VOID_PRISM_CONTACT_DAMAGE: f32 = 40.0;
+const VOID_PRISM_P2_CONTACT_DAMAGE: f32 = 52.0;
 const VOID_PRISM_SHOCKWAVE_INTERVAL_P1: f32 = 3.5;
 const VOID_PRISM_SHOCKWAVE_INTERVAL_P2: f32 = 2.0;
 const VOID_PRISM_SHOCKWAVE_MAX_RADIUS: f32 = 380.0;
 const VOID_PRISM_SHOCKWAVE_DAMAGE: f32 = 22.0;
-const VOID_PRISM_PULL_STRENGTH: f32 = 55.0;
+const VOID_PRISM_PULL_STRENGTH: f32 = 150.0;
+const VOID_SHOCKWAVE_IFRAME_DURATION: f32 = 0.25;
 
 // Traversable globe.
 // World x/y coordinates are arc lengths on an equirectangular chart:
@@ -895,7 +900,8 @@ impl Game {
         let player_pos = self.player.pos;
         let minute = self.time / 60.0;
         let void_pull_pos: Option<Vec2> = self.boss.as_ref().and_then(|b| {
-            (b.kind == BossKind::VoidPrism && b.state == BossState::Active).then_some(b.pos)
+            (b.kind == BossKind::VoidPrism && b.state == BossState::Active && b.phase >= 1)
+                .then_some(b.pos)
         });
         for e in &mut self.enemies {
             if e.spawn_grace > 0.0 {
@@ -1082,7 +1088,7 @@ impl Game {
             let mut proj_damage = 0.0_f32;
             for p in &mut self.projectiles {
                 if p.life < PROJ_LIFETIME
-                    && globe_distance(p.pos, self.player.pos) < PROJ_RADIUS + self.player.radius
+                    && globe_distance(p.pos, self.player.pos) < p.radius + self.player.radius
                 {
                     proj_damage = p.damage;
                     p.life = PROJ_LIFETIME; // mark for removal
@@ -1649,7 +1655,7 @@ impl Game {
                         activated = true;
                         match boss.kind {
                             BossKind::Sentinel => {
-                                boss.speed = 34.0;
+                                boss.speed = SENTINEL_BASE_SPEED;
                                 boss.contact_damage = 35.0;
                             }
                             BossKind::Hydra => {
@@ -1657,7 +1663,7 @@ impl Game {
                                 boss.contact_damage = HYDRA_CONTACT_DAMAGE;
                             }
                             BossKind::VoidPrism => {
-                                boss.speed = 26.0;
+                                boss.speed = VOID_PRISM_BASE_SPEED;
                                 boss.contact_damage = VOID_PRISM_CONTACT_DAMAGE;
                             }
                         }
@@ -1677,7 +1683,7 @@ impl Game {
                             }
                             let phase_scale = boss.phase as f32;
                             boss.radius = SENTINEL_RADIUS + phase_scale * 5.0;
-                            boss.speed = 34.0 + phase_scale * 12.0;
+                            boss.speed = SENTINEL_BASE_SPEED + phase_scale * 12.0;
                             boss.contact_damage = 35.0 + phase_scale * 7.0;
                             boss.shield_angle += SENTINEL_SHIELD_SPIN * (1.0 + phase_scale * 0.25) * dt;
                             boss.state_timer -= dt;
@@ -1723,7 +1729,8 @@ impl Game {
                                 phase_changed = true;
                             }
                             if boss.phase == 1 {
-                                boss.speed = 42.0;
+                                boss.speed = VOID_PRISM_P2_SPEED;
+                                boss.contact_damage = VOID_PRISM_P2_CONTACT_DAMAGE;
                             }
                             boss.fire_timer -= dt;
                             if boss.fire_timer <= 0.0 {
@@ -1761,12 +1768,12 @@ impl Game {
             self.audio_event_bits |= AUDIO_BOSS_PHASE;
         }
         if let Some((origin, kind, count)) = add_spawn {
-            self.spawn_boss_adds(origin, kind, count);
+            self.spawn_boss_adds(origin, kind, count, SENTINEL_RADIUS);
         }
         // Hydra: lobe death — spawn adds and particle burst for each dead lobe.
         for (lobe_pos, lobe_idx) in lobes_died {
             let add_kind = HYDRA_LOBE_ADDS[lobe_idx];
-            self.spawn_boss_adds(lobe_pos, add_kind, 3);
+            self.spawn_boss_adds(lobe_pos, add_kind, 3, HYDRA_LOBE_RADIUS);
             self.shake_amount += 7.0;
             self.audio_event_bits |= AUDIO_BOSS_PHASE;
             let color = HYDRA_LOBE_COLORS[lobe_idx];
@@ -1825,13 +1832,13 @@ impl Game {
         }
     }
 
-    fn spawn_boss_adds(&mut self, origin: Vec2, kind: EnemyKind, count: u32) {
+    fn spawn_boss_adds(&mut self, origin: Vec2, kind: EnemyKind, count: u32, boss_radius: f32) {
         let base = self.rng.angle();
         for i in 0..count {
             let angle = base + i as f32 * std::f32::consts::TAU / count as f32;
             let dir = Vec2::new(angle.cos(), angle.sin());
             let mut pos = origin;
-            move_on_globe(&mut pos, dir * (SENTINEL_RADIUS + 26.0));
+            move_on_globe(&mut pos, dir * (boss_radius + 26.0));
             self.spawn_enemy_near_pos(kind, pos);
         }
     }
@@ -1929,7 +1936,7 @@ impl Game {
         self.void_shockwaves.retain(|sw| sw.life < sw.max_life);
         if hit_damage > 0.0 {
             self.apply_damage_to_player(hit_damage);
-            self.player.iframe_timer = 0.25;
+            self.player.iframe_timer = VOID_SHOCKWAVE_IFRAME_DURATION;
             self.shake_amount += 4.0;
         }
     }
@@ -2390,7 +2397,7 @@ impl Game {
                     contact_damage: 8.0,
                     slow_timer: 0.0,
                     no_xp: true,
-                    spawn_grace: 0.0,
+                    spawn_grace: SPAWN_GRACE,
                 });
             }
         }
@@ -2456,21 +2463,20 @@ impl Game {
         if self.leveling_up {
             return;
         }
-        let needed = xp_for_rank(self.rank + 1);
-        if self.xp >= needed {
+        while self.xp >= xp_for_rank(self.rank + 1) {
+            let needed = xp_for_rank(self.rank + 1);
             self.xp -= needed;
             self.rank += 1;
             self.peak_rank = self.peak_rank.max(self.rank);
             self.audio_event_bits |= AUDIO_RANK_UP;
-            // Heal on level up — diminishing with rank, boosted by Prism Heart.
             let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
             let heal = (20.0 - self.rank as f32 * 1.0).max(5.0)
                 * (1.0 + prism_heart * PRISM_HEART_HEAL_MULT_PER_LEVEL);
             self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
             self.level_choices = self.inventory.roll_choices(&mut self.rng);
-            // If every shard is maxed, silently skip the picker.
             if self.level_choices.iter().any(|c| c.is_some()) {
                 self.leveling_up = true;
+                break;
             }
         }
     }
@@ -2596,6 +2602,11 @@ impl Game {
         // Martyrdom: kills during thorns trigger cascade from their position.
         if martyrdom {
             let cascade_level = self.inventory.level(ShardKind::Cascade);
+            let chain_reaction = self
+                .inventory
+                .has_synergy(ShardKind::Split, ShardKind::Cascade);
+            let fan_count = if chain_reaction { 3u32 } else { 1 };
+            let color = if chain_reaction { [0.25, 1.0, 0.88] } else { [1.0, 0.5, 0.3] };
             let kills: Vec<Vec2> = self
                 .enemies
                 .iter()
@@ -2603,7 +2614,7 @@ impl Game {
                 .map(|e| e.pos)
                 .collect();
             for pos in kills {
-                self.fire_cascade_beams(pos, cascade_level, 1, [1.0, 0.5, 0.3]);
+                self.fire_cascade_beams(pos, cascade_level, fan_count, color);
             }
         }
     }

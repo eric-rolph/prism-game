@@ -82,12 +82,14 @@
         transition: width 120ms ease-out;
       }
 
-      /* Shard tray: 10 circles at the bottom-left, filling with color as their level rises. */
+      /* Shard tray: 20 pips at the bottom-left, filling with color as their level rises. */
       #shards-tray {
         position: absolute;
         left: 14px;
-        bottom: 16px;
+        bottom: 32px;
         display: flex;
+        flex-wrap: wrap;
+        max-width: 160px;
         gap: 6px;
       }
       .shard-pip {
