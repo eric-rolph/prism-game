@@ -171,6 +171,7 @@ const DASH_BLAST_BOSS_DAMAGE_MULT: f32 = 0.40;
 const WAVE_DURATION: f32 = 30.0;
 const BASE_ENEMY_CAP: usize = 300;
 const ENEMY_CAP_PER_WAVE: usize = 35;
+const ENEMY_CAP_MULT_PER_WAVE_AFTER_5: f32 = 0.20;
 const MAX_ENEMIES: usize = 5000;
 const BASE_SPAWNS_PER_FRAME: u32 = 4;
 const MAX_SPAWNS_PER_FRAME: u32 = 14;
@@ -4463,7 +4464,10 @@ impl Game {
             .min(MAX_ENEMIES);
         let rank_cap = BASE_ENEMY_CAP
             + ((MAX_ENEMIES - BASE_ENEMY_CAP) as f32 * self.rank_pressure()) as usize;
-        wave_cap.max(rank_cap).min(MAX_ENEMIES)
+        let post_wave5_multiplier =
+            1.0 + self.wave.saturating_sub(5) as f32 * ENEMY_CAP_MULT_PER_WAVE_AFTER_5;
+        (((wave_cap.max(rank_cap) as f32) * post_wave5_multiplier).round() as usize)
+            .min(MAX_ENEMIES)
     }
 
     fn spawn_rate_for_wave(&self) -> f32 {
