@@ -4,7 +4,7 @@
 // simulation whenever `is_leveling_up()` is true, so the frozen scene stays
 // visible through the backdrop filter.
 
-import init, { Game, Interferometer } from '../wasm/prism.js';
+import init, { Game } from '../wasm/prism.js';
 import { Renderer } from './renderer.js';
 import { Input } from './input.js';
 import { AudioManager } from './audio.js';
@@ -420,22 +420,8 @@ async function main(): Promise<void> {
 
   const seed = (Math.random() * 0xffffffff) >>> 0;
   
-  // Interferometer Setup
-  const interfModal = document.getElementById('interferometer') as HTMLElement;
-  const interfCanvas = document.getElementById('interf-canvas') as HTMLCanvasElement;
-  const ctx = interfCanvas.getContext('2d')!;
-  const btnLock1 = document.getElementById('btn-lock-1') as HTMLButtonElement;
-  const btnLock2 = document.getElementById('btn-lock-2') as HTMLButtonElement;
-  const btnLock3 = document.getElementById('btn-lock-3') as HTMLButtonElement;
-  const btnSpin = document.getElementById('btn-spin') as HTMLButtonElement;
-  const btnStart = document.getElementById('btn-start') as HTMLButtonElement;
-  const resonanceVal = document.getElementById('resonance-val') as HTMLElement;
-
-  let locks = [false, false, false];
-  const interferometer = new Interferometer(seed, 100); // Give 100 starting resonance
-  
-  let game = new Game(viewW, viewH, seed, interferometer.evaluate());
-  let isStarted = false;
+  let game = new Game(viewW, viewH, seed);
+  let isStarted = true;
   let isPaused = false;
   let globalT = 0;
   
@@ -471,91 +457,13 @@ async function main(): Promise<void> {
     }
   });
   
-  const drawInterferometer = () => {
-    ctx.clearRect(0, 0, interfCanvas.width, interfCanvas.height);
-    const w = interfCanvas.width;
-    const h = interfCanvas.height;
-    
-    // Draw waves
-    const mods = interferometer.evaluate();
-    if (mods.is_jackpot) {
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, w, h);
-    }
-    
-    const drawWave = (amp: number, freq: number, phase: number, color: string, offsetY: number) => {
-      ctx.beginPath();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 4;
-      for (let x = 0; x <= w; x += 4) {
-        const y = Math.sin(x * 0.02 * freq - globalT * 5 * freq + phase) * amp * 30 + offsetY;
-        if (x === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-    };
-
-    if (!mods.is_jackpot) {
-      drawWave(interferometer.w1_amp(), interferometer.w1_freq(), interferometer.w1_phase(), locks[0] ? '#666' : '#ff4f4f', 60);
-      drawWave(interferometer.w2_amp(), interferometer.w2_freq(), interferometer.w2_phase(), locks[1] ? '#666' : '#ffb36c', 130);
-      drawWave(interferometer.w3_amp(), interferometer.w3_freq(), interferometer.w3_phase(), locks[2] ? '#666' : '#7fd3ff', 200);
-    }
-    
-    // Draw Resultant Wave
-    ctx.beginPath();
-    ctx.strokeStyle = mods.is_glitch ? '#ff00ff' : '#fff';
-    ctx.lineWidth = mods.is_jackpot ? 20 : 6;
-    for (let x = 0; x <= w; x += 4) {
-      let y = Math.sin(x * 0.02 * interferometer.w1_freq() - globalT * 5 * interferometer.w1_freq() + interferometer.w1_phase()) * interferometer.w1_amp() * 30;
-      y += Math.sin(x * 0.02 * interferometer.w2_freq() - globalT * 5 * interferometer.w2_freq() + interferometer.w2_phase()) * interferometer.w2_amp() * 30;
-      y += Math.sin(x * 0.02 * interferometer.w3_freq() - globalT * 5 * interferometer.w3_freq() + interferometer.w3_phase()) * interferometer.w3_amp() * 30;
-      y += h - 60; // offset for resultant
-      if (x === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-    
-    resonanceVal.textContent = String(interferometer.resonance);
-  };
-  
-  const updateLocks = () => {
-    btnLock1.classList.toggle('locked', locks[0]);
-    btnLock2.classList.toggle('locked', locks[1]);
-    btnLock3.classList.toggle('locked', locks[2]);
-    const cost = 10 + (locks[0] ? 20 : 0) + (locks[1] ? 20 : 0) + (locks[2] ? 20 : 0);
-    btnSpin.textContent = `SPIN (${cost})`;
-    btnSpin.disabled = interferometer.resonance < cost;
-  };
-
-  btnLock1.addEventListener('click', () => { locks[0] = !locks[0]; updateLocks(); });
-  btnLock2.addEventListener('click', () => { locks[1] = !locks[1]; updateLocks(); });
-  btnLock3.addEventListener('click', () => { locks[2] = !locks[2]; updateLocks(); });
-  
-  btnSpin.addEventListener('click', () => {
-    // Initializing audio on the first interaction with Spin as well.
+  // Initializing audio on the first interaction.
+  window.addEventListener('click', () => {
     if (!audio['ctx']) { audio.init(); audio.resume(); }
-    
-    if (interferometer.spin(locks[0], locks[1], locks[2])) {
-      updateLocks();
-      const mods = interferometer.evaluate();
-      if (mods.is_jackpot) {
-        audio.playJackpot();
-      } else if (mods.is_glitch) {
-        audio.playGlitch();
-      } else {
-        audio.playSpin();
-      }
-    }
-  });
-
-  btnStart.addEventListener('click', () => {
-    const mods = interferometer.evaluate();
-    game.free();
-    game = new Game(viewW, viewH, seed, mods);
-    interfModal.classList.remove('shown');
-    isStarted = true;
-  });
-  updateLocks();
+  }, { once: true });
+  window.addEventListener('keydown', () => {
+    if (!audio['ctx']) { audio.init(); audio.resume(); }
+  }, { once: true });
 
   // Attach resize AFTER game exists, so the listener can't fire during TDZ.
   window.addEventListener('resize', () => {
@@ -860,12 +768,7 @@ async function main(): Promise<void> {
 
   const doRestart = (): void => {
     if (!deathShown) return;
-    interferometer.resonance += Math.floor(game.score() / 100);
-    resonanceVal.textContent = String(interferometer.resonance);
-    updateLocks();
-    
-    isStarted = false;
-    interfModal.classList.add('shown');
+    game.restart();
     input.clearKeys();
     hideDeathScreen();
   };
@@ -896,12 +799,6 @@ async function main(): Promise<void> {
     last = now;
     globalT += dt;
 
-    if (!isStarted) {
-      drawInterferometer();
-      requestAnimationFrame(frame);
-      return;
-    }
-    
     if (isPaused) {
       requestAnimationFrame(frame);
       return;

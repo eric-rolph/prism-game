@@ -2,7 +2,6 @@ mod entities;
 mod game;
 mod math;
 mod shards;
-mod meta;
 
 use wasm_bindgen::prelude::*;
 
@@ -51,9 +50,9 @@ pub struct Game {
 #[wasm_bindgen]
 impl Game {
     #[wasm_bindgen(constructor)]
-    pub fn new(width: f32, height: f32, seed: u32, mods: &crate::meta::RunModifiers) -> Game {
+    pub fn new(width: f32, height: f32, seed: u32) -> Game {
         Game {
-            inner: game::Game::new(width, height, seed, mods.clone()),
+            inner: game::Game::new(width, height, seed),
         }
     }
 

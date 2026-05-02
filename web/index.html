@@ -466,95 +466,6 @@
         cursor: default;
       }
 
-      /* Harmonic Interferometer */
-      #interferometer {
-        position: fixed;
-        inset: 0;
-        display: none;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
-        gap: 20px;
-        z-index: 30;
-        background: rgba(5, 5, 12, 0.95);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-      }
-      #interferometer.shown { display: flex; }
-      #interf-title {
-        font-size: 16px;
-        letter-spacing: 6px;
-        color: #7fd3ff;
-      }
-      #interf-canvas {
-        width: 600px;
-        height: 200px;
-        border: 1px solid var(--faint);
-        background: #000;
-        border-radius: 4px;
-      }
-      #interf-controls {
-        display: flex;
-        gap: 40px;
-        width: 600px;
-        justify-content: center;
-      }
-      .lock-btn, .spin-btn, .start-btn {
-        padding: 8px 16px;
-        border: 1px solid var(--dim);
-        background: transparent;
-        color: var(--ink);
-        font-family: inherit;
-        font-size: 11px;
-        letter-spacing: 2px;
-        cursor: pointer;
-        transition: all 150ms ease;
-      }
-      .lock-btn:hover, .spin-btn:hover, .start-btn:hover {
-        border-color: var(--ink);
-        background: rgba(255, 255, 255, 0.1);
-      }
-      .lock-btn.locked {
-        background: rgba(255, 255, 255, 0.2);
-        color: #fff;
-        border-color: #fff;
-      }
-      #interf-resonance {
-        font-size: 14px;
-        letter-spacing: 2px;
-        color: #ffd740;
-      }
-      #interf-actions {
-        display: flex;
-        gap: 20px;
-      }
-      .start-btn {
-        border-color: #66ff88;
-        color: #66ff88;
-      }
-      .start-btn:hover {
-        background: rgba(102, 255, 136, 0.2);
-      }
-      
-      #interf-legend {
-        display: flex;
-        gap: 30px;
-        font-size: 10px;
-        letter-spacing: 2px;
-        color: var(--dim);
-        margin-top: -10px;
-        margin-bottom: 10px;
-      }
-      .interf-legend-item span {
-        color: var(--ink);
-      }
-      #interf-jackpot-hint {
-        font-size: 10px;
-        letter-spacing: 2px;
-        color: #ffd740;
-        text-shadow: 0 0 8px rgba(255, 215, 64, 0.5);
-      }
-
       /* Pause Menu */
       #pause-menu {
         position: fixed;
@@ -631,27 +542,6 @@
       <div id="death-stats"></div>
       <button id="death-restart">PLAY AGAIN</button>
       <div id="death-hint">SPACE / TAP</div>
-    </div>
-
-    <div id="interferometer" class="shown">
-      <div id="interf-title">PRISM: THE HARMONIC INTERFEROMETER</div>
-      <div id="interf-legend">
-        <div class="interf-legend-item">W1: <span>ENEMY MASS</span></div>
-        <div class="interf-legend-item">W2: <span>GAME SPEED</span></div>
-        <div class="interf-legend-item">W3: <span>REFRACTION (PROJECTILES)</span></div>
-      </div>
-      <canvas id="interf-canvas" width="1200" height="400" style="width:600px;height:200px;"></canvas>
-      <div id="interf-jackpot-hint">ALIGN ALL THREE WAVES FOR JACKPOT (2X EFFECTS)</div>
-      <div id="interf-controls">
-        <button id="btn-lock-1" class="lock-btn">LOCK W1</button>
-        <button id="btn-lock-2" class="lock-btn">LOCK W2</button>
-        <button id="btn-lock-3" class="lock-btn">LOCK W3</button>
-      </div>
-      <div id="interf-resonance">RESONANCE: <span id="resonance-val">0</span></div>
-      <div id="interf-actions">
-        <button id="btn-spin" class="spin-btn">SPIN (10)</button>
-        <button id="btn-start" class="start-btn">ENGAGE</button>
-      </div>
     </div>
 
     <div id="pause-menu">
