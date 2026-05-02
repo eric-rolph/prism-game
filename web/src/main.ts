@@ -348,8 +348,7 @@ async function main(): Promise<void> {
   const bossHudRaw = document.getElementById('boss-hud');
   const bossNameRaw = document.getElementById('boss-name');
   const bossFillRaw = document.getElementById('boss-fill');
-  const luminosityBarRaw = document.getElementById('luminosity-bar');
-  if (!dashFillRaw || !waveClearRaw || !deathTitleRaw || !bossHudRaw || !bossNameRaw || !bossFillRaw || !luminosityBarRaw) {
+  if (!dashFillRaw || !waveClearRaw || !deathTitleRaw || !bossHudRaw || !bossNameRaw || !bossFillRaw) {
     throw new Error('Dash/wave-clear elements missing from index.html');
   }
   const dashFillEl: HTMLElement = dashFillRaw;
@@ -358,7 +357,6 @@ async function main(): Promise<void> {
   const bossHudEl: HTMLElement = bossHudRaw;
   const bossNameEl: HTMLElement = bossNameRaw;
   const bossFillEl: HTMLElement = bossFillRaw;
-  const luminosityBarEl: HTMLElement = luminosityBarRaw;
 
   // Boot WASM. `wasm.memory.buffer` is the ArrayBuffer we re-view as typed
   // arrays every frame — it can grow, so we must check for buffer identity.
@@ -521,7 +519,6 @@ async function main(): Promise<void> {
   const lastPipLevels: number[] = new Array(SHARDS.length).fill(-1);
   let lastActiveBits = -1;
   let lastNearBits = -1;
-  let lastLuminosityPct = -1;
 
   // --- Level-up modal ----------------------------------------------------
 
@@ -767,7 +764,6 @@ async function main(): Promise<void> {
     lastPipLevels.fill(-1);
     lastActiveBits = -1;
     lastNearBits = -1;
-    lastLuminosityPct = -1;
   };
 
   const doRestart = (): void => {
@@ -908,19 +904,6 @@ async function main(): Promise<void> {
         lastBossPct = bossPct;
       }
     }
-    // Globe luminosity bar.
-    const luminosity = game.globe_luminosity();
-    const luminosityPct = Math.round(luminosity * 100);
-    if (luminosityPct !== lastLuminosityPct) {
-      luminosityBarEl.style.width = luminosityPct + '%';
-      luminosityBarEl.style.background = luminosity > 0.6
-        ? 'rgba(160, 100, 255, 0.7)'
-        : luminosity > 0.4
-        ? 'rgba(220, 60, 255, 0.8)'
-        : 'rgba(255, 30, 30, 0.9)';
-      lastLuminosityPct = luminosityPct;
-    }
-
     for (let i = 0; i < SHARDS.length; i++) {
       const lvl = game.inventory_level(i);
       if (lvl !== lastPipLevels[i]) {

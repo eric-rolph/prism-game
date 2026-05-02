@@ -536,13 +536,12 @@ const CORRUPTION_CLEANSE_RADIUS: f32 = 80.0;
 const CORRUPTION_CLEANSE_RATE: f32 = 0.55;   // level loss/sec from player presence
 const CORRUPTION_MAX_PATCHES: usize = 48;
 const CORRUPTION_DEBUFF_SPEED: f32 = 0.15;   // 15% speed penalty inside corruption
-const CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD: f32 = 0.4;
-const CORRUPTION_LUMINOSITY_HP_DRAIN: f32 = 6.0; // HP/sec at 0% luminosity
+const CORRUPTION_ENEMY_REGEN: f32 = 25.0;    // HP/sec for enemies inside corruption
 const POLAR_BOUNDARY_Y: f32 = GLOBE_RADIUS * 1.0; // |y| > this = polar zone
 
 // Dash-jump arc. Every dash launches a brief hop; altitude = sin(t/T * π).
+// Phase Step extends jump duration by 35% per level (up to ~2.4× at L6).
 const JUMP_DURATION: f32 = 0.55;
-const BEAM_CLEANSE_RATE: f32 = 1.2; // corruption level removed per second along beam path
 
 // --- VoidShell ---
 const VOID_SHELL_RADIUS: f32 = 11.0;
@@ -1089,8 +1088,9 @@ impl Game {
             self.player.dash_cooldown = self.dash_cooldown_duration();
             self.player.iframe_timer =
                 DASH_DURATION + phase_step as f32 * PHASE_STEP_IFRAME_PER_LEVEL;
-            // Every dash launches a brief jump arc above the surface.
-            self.jump_timer = JUMP_DURATION;
+            // Every dash launches a jump arc; Phase Step extends hang time.
+            let phase_step_lvl = self.inventory.level(ShardKind::PhaseStep) as f32;
+            self.jump_timer = JUMP_DURATION * (1.0 + phase_step_lvl * 0.35);
             // Phase Step L3+: leave a brief particle afterimage at the start position.
             if phase_step >= 3 {
                 for _ in 0..8 {
@@ -1155,12 +1155,29 @@ impl Game {
         self.camera = self.player.pos;
 
         // --- Jump arc (triggered by dash) ---
+        let was_airborne = self.player.altitude > 0.1;
         if self.jump_timer > 0.0 {
             self.jump_timer = (self.jump_timer - dt).max(0.0);
-            let t = self.jump_timer / JUMP_DURATION;
+            let phase_step_lvl = self.inventory.level(ShardKind::PhaseStep) as f32;
+            let arc_duration = JUMP_DURATION * (1.0 + phase_step_lvl * 0.35);
+            let t = self.jump_timer / arc_duration;
             self.player.altitude = (t * std::f32::consts::PI).sin();
         } else {
             self.player.altitude = 0.0;
+        }
+        // Landing: brief dust ring when touching back down.
+        if was_airborne && self.player.altitude <= 0.05 {
+            for _ in 0..7 {
+                let a = self.rng.angle();
+                self.particles.push(Particle {
+                    pos: self.player.pos,
+                    vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(35.0, 100.0),
+                    life: 0.0,
+                    max_life: self.rng.range(0.10, 0.20),
+                    color: [0.65, 0.82, 1.0],
+                    size: self.rng.range(1.2, 3.0),
+                });
+            }
         }
 
         // Wave clear banner timer.
@@ -1451,14 +1468,16 @@ impl Game {
             }
         }
 
-        // Low luminosity HP drain.
-        let luminosity = self.globe_luminosity_inner();
-        if luminosity < CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD {
-            let drain_frac = (CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD - luminosity)
-                / CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD;
-            let drain = drain_frac * CORRUPTION_LUMINOSITY_HP_DRAIN * dt;
-            if self.player.hp > 5.0 {
-                self.player.hp -= drain;
+        // Enemies inside corruption regenerate — you must cleanse before you can kill.
+        {
+            let patch_snap: Vec<(Vec2, f32, f32)> = self.corruption_patches.iter()
+                .filter(|p| p.level > 0.2)
+                .map(|p| (p.pos, p.radius, p.level))
+                .collect();
+            for e in &mut self.enemies {
+                if patch_snap.iter().any(|(cp, cr, _)| globe_distance(e.pos, *cp) < cr * 0.55) {
+                    e.hp += CORRUPTION_ENEMY_REGEN * dt;
+                }
             }
         }
 
@@ -1749,19 +1768,16 @@ impl Game {
         }
         self.beams.retain(|b| b.life < b.max_life);
 
-        // Beams cleanse corruption along their path — firing IS reclaiming territory.
-        if !self.corruption_patches.is_empty() {
+        // Beams instantly destroy any corruption patch they touch.
+        if !self.corruption_patches.is_empty() && !self.beams.is_empty() {
             let beam_segs: Vec<(Vec2, Vec2, f32)> = self.beams.iter()
                 .map(|b| (b.start, b.end, b.thickness))
                 .collect();
-            for p in &mut self.corruption_patches {
-                let hit = beam_segs.iter().any(|(s, e, thick)| {
-                    capsule_circle_intersect_globe(*s, *e, thick * 0.5 + 10.0, p.pos, p.radius * 0.45)
-                });
-                if hit {
-                    p.level = (p.level - BEAM_CLEANSE_RATE * dt).max(0.0);
-                }
-            }
+            self.corruption_patches.retain(|p| {
+                !beam_segs.iter().any(|(s, e, thick)| {
+                    capsule_circle_intersect_globe(*s, *e, thick * 0.5 + 12.0, p.pos, p.radius * 0.5)
+                })
+            });
         }
 
         // Halos: orbit + contact damage.
@@ -2009,10 +2025,19 @@ impl Game {
         self.frost_fields.retain(|f| f.life < f.max_life);
 
         // XP gem collection — magnetize nearby gems, collect touching ones.
+        // Gems inside active corruption are held hostage: visible but unmagnetizable
+        // until the area is cleansed by beams or player presence.
         let magnet_radius = self.gem_magnet_radius();
         let magnet_speed = self.gem_magnet_speed();
+        let corrupted_zones: Vec<(Vec2, f32)> = self.corruption_patches.iter()
+            .filter(|p| p.level > 0.25)
+            .map(|p| (p.pos, p.radius * 0.55))
+            .collect();
         for g in &mut self.gems {
             g.life += dt;
+            let trapped = corrupted_zones.iter()
+                .any(|(cp, cr)| globe_distance(g.pos, *cp) < *cr);
+            if trapped { continue; }
             let to_player = nearest_globe_delta(g.pos, self.player.pos);
             let dist = to_player.length();
             if dist < magnet_radius {
@@ -3842,52 +3867,65 @@ impl Game {
             }
         }
 
-        // Player altitude shadow (drawn before player circle so it appears behind).
-        if self.player.altitude > 0.05 {
+        // Jump shadow — two rings sell the "above the surface" read.
+        if self.player.altitude > 0.02 {
             let pos = nearest_globe_pos(camera, self.player.pos);
-            let shadow_r = self.player.radius * (1.2 + self.player.altitude * 0.8);
+            let alt = self.player.altitude;
+            // Outer diffuse shadow (cast area shrinks as player rises).
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: shadow_r,
+                radius: self.player.radius * (1.6 + alt * 2.8),
+                r: 0.0,
+                g: 0.0,
+                b: 0.04,
+                a: alt * 0.30,
+                glow: 0.0,
+            });
+            // Inner sharp occlusion directly below.
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: self.player.radius * (0.85 + alt * 0.35),
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
-                a: self.player.altitude * 0.5,
+                a: alt * 0.72,
                 glow: 0.0,
             });
         }
 
-        // Player (blink during i-frames).
+        // Player (blink during i-frames, grows slightly at jump peak to sell height).
         let visible =
             self.player.iframe_timer <= 0.0 || ((self.player.iframe_timer * 16.0) as u32 % 2 == 0);
         if visible {
             let pos = nearest_globe_pos(camera, self.player.pos);
+            let visual_r = self.player.radius * (1.0 + self.player.altitude * 0.45);
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: self.player.radius,
+                radius: visual_r,
                 r: 1.0,
                 g: 1.0,
                 b: 1.0,
                 a: 1.0,
-                glow: 3.0,
+                glow: 3.0 + self.player.altitude * 1.5,
             });
         }
 
-        // Altitude indicator ring.
+        // Altitude ring — subtle horizon line at jump peak.
         if self.player.altitude > 0.05 {
             let pos = nearest_globe_pos(camera, self.player.pos);
-            let ring_r = self.player.radius + 10.0 + self.player.altitude * 8.0;
+            let ring_r = self.player.radius * (1.0 + self.player.altitude * 0.45) + 7.0;
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
                 radius: ring_r,
-                r: 0.5,
-                g: 0.85,
+                r: 0.55,
+                g: 0.88,
                 b: 1.0,
-                a: self.player.altitude * 0.45,
-                glow: self.player.altitude * 1.5,
+                a: self.player.altitude * 0.35,
+                glow: 0.0,
             });
         }
 

@@ -395,38 +395,6 @@
         color: var(--faint);
       }
 
-      /* Globe luminosity bar */
-      #luminosity-wrap {
-        position: absolute;
-        left: 14px;
-        top: 36px;
-        display: flex;
-        align-items: center;
-        gap: 4px;
-      }
-      #luminosity-label {
-        font-size: 8px;
-        color: rgba(200, 150, 255, 0.6);
-        text-transform: uppercase;
-        letter-spacing: 1px;
-      }
-      #luminosity-track {
-        width: 72px;
-        height: 3px;
-        background: rgba(255,255,255,0.08);
-        border-radius: 2px;
-        overflow: hidden;
-        display: inline-block;
-        vertical-align: middle;
-      }
-      #luminosity-bar {
-        height: 100%;
-        width: 100%;
-        background: rgba(160, 100, 255, 0.7);
-        border-radius: 2px;
-        transition: background 0.5s, width 120ms ease-out;
-      }
-
       /* Wave clear banner */
       #wave-clear {
         position: fixed;
@@ -542,11 +510,7 @@
     <div id="hud">
       <div id="hp-wrap"><div id="hp-fill"></div></div>
       <div id="dash-wrap"><div id="dash-fill"></div></div>
-      <div id="dash-label">DASH [SPACE / TAP]</div>
-      <div id="luminosity-wrap">
-        <span id="luminosity-label">GLOBE</span>
-        <div id="luminosity-track"><div id="luminosity-bar"></div></div>
-      </div>
+      <div id="dash-label">DASH + JUMP [SPACE / 2×TAP]</div>
       <div id="timer-wrap">
         <div id="timer">0:00</div>
         <div id="wave-label">WAVE 1</div>
