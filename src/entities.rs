@@ -60,6 +60,7 @@ pub struct Enemy {
     pub no_xp: bool,
     pub spawn_grace: f32,
     pub surface_time: f32, // seconds spent drifting on the surface
+    pub is_void_spawn: bool, // spawned by a mature corruption patch; death cleanses it
 }
 
 pub struct XpGem {
@@ -189,8 +190,9 @@ pub struct FrostField {
 pub struct CorruptionPatch {
     pub pos: Vec2,
     pub radius: f32,
-    pub level: f32,          // 0.0 to 1.0
-    pub reinforce_timer: f32, // unused bookkeeping field (kept for future use)
+    pub level: f32,           // 0.0 to 1.0
+    pub age: f32,             // seconds since spawn
+    pub spawn_cooldown: f32,  // remaining cooldown before next Void Spawn can emerge
 }
 
 /// Descending void projectile fired by Pulsars. Corrupts and deals area damage on landing.

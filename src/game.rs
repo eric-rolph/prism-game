@@ -528,15 +528,28 @@ const CASCADE_LIFETIME: f32 = 0.14;
 
 
 // --- Corruption ---
+const CORRUPTION_START_WAVE: u32 = 3;          // wave gate — patches can't form before this
 const CORRUPTION_PATCH_RADIUS: f32 = 65.0;
-const CORRUPTION_REINFORCE_DELAY: f32 = 1.5; // seconds on surface before enemy contributes
-const CORRUPTION_LEVEL_RATE: f32 = 0.12;     // level gain/sec while enemy near
-const CORRUPTION_DECAY_RATE: f32 = 0.06;     // level loss/sec with no nearby enemy
+const CORRUPTION_REINFORCE_DELAY: f32 = 3.0;  // seconds on surface before enemy contributes
+const CORRUPTION_LEVEL_RATE: f32 = 0.07;      // level gain/sec while enemy near
+const CORRUPTION_DECAY_RATE: f32 = 0.06;      // level loss/sec with no nearby enemy
 const CORRUPTION_CLEANSE_RADIUS: f32 = 80.0;
-const CORRUPTION_CLEANSE_RATE: f32 = 0.55;   // level loss/sec from player presence
+const CORRUPTION_CLEANSE_RATE: f32 = 0.55;    // level loss/sec from player presence
 const CORRUPTION_MAX_PATCHES: usize = 48;
-const CORRUPTION_DEBUFF_SPEED: f32 = 0.15;   // 15% speed penalty inside corruption
-const CORRUPTION_ENEMY_REGEN: f32 = 25.0;    // HP/sec for enemies inside corruption
+const CORRUPTION_DEBUFF_SPEED: f32 = 0.15;    // 15% speed penalty inside corruption
+const CORRUPTION_WALK_HEAL: f32 = 0.4;        // HP/sec healed while inside corruption
+
+// Void Spawn — mini-boss that erupts from a large, old corruption patch.
+const VOID_SPAWN_PATCH_AGE: f32 = 14.0;       // minimum patch age before a spawn can erupt
+const VOID_SPAWN_PATCH_LEVEL: f32 = 0.75;     // minimum patch level required
+const VOID_SPAWN_COOLDOWN: f32 = 22.0;        // seconds before the same patch can spawn again
+const VOID_SPAWN_HP: f32 = 900.0;
+const VOID_SPAWN_RADIUS: f32 = 17.0;
+const VOID_SPAWN_SPEED: f32 = 52.0;
+const VOID_SPAWN_CONTACT_DAMAGE: f32 = 16.0;
+const VOID_SPAWN_XP: u32 = 15;
+const VOID_SPAWN_CLEANSE_RADIUS: f32 = 110.0; // cleanse radius on Void Spawn death
+
 const POLAR_BOUNDARY_Y: f32 = GLOBE_RADIUS * 1.0; // |y| > this = polar zone
 
 // Dash-jump arc. Every dash launches a brief hop; altitude = sin(t/T * π).
@@ -1416,38 +1429,44 @@ impl Game {
         self.void_shells.extend(new_void_shells);
 
         // --- Corruption update ---
-        // Collect surface enemy positions (avoid borrow conflict).
-        let surface_enemy_positions: Vec<Vec2> = self.enemies.iter()
-            .filter(|e| {
-                e.state == EnemyState::Drifting
-                    && !is_polar_zone(e.pos)
-                    && e.surface_time >= CORRUPTION_REINFORCE_DELAY
-            })
-            .map(|e| e.pos)
-            .collect();
+        // Patches only form once the run is far enough along.
+        if self.wave >= CORRUPTION_START_WAVE {
+            // Collect surface enemy positions (avoid borrow conflict).
+            let surface_enemy_positions: Vec<Vec2> = self.enemies.iter()
+                .filter(|e| {
+                    e.state == EnemyState::Drifting
+                        && !is_polar_zone(e.pos)
+                        && e.surface_time >= CORRUPTION_REINFORCE_DELAY
+                })
+                .map(|e| e.pos)
+                .collect();
 
-        for pos in surface_enemy_positions {
-            let found = self.corruption_patches.iter_mut()
-                .find(|p| globe_distance(p.pos, pos) < p.radius * 0.7);
-            if let Some(p) = found {
-                p.level = (p.level + CORRUPTION_LEVEL_RATE * dt).min(1.0);
-            } else if self.corruption_patches.len() < CORRUPTION_MAX_PATCHES {
-                self.corruption_patches.push(CorruptionPatch {
-                    pos,
-                    radius: CORRUPTION_PATCH_RADIUS,
-                    level: 0.05,
-                    reinforce_timer: 0.0,
-                });
+            for pos in surface_enemy_positions {
+                let found = self.corruption_patches.iter_mut()
+                    .find(|p| globe_distance(p.pos, pos) < p.radius * 0.7);
+                if let Some(p) = found {
+                    p.level = (p.level + CORRUPTION_LEVEL_RATE * dt).min(1.0);
+                } else if self.corruption_patches.len() < CORRUPTION_MAX_PATCHES {
+                    self.corruption_patches.push(CorruptionPatch {
+                        pos,
+                        radius: CORRUPTION_PATCH_RADIUS,
+                        level: 0.05,
+                        age: 0.0,
+                        spawn_cooldown: 0.0,
+                    });
+                }
             }
         }
 
-        // Patches decay without nearby enemies.
+        // Age and decay patches.
         {
             let enemy_positions: Vec<Vec2> = self.enemies.iter()
                 .filter(|e| e.state == EnemyState::Drifting)
                 .map(|e| e.pos)
                 .collect();
             for p in &mut self.corruption_patches {
+                p.age += dt;
+                p.spawn_cooldown = (p.spawn_cooldown - dt).max(0.0);
                 let reinforced = enemy_positions.iter().any(|&epos| {
                     globe_distance(epos, p.pos) < p.radius
                 });
@@ -1458,26 +1477,64 @@ impl Game {
         }
         self.corruption_patches.retain(|p| p.level > 0.01);
 
-        // Player cleanses nearby patches when at surface.
+        // Player walks through corruption: slight speed penalty, tiny HP restore.
         if self.player.altitude < 0.25 {
             let ppos = self.player.pos;
+            let mut in_corruption = false;
             for p in &mut self.corruption_patches {
                 if globe_distance(ppos, p.pos) < CORRUPTION_CLEANSE_RADIUS {
                     p.level = (p.level - CORRUPTION_CLEANSE_RATE * dt).max(0.0);
+                    in_corruption = true;
                 }
+            }
+            if in_corruption {
+                self.player.hp = (self.player.hp + CORRUPTION_WALK_HEAL * dt).min(self.player.max_hp);
             }
         }
 
-        // Enemies inside corruption regenerate — you must cleanse before you can kill.
+        // Void Spawn: mature, large patches erupt a mini-boss that cleanses on death.
         {
-            let patch_snap: Vec<(Vec2, f32, f32)> = self.corruption_patches.iter()
-                .filter(|p| p.level > 0.2)
-                .map(|p| (p.pos, p.radius, p.level))
-                .collect();
-            for e in &mut self.enemies {
-                if patch_snap.iter().any(|(cp, cr, _)| globe_distance(e.pos, *cp) < cr * 0.55) {
-                    e.hp += CORRUPTION_ENEMY_REGEN * dt;
+            let mut void_spawn_positions: Vec<Vec2> = Vec::new();
+            for p in &mut self.corruption_patches {
+                if p.age >= VOID_SPAWN_PATCH_AGE
+                    && p.level >= VOID_SPAWN_PATCH_LEVEL
+                    && p.spawn_cooldown <= 0.0
+                {
+                    void_spawn_positions.push(p.pos);
+                    p.spawn_cooldown = VOID_SPAWN_COOLDOWN;
                 }
+            }
+            for pos in void_spawn_positions {
+                // Shake and spawn particles to signal the eruption.
+                self.shake_amount += 4.0;
+                for _ in 0..14 {
+                    let a = self.rng.angle();
+                    self.particles.push(Particle {
+                        pos,
+                        vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(55.0, 130.0),
+                        life: 0.0,
+                        max_life: self.rng.range(0.25, 0.55),
+                        color: [0.62, 0.18, 0.88],
+                        size: self.rng.range(2.5, 5.5),
+                    });
+                }
+                self.enemies.push(Enemy {
+                    pos,
+                    radius: VOID_SPAWN_RADIUS,
+                    hp: VOID_SPAWN_HP,
+                    speed: VOID_SPAWN_SPEED,
+                    kind: EnemyKind::Brute,
+                    state: EnemyState::Drifting,
+                    state_timer: 0.0,
+                    charge_dir: Vec2::ZERO,
+                    color: [0.55, 0.05, 0.82],
+                    contact_damage: VOID_SPAWN_CONTACT_DAMAGE,
+                    slow_timer: 0.0,
+                    no_xp: true,
+                    spawn_grace: 0.5,
+                    surface_time: 0.0,
+                    is_void_spawn: true,
+                });
             }
         }
 
@@ -1496,7 +1553,8 @@ impl Game {
                     pos: s.target,
                     radius: VOID_SHELL_LAND_RADIUS,
                     level: 0.8,
-                    reinforce_timer: 0.0,
+                    age: 0.0,
+                    spawn_cooldown: 0.0,
                 });
             }
             // Area damage to player.
@@ -2025,19 +2083,10 @@ impl Game {
         self.frost_fields.retain(|f| f.life < f.max_life);
 
         // XP gem collection — magnetize nearby gems, collect touching ones.
-        // Gems inside active corruption are held hostage: visible but unmagnetizable
-        // until the area is cleansed by beams or player presence.
         let magnet_radius = self.gem_magnet_radius();
         let magnet_speed = self.gem_magnet_speed();
-        let corrupted_zones: Vec<(Vec2, f32)> = self.corruption_patches.iter()
-            .filter(|p| p.level > 0.25)
-            .map(|p| (p.pos, p.radius * 0.55))
-            .collect();
         for g in &mut self.gems {
             g.life += dt;
-            let trapped = corrupted_zones.iter()
-                .any(|(cp, cr)| globe_distance(g.pos, *cp) < *cr);
-            if trapped { continue; }
             let to_player = nearest_globe_delta(g.pos, self.player.pos);
             let dist = to_player.length();
             if dist < magnet_radius {
@@ -2089,6 +2138,7 @@ impl Game {
                     cascade_depth,
                     dead.no_xp,
                     dead.slow_timer > 0.0,
+                    dead.is_void_spawn,
                 );
             }
             cascade_depth += 1;
@@ -2488,6 +2538,7 @@ impl Game {
             no_xp: false,
             spawn_grace: SPAWN_GRACE,
             surface_time: 0.0,
+            is_void_spawn: false,
         });
     }
 
@@ -2737,6 +2788,7 @@ impl Game {
                             no_xp: true,
                             spawn_grace: 0.0,
                             surface_time: 0.0,
+                            is_void_spawn: false,
                         });
                     }
                     BossKind::Hydra => {
@@ -2758,6 +2810,7 @@ impl Game {
                                     no_xp: true,
                                     spawn_grace: 0.0,
                                     surface_time: 0.0,
+                                    is_void_spawn: false,
                                 });
                             }
                         }
@@ -2778,6 +2831,7 @@ impl Game {
                             no_xp: true,
                             spawn_grace: 0.0,
                             surface_time: 0.0,
+                            is_void_spawn: false,
                         });
                     }
                 }
@@ -2961,11 +3015,37 @@ impl Game {
         cascade_depth: u32,
         no_xp: bool,
         was_frozen: bool,
+        is_void_spawn: bool,
     ) {
         self.kills_total += 1;
         self.kills_by_kind[kind as usize] = self.kills_by_kind[kind as usize].saturating_add(1);
         self.audio_kill_count += 1;
         self.spawn_death_particles(pos, kind);
+
+        // Void Spawn death: cleanse nearby corruption and drop a generous XP burst.
+        if is_void_spawn {
+            self.corruption_patches.retain(|p| {
+                globe_distance(pos, p.pos) >= VOID_SPAWN_CLEANSE_RADIUS
+            });
+            self.gems.push(XpGem {
+                pos,
+                value: VOID_SPAWN_XP,
+                life: 0.0,
+            });
+            self.shake_amount += 6.0;
+            for _ in 0..20 {
+                let a = self.rng.angle();
+                self.particles.push(Particle {
+                    pos,
+                    vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(60.0, 160.0),
+                    life: 0.0,
+                    max_life: self.rng.range(0.3, 0.7),
+                    color: [0.85, 0.65, 1.0],
+                    size: self.rng.range(2.0, 5.0),
+                });
+            }
+            return;
+        }
 
         // Blizzard leaves a slow field on frozen deaths. Whiteout upgrades
         // that field and adds a capped freezing starburst chain.
@@ -3027,6 +3107,7 @@ impl Game {
                     no_xp: true,
                     spawn_grace: SPAWN_GRACE,
                     surface_time: 0.0,
+                    is_void_spawn: false,
                 });
             }
         }
@@ -3484,6 +3565,7 @@ impl Game {
             no_xp: false,
             spawn_grace: SPAWN_GRACE,
             surface_time: 0.0,
+            is_void_spawn: false,
         });
     }
 
@@ -4284,6 +4366,10 @@ impl Game {
                             e.color[2],
                             1.0,
                         )
+                    }
+                    _ if e.is_void_spawn => {
+                        let pulse = (self.time * 4.5).sin() * 0.5 + 0.5;
+                        (1.2 + pulse * 2.0, 0.55, 0.05 + pulse * 0.12, 0.82, 1.0)
                     }
                     _ => (0.6, e.color[0], e.color[1], e.color[2], 1.0),
                 }
