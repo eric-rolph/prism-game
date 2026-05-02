@@ -135,6 +135,8 @@ pub struct Beam {
     pub max_life: f32,
     pub thickness: f32,
     pub color: [f32; 3],
+    /// True when this beam originated from an Echo re-fire (delayed salvo).
+    pub is_echo: bool,
 }
 
 pub struct Particle {

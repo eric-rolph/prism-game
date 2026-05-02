@@ -222,11 +222,27 @@ void main() {
   float glowDist = max(dist - r, 0.0);
   float glow = exp(-glowDist * 0.12) * v_glow;
 
+  // Photon ripple: animated sine modulation along beam length.
+  float photonRipple = sin(t * 8.0 + v_time * 30.0) * 0.12 + 1.0;
+
+  // Prism core dispersion: interference fringes when near center.
+  vec3 prismCore = vec3(0.0);
+  if (dist < r * 0.5) {
+    float bandR = max(0.0, sin(t * 18.0 + v_time * 5.0) * 0.5 + 0.5);
+    float bandG = max(0.0, sin(t * 18.0 + v_time * 5.0 + 2.094) * 0.5 + 0.5);
+    float bandB = max(0.0, sin(t * 18.0 + v_time * 5.0 + 4.189) * 0.5 + 0.5);
+    float coreMask = 1.0 - smoothstep(0.0, r * 0.5, dist);
+    prismCore = vec3(bandR, bandG, bandB) * coreMask * 0.5;
+  }
+
   // Compose layers.
-  vec3 col = hotWhite * innerCore * energy * 2.0
+  vec3 col = hotWhite * innerCore * energy * 3.0
            + beamColor * colorBody * energy * 1.5
            + rainbow * fringeZone * energy * 0.9
-           + beamColor * glow * 0.6;
+           + beamColor * glow * 0.6
+           + prismCore * photonRipple;
+
+  col *= photonRipple;
 
   float alpha = max(colorBody * v_color.a * energy,
                 max(innerCore * energy,
@@ -320,8 +336,13 @@ void main() {
   vec3 surfaceColor = vec3(0.010, 0.015, 0.040) * (0.50 + diffuse * 0.50)
                     + vec3(0.010, 0.065, 0.105) * (0.35 + 0.65 * normal.y * normal.y)
                     + vec3(0.045, 0.020, 0.090) * limb * 0.65;
-  vec3 gridColor = vec3(0.10, 0.50, 0.88) * gridLine * (0.10 + limb * 0.06);
-  vec3 landmarkColor = vec3(0.22, 0.78, 1.00) * (polarGlow * 0.16 + dateLine * 0.08 * pulse);
+  vec3 gridColor = vec3(0.10, 0.50, 0.88) * gridLine * (0.12 + limb * 0.07);
+
+  // Caustic pattern: interference of 3 sine waves for an underwater shimmer.
+  float caustic = sin(longitude * 12.0 + u_time * 0.8)
+                * sin(latitude * 14.0 + u_time * 0.6) * 0.5 + 0.5;
+  vec3 landmarkColor = vec3(0.22, 0.78, 1.00) * (polarGlow * 0.16 + dateLine * 0.08 * pulse)
+                     + caustic * 0.04 * sphereMask * vec3(0.3, 0.7, 1.0);
 
   vec3 col = surfaceColor + gridColor + landmarkColor;
   float alpha = (0.11 + gridLine * 0.08 + polarGlow * 0.05 + limb * 0.07) * sphereMask;
@@ -471,6 +492,8 @@ uniform sampler2D u_scene;
 uniform sampler2D u_bloom;
 uniform sampler2D u_prev;
 uniform float u_persistence;
+uniform float u_intensity;
+uniform float u_time;
 
 in vec2 v_uv;
 out vec4 fragColor;
@@ -478,8 +501,8 @@ out vec4 fragColor;
 void main() {
   vec2 dir = v_uv - 0.5;
 
-  // Radial chromatic aberration — stronger toward the edges.
-  float aberr = 0.002 + length(dir) * 0.005;
+  // Radial chromatic aberration — stronger toward edges, scales with intensity.
+  float aberr = (0.002 + length(dir) * 0.005) * (1.0 + u_intensity * 1.5);
 
   vec3 base;
   base.r = texture(u_scene, v_uv + dir * aberr).r;
@@ -490,13 +513,20 @@ void main() {
   vec3 prev = texture(u_prev, v_uv).rgb;
   base = max(base, prev * u_persistence);
 
-  // Bloom from separable Gaussian chain (H+V × 2 cycles at half-res).
+  // Bloom from separable Gaussian chain, scaled logarithmically with intensity.
   vec3 bloom = texture(u_bloom, v_uv).rgb;
+  float bloomScale = 1.5 + log(1.0 + u_intensity * 9.0) * 1.2;
 
-  vec3 col = base + bloom * 1.5;
+  vec3 col = base + bloom * bloomScale;
+
+  // Soft radial pulse keyed to time.
+  col += col * 0.04 * sin(u_time * 2.0 + length(dir) * 8.0);
 
   // Vignette — subtle darkening at edges.
   col *= 1.0 - length(dir) * 0.5;
+
+  // Subtle scan-line CRT feel.
+  col *= 1.0 - 0.015 * mod(gl_FragCoord.y, 2.0);
 
   // Reinhard tonemap + gamma.
   col = col / (1.0 + col);

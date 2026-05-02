@@ -414,7 +414,7 @@ const BEAM_DAMAGE: f32 = 40.0;
 const BEAM_COLOR: [f32; 3] = [0.55, 1.0, 1.0];
 
 /// Hard cap on beams per salvo to prevent combinatorial explosion.
-const MAX_SALVO_BEAMS: usize = 48;
+const MAX_SALVO_BEAMS: usize = 96;
 
 /// Build the full set of beams to fire this tick, given the player's position,
 /// a target direction, the world (for refraction homing), and the inventory.
@@ -469,6 +469,52 @@ pub fn compose_salvo(
         inventory.level(ShardKind::Refract),
         homing_boost,
     );
+
+    // Mirror level 5+: add 32 equally-spaced ring beams at reduced damage.
+    let mirror_level = inventory.level(ShardKind::Mirror);
+    if mirror_level >= 5 {
+        let ring_count = 32usize;
+        let step = std::f32::consts::TAU / ring_count as f32;
+        let base_angle = base_dir.y.atan2(base_dir.x);
+        let ring_damage = BEAM_DAMAGE * 0.4;
+        for i in 0..ring_count {
+            if beams.len() >= MAX_SALVO_BEAMS {
+                break;
+            }
+            let a = base_angle + step * i as f32;
+            let dir = Vec2::new(a.cos(), a.sin());
+            beams.push(BeamRequest {
+                start: player_pos,
+                end: player_pos + dir * BEAM_REACH,
+                thickness: BEAM_THICKNESS * 0.6,
+                damage: ring_damage,
+                color: [0.55, 0.8, 1.0],
+            });
+        }
+    }
+
+    // Kaleidoscope evolution: 24 ring beams instead of 12 (the burst is fired
+    // separately in game.rs via fire_kaleidoscope_burst, but we add salvo ring
+    // beams here to reinforce the effect with higher beam count).
+    if inventory.has_evolution(EvolutionKind::Kaleidoscope) {
+        let ring_count = 24usize;
+        let step = std::f32::consts::TAU / ring_count as f32;
+        let base_angle = base_dir.y.atan2(base_dir.x);
+        for i in 0..ring_count {
+            if beams.len() >= MAX_SALVO_BEAMS {
+                break;
+            }
+            let a = base_angle + step * i as f32;
+            let dir = Vec2::new(a.cos(), a.sin());
+            beams.push(BeamRequest {
+                start: player_pos,
+                end: player_pos + dir * BEAM_REACH * 0.8,
+                thickness: BEAM_THICKNESS * 0.7,
+                damage: BEAM_DAMAGE * 0.35,
+                color: [0.85, 0.55, 1.0],
+            });
+        }
+    }
 
     // Final hard cap.
     beams.truncate(MAX_SALVO_BEAMS);

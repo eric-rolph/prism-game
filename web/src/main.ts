@@ -948,6 +948,13 @@ async function main(): Promise<void> {
     refreshCircles();
     refreshBeams();
 
+    // Compute intensity from total shard levels (23 shards × max 6 levels = 138 max, normalize to 40).
+    let totalShardLevels = 0;
+    for (let i = 0; i < SHARDS.length; i++) {
+      totalShardLevels += game.inventory_level(i);
+    }
+    const intensity = Math.min(1.0, totalShardLevels / 40.0);
+
     renderer.render(
       pixelW, pixelH,
       viewW, viewH,
@@ -957,6 +964,7 @@ async function main(): Promise<void> {
       [game.shake_x(), game.shake_y()],
       now / 1000,
       game.arena_radius(),
+      intensity,
     );
 
     // FPS readout ~2×/s.

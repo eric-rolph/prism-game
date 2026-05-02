@@ -1901,7 +1901,7 @@ impl Game {
                 } else {
                     None
                 };
-                self.fire_primary_inner(false, echo_target, None);
+                self.fire_primary_inner(false, true, echo_target, None);
             } else {
                 i += 1;
             }
@@ -1912,7 +1912,7 @@ impl Game {
             if self.pending_afterimages[i].0 <= now {
                 let (_, origin) = self.pending_afterimages.swap_remove(i);
                 let target = self.find_nearest_enemy_pos_from(origin);
-                self.fire_primary_inner(false, target, Some(origin));
+                self.fire_primary_inner(false, true, target, Some(origin));
             } else {
                 i += 1;
             }
@@ -3193,6 +3193,7 @@ impl Game {
                 max_life: 0.13,
                 thickness: 2.4 + phase_step * 0.18,
                 color: [0.58, 1.0, 0.92],
+                is_echo: false,
             });
         }
         for _ in 0..14 {
@@ -3441,6 +3442,7 @@ impl Game {
                 max_life: 0.15,
                 thickness,
                 color,
+                is_echo: false,
             });
         }
     }
@@ -3555,6 +3557,7 @@ impl Game {
                 } else {
                     [0.86, 0.72, 1.0]
                 },
+                is_echo: false,
             });
         }
 
@@ -3635,16 +3638,18 @@ impl Game {
                 },
             },
             self.player.pos,
+            false,
         );
     }
 
     fn fire_primary(&mut self) -> bool {
-        self.fire_primary_inner(true, None, None)
+        self.fire_primary_inner(true, false, None, None)
     }
 
     fn fire_primary_inner(
         &mut self,
         schedule_echo: bool,
+        is_echo: bool,
         target_override: Option<Vec2>,
         origin_override: Option<Vec2>,
     ) -> bool {
@@ -3752,11 +3757,11 @@ impl Game {
                 damage: base.damage * PRISM_CANNON_DAMAGE_MULT,
                 color: [1.0, 1.0, 1.0],
             };
-            self.fire_beam(core, origin);
+            self.fire_beam(core, origin, is_echo);
         }
 
         for req in &salvo {
-            self.fire_beam(req.clone(), origin);
+            self.fire_beam(req.clone(), origin, is_echo);
         }
 
         // Kaleidoscope: after every primary salvo, emit a prismatic great-circle ring.
@@ -3777,7 +3782,7 @@ impl Game {
         true
     }
 
-    fn fire_beam(&mut self, req: BeamRequest, origin: Vec2) {
+    fn fire_beam(&mut self, req: BeamRequest, origin: Vec2, is_echo: bool) {
         let diffract = self.inventory.level(ShardKind::Diffract);
         let siphon = self.inventory.level(ShardKind::Siphon);
         let frost = self.inventory.level(ShardKind::Frost);
@@ -3836,6 +3841,7 @@ impl Game {
             max_life: BEAM_LIFETIME,
             thickness: req.thickness,
             color: req.color,
+            is_echo,
         });
 
         // Diffract: each impact spawns L radial sub-beams (damage + visual).
@@ -3896,6 +3902,7 @@ impl Game {
                     max_life: DIFFRACT_MINI_LIFETIME,
                     thickness: diffract_thick,
                     color: diffract_color,
+                    is_echo: false,
                 });
             }
         }
@@ -4042,6 +4049,7 @@ impl Game {
                     max_life: CASCADE_LIFETIME,
                     thickness: CASCADE_THICKNESS,
                     color,
+                    is_echo: false,
                 });
             }
         }
@@ -4103,6 +4111,7 @@ impl Game {
                 max_life: WHITEOUT_STARBURST_LIFETIME,
                 thickness: WHITEOUT_STARBURST_THICKNESS,
                 color,
+                is_echo: false,
             });
         }
     }
@@ -4142,6 +4151,7 @@ impl Game {
                 max_life: KALEIDOSCOPE_LIFETIME,
                 thickness: KALEIDOSCOPE_THICKNESS,
                 color,
+                is_echo: false,
             });
         }
     }
@@ -4414,6 +4424,7 @@ impl Game {
                 max_life: THORNS_BEAM_LIFETIME,
                 thickness: THORNS_BEAM_THICKNESS,
                 color: [1.0, 0.3, 0.3],
+                is_echo: false,
             });
         }
 
@@ -5050,16 +5061,175 @@ impl Game {
         if visible {
             let pos = nearest_globe_pos(camera, self.player.pos);
             let visual_r = self.player.radius * (1.0 + self.player.altitude * 0.45);
+
+            // ── Inventory-driven body evolution visuals ──────────────────
+            // Precompute aggregated stats from inventory.
+            let total_levels: u32 = {
+                let mut s = 0u32;
+                for i in 0..crate::shards::SHARD_COUNT {
+                    s += self.inventory.levels[i] as u32;
+                }
+                s
+            };
+            let intensity = ((1.0 + total_levels as f32).ln() / (7.0_f32).ln()).min(1.0);
+
+            // Beam-modifying shard total (for emitter node count).
+            let beam_mod_levels = self.inventory.level(ShardKind::Split) as u32
+                + self.inventory.level(ShardKind::Mirror) as u32
+                + self.inventory.level(ShardKind::Chromatic) as u32
+                + self.inventory.level(ShardKind::Lens) as u32
+                + self.inventory.level(ShardKind::Refract) as u32
+                + self.inventory.level(ShardKind::Echo) as u32;
+            let emitter_count = (beam_mod_levels as usize).min(6);
+
+            let barrier_lvl = self.inventory.level(ShardKind::Barrier);
+            let thorns_lvl = self.inventory.level(ShardKind::Thorns);
+            let halo_lvl = self.inventory.level(ShardKind::Halo);
+            let evolution_active = self.inventory.active_evolution_bits() != 0;
+            let kaleidoscope_active =
+                self.inventory.has_evolution(EvolutionKind::Kaleidoscope);
+
+            // 1a. Faint outer ring when 1-3 shards collected (shard count check).
+            let owned_shards = (0..crate::shards::SHARD_COUNT)
+                .filter(|&i| self.inventory.levels[i] > 0)
+                .count();
+            if owned_shards >= 1 && owned_shards <= 3 {
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x,
+                    y: pos.y,
+                    radius: visual_r + 8.0,
+                    r: 0.5,
+                    g: 0.9,
+                    b: 1.0,
+                    a: 0.15,
+                    glow: 0.4,
+                });
+            }
+
+            // 1b. Defensive shield ring (Barrier or Thorns owned).
+            if barrier_lvl > 0 || thorns_lvl > 0 {
+                let pulse = 0.7 + 0.3 * (self.time * 3.5).sin();
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x,
+                    y: pos.y,
+                    radius: visual_r + 12.0,
+                    r: 0.2,
+                    g: 0.75,
+                    b: 1.0,
+                    a: 0.18 * pulse,
+                    glow: (0.6 + (barrier_lvl + thorns_lvl) as f32 * 0.12) * pulse,
+                });
+            }
+
+            // 1c. Orbiting emitter nodes for beam-modifying shards.
+            if emitter_count > 0 {
+                // Fire rate proxy: base 1 rev/s, speed up with total levels.
+                let orbit_speed = 1.2 + total_levels as f32 * 0.04;
+                let orbit_r = 18.0;
+                // Mix color from active beam shards: cyan-to-violet based on chromatic presence.
+                let chrom = self.inventory.level(ShardKind::Chromatic) as f32 / 6.0;
+                let node_r = 0.5 + chrom * 0.5;
+                let node_g = 0.9 - chrom * 0.4;
+                let node_b = 1.0;
+                for i in 0..emitter_count {
+                    let angle = self.time * orbit_speed
+                        + i as f32 * (std::f32::consts::TAU / emitter_count as f32);
+                    let offset = Vec2::new(angle.cos(), angle.sin()) * orbit_r;
+                    let mut node_world = self.player.pos;
+                    move_on_globe(&mut node_world, offset);
+                    let np = nearest_globe_pos(camera, node_world);
+                    self.circle_buf.push(CircleInstance {
+                        x: np.x,
+                        y: np.y,
+                        radius: 3.5 + intensity * 1.5,
+                        r: node_r,
+                        g: node_g,
+                        b: node_b,
+                        a: 0.85,
+                        glow: 1.8 + intensity * 1.0,
+                    });
+                }
+            }
+
+            // 1d. Second inner orbit ring when total shards > 10.
+            if total_levels > 10 {
+                let inner_count = 6usize;
+                let inner_speed = 2.5 + total_levels as f32 * 0.05;
+                let inner_r = 11.0;
+                for i in 0..inner_count {
+                    let angle = -self.time * inner_speed
+                        + i as f32 * (std::f32::consts::TAU / inner_count as f32);
+                    let offset = Vec2::new(angle.cos(), angle.sin()) * inner_r;
+                    let mut node_world = self.player.pos;
+                    move_on_globe(&mut node_world, offset);
+                    let np = nearest_globe_pos(camera, node_world);
+                    self.circle_buf.push(CircleInstance {
+                        x: np.x,
+                        y: np.y,
+                        radius: 2.0 + intensity * 0.8,
+                        r: 0.8,
+                        g: 1.0,
+                        b: 0.9,
+                        a: 0.6,
+                        glow: 1.2,
+                    });
+                }
+            }
+
+            // 1e. 12-point geometric ring when any evolution active.
+            if evolution_active {
+                let geo_r = 30.0 + (if kaleidoscope_active { 5.0 } else { 0.0 });
+                let geo_count = 12usize;
+                let spin = self.time * 0.35;
+                for i in 0..geo_count {
+                    let angle =
+                        spin + i as f32 * (std::f32::consts::TAU / geo_count as f32);
+                    let offset = Vec2::new(angle.cos(), angle.sin()) * geo_r;
+                    let mut node_world = self.player.pos;
+                    move_on_globe(&mut node_world, offset);
+                    let np = nearest_globe_pos(camera, node_world);
+                    let hue_shift = i as f32 / geo_count as f32;
+                    let cr = 0.5 + 0.5 * (hue_shift * std::f32::consts::TAU).cos();
+                    let cg = 0.5 + 0.5 * (hue_shift * std::f32::consts::TAU + 2.094).cos();
+                    let cb = 0.5 + 0.5 * (hue_shift * std::f32::consts::TAU + 4.189).cos();
+                    self.circle_buf.push(CircleInstance {
+                        x: np.x,
+                        y: np.y,
+                        radius: 3.0,
+                        r: cr,
+                        g: cg,
+                        b: cb,
+                        a: 0.75 + 0.25 * intensity,
+                        glow: 1.5 + intensity,
+                    });
+                }
+            }
+
+            // Core player circle — bright cyan-white, base glow 2.4 (as specified).
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
                 radius: visual_r,
-                r: 1.0,
+                r: 0.9,
                 g: 1.0,
                 b: 1.0,
                 a: 1.0,
-                glow: 3.0 + self.player.altitude * 1.5,
+                glow: 2.4 + self.player.altitude * 1.5 + intensity * 0.6,
             });
+
+            // Halo enhancement: if Halo is owned make core even brighter.
+            if halo_lvl > 0 {
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x,
+                    y: pos.y,
+                    radius: visual_r * 0.55,
+                    r: 1.0,
+                    g: 1.0,
+                    b: 0.9,
+                    a: 0.9,
+                    glow: 2.0 + halo_lvl as f32 * 0.5,
+                });
+            }
         }
 
         // Altitude ring — subtle horizon line at jump peak.
@@ -5514,22 +5684,102 @@ impl Game {
             });
         }
 
-        // Beams — colored per-shard (Diffract mini, Cascade burst, Chromatic RGB, default cyan).
+        // Beams — enhanced visuals: glow varies with remaining life, chromatic split,
+        // lens thickness, echo tint, inner core overlay.
+        let chromatic_lvl = self.inventory.level(ShardKind::Chromatic);
+        let lens_lvl = self.inventory.level(ShardKind::Lens);
         for b in &self.beams {
-            let t = 1.0 - (b.life / b.max_life);
+            let life_frac = b.life / b.max_life; // 0 = just spawned, 1 = expired
+            let t = 1.0 - life_frac;
             let start = nearest_globe_pos(camera, b.start);
             let end = nearest_globe_pos(camera, b.end);
+
+            // Echo tint: orange hue, 30% lower alpha.
+            let (beam_r, beam_g, beam_b, alpha_scale) = if b.is_echo {
+                (
+                    b.color[0] * 0.9 + 0.1,
+                    b.color[1] * 0.7 + 0.3 * 0.6,
+                    b.color[2] * 0.5 + 0.3,
+                    0.7_f32,
+                )
+            } else {
+                (b.color[0], b.color[1], b.color[2], 1.0_f32)
+            };
+
+            // Glow varies with remaining lifetime: peaks near spawn.
+            let glow = (2.5 + life_frac * 1.5) * t;
+
+            // Lens shard: visual thickness scales with level.
+            let vis_thick = if lens_lvl > 0 {
+                b.thickness * (1.0 + lens_lvl as f32 * 0.25)
+            } else {
+                b.thickness
+            };
+
+            // Chromatic shard: split into 3 sub-beams (R/G/B offsets).
+            if chromatic_lvl > 0 && !b.is_echo {
+                let delta = end - start;
+                let len = delta.length();
+                if len > 1.0 {
+                    let beam_perp = Vec2::new(-delta.y, delta.x) / len;
+                    let sub_colors: [[f32; 3]; 3] = [
+                        [1.0, 0.2, 0.15],
+                        [0.2, 1.0, 0.25],
+                        [0.15, 0.4, 1.0],
+                    ];
+                    let offsets = [-0.06_f32, 0.0, 0.06];
+                    for ci in 0..3 {
+                        let ang_off = offsets[ci];
+                        let rot_cos = ang_off.cos();
+                        let rot_sin = ang_off.sin();
+                        let rotated = Vec2::new(
+                            delta.x * rot_cos - delta.y * rot_sin,
+                            delta.x * rot_sin + delta.y * rot_cos,
+                        );
+                        let sub_end = start + rotated;
+                        let lateral = beam_perp * (ci as f32 - 1.0) * vis_thick * 0.3;
+                        self.beam_buf.push(BeamInstance {
+                            x0: start.x + lateral.x,
+                            y0: start.y + lateral.y,
+                            x1: sub_end.x + lateral.x,
+                            y1: sub_end.y + lateral.y,
+                            thickness: vis_thick * 0.7,
+                            r: sub_colors[ci][0],
+                            g: sub_colors[ci][1],
+                            b: sub_colors[ci][2],
+                            a: t * alpha_scale * 0.85,
+                            glow: glow * 0.9,
+                        });
+                    }
+                }
+            } else {
+                // Standard beam.
+                self.beam_buf.push(BeamInstance {
+                    x0: start.x,
+                    y0: start.y,
+                    x1: end.x,
+                    y1: end.y,
+                    thickness: vis_thick,
+                    r: beam_r,
+                    g: beam_g,
+                    b: beam_b,
+                    a: t * alpha_scale,
+                    glow,
+                });
+            }
+
+            // Inner core beam (thin white, high glow) on every beam.
             self.beam_buf.push(BeamInstance {
                 x0: start.x,
                 y0: start.y,
                 x1: end.x,
                 y1: end.y,
-                thickness: b.thickness,
-                r: b.color[0],
-                g: b.color[1],
-                b: b.color[2],
-                a: t,
-                glow: 3.0 * t,
+                thickness: 1.0,
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: t * 0.8 * alpha_scale,
+                glow: 0.8 * t,
             });
         }
 

@@ -94,7 +94,7 @@ export class Renderer {
     this.bloomHProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_H_FRAG, ['u_src', 'u_texel']);
     this.bloomVProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_V_FRAG, ['u_src', 'u_texel']);
     this.bloomUpProg = this.makeProgram(FULLSCREEN_VERT, BLOOM_UP_FRAG, ['u_src', 'u_texel']);
-    this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene', 'u_bloom', 'u_prev', 'u_persistence']);
+    this.compositeProg = this.makeProgram(FULLSCREEN_VERT, COMPOSITE_FRAG, ['u_scene', 'u_bloom', 'u_prev', 'u_persistence', 'u_intensity', 'u_time']);
 
     this.setupBuffers();
   }
@@ -325,6 +325,7 @@ export class Renderer {
     shake: [number, number] = [0, 0],
     time: number = 0,
     arenaRadius: number = 1200,
+    intensity: number = 0,
   ) {
     const gl = this.gl;
     this.resize(pixelWidth, pixelHeight);
@@ -464,6 +465,8 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.prevTex);
     gl.uniform1i(this.compositeProg.uniforms['u_prev']!, 2);
     gl.uniform1f(this.compositeProg.uniforms['u_persistence']!, 0.82);
+    gl.uniform1f(this.compositeProg.uniforms['u_intensity']!, Math.min(1.0, Math.max(0.0, intensity)));
+    gl.uniform1f(this.compositeProg.uniforms['u_time']!, time);
     gl.bindVertexArray(this.fullscreenVao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
