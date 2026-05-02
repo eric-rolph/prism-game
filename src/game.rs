@@ -217,6 +217,11 @@ const CRYSTAL_SPAWN_INTERVAL: f32 = 45.0;
 const BOSS_PROJ_SPEED: f32 = 210.0;
 const BOSS_PROJ_DAMAGE: f32 = 28.0;
 const BOSS_SHIELD_BURST_COUNT: u32 = 5;
+const BOSS_HP_MULTIPLIER: f32 = 4.0;
+const BOSS_REWARD_MULTIPLIER: u32 = 4;
+const BOSS_REWARD_GEM_BASE_COUNT: u32 = 18;
+const BOSS_ESCALATION_INTERVAL: f32 = 6.0;
+const BOSS_ESCALATION_MAX_TIER: u32 = 8;
 
 // Audio event bits (per-frame, cleared at top of update).
 pub const AUDIO_RANK_UP: u32 = 1 << 0;
@@ -228,7 +233,7 @@ pub const AUDIO_SHIELD_BREAK: u32 = 1 << 4;
 // Boss milestones.
 const SENTINEL_SPAWN_TIME: f32 = 300.0;
 const HYDRA_SPAWN_TIME: f32 = 600.0;
-const HYDRA_HP_PER_LOBE: f32 = 38000.0;
+const HYDRA_HP_PER_LOBE: f32 = 38000.0 * BOSS_HP_MULTIPLIER;
 const HYDRA_ORBIT_RADIUS: f32 = 58.0;
 const HYDRA_ORBIT_SPEED: f32 = 0.55;
 const HYDRA_LOBE_RADIUS: f32 = 20.0;
@@ -241,15 +246,15 @@ const BOSS_TELEGRAPH_TIME: f32 = 2.0;
 const BOSS_DEATH_TIME: f32 = 1.0;
 const BOSS_POST_BREATHER: f32 = 3.0;
 const BOSS_SPAWN_SOFT_CAP: usize = 45;
-const SENTINEL_HP: f32 = 60000.0;
+const SENTINEL_HP: f32 = 60000.0 * BOSS_HP_MULTIPLIER;
 const SENTINEL_RADIUS: f32 = 46.0;
 const SENTINEL_BASE_SPEED: f32 = 44.0;
-const SENTINEL_SHIELD_HP: f32 = 4400.0;
+const SENTINEL_SHIELD_HP: f32 = 4400.0 * BOSS_HP_MULTIPLIER;
 const SENTINEL_SHIELD_RADIUS: f32 = 12.0;
 const SENTINEL_SHIELD_ORBIT: f32 = 72.0;
 const SENTINEL_SHIELD_SPIN: f32 = 1.35;
 const VOID_PRISM_SPAWN_TIME: f32 = 780.0; // 13:00
-const VOID_PRISM_HP: f32 = 120000.0;
+const VOID_PRISM_HP: f32 = 120000.0 * BOSS_HP_MULTIPLIER;
 const VOID_PRISM_RADIUS: f32 = 50.0;
 const VOID_PRISM_BASE_SPEED: f32 = 34.0;
 const VOID_PRISM_P2_SPEED: f32 = 55.0;
@@ -2197,6 +2202,7 @@ impl Game {
             contact_damage: 0.0,
             state: BossState::Telegraphing,
             state_timer: BOSS_TELEGRAPH_TIME,
+            active_time: 0.0,
             phase: 0,
             shield_angle: self.rng.angle(),
             shield_hp: [SENTINEL_SHIELD_HP; 3],
@@ -2231,6 +2237,7 @@ impl Game {
             contact_damage: HYDRA_CONTACT_DAMAGE,
             state: BossState::Telegraphing,
             state_timer: BOSS_TELEGRAPH_TIME,
+            active_time: 0.0,
             phase: 0,
             shield_angle: 0.0,
             shield_hp: [0.0; 3],
@@ -2264,6 +2271,7 @@ impl Game {
             contact_damage: 0.0,
             state: BossState::Telegraphing,
             state_timer: BOSS_TELEGRAPH_TIME,
+            active_time: 0.0,
             phase: 0,
             shield_angle: 0.0,
             shield_hp: [0.0; 3],
@@ -2285,14 +2293,18 @@ impl Game {
         pos
     }
 
+    fn boss_escalation_tier(active_time: f32) -> u32 {
+        ((active_time / BOSS_ESCALATION_INTERVAL).floor() as u32).min(BOSS_ESCALATION_MAX_TIER)
+    }
+
     fn update_boss(&mut self, dt: f32) {
         let mut activated = false;
         let mut phase_changed = false;
         let mut add_spawn: Option<(Vec2, EnemyKind, u32)> = None;
-        let mut hydra_fire_positions: Vec<Vec2> = Vec::new();
+        let mut hydra_fire_positions: Vec<(Vec2, u32)> = Vec::new();
         let mut lobes_died: Vec<(Vec2, usize)> = Vec::new();
         let mut finish_death = false;
-        let mut void_shockwave_origin: Option<Vec2> = None;
+        let mut void_shockwave_origins: Vec<Vec2> = Vec::new();
 
         if let Some(boss) = &mut self.boss {
             match boss.state {
@@ -2308,6 +2320,7 @@ impl Game {
                     if boss.state_timer <= 0.0 {
                         boss.state = BossState::Active;
                         boss.state_timer = 2.4;
+                        boss.active_time = 0.0;
                         boss.radius = init_radius;
                         activated = true;
                         match boss.kind {
@@ -2327,6 +2340,8 @@ impl Game {
                     }
                 }
                 BossState::Active => {
+                    boss.active_time += dt;
+                    let escalation = Self::boss_escalation_tier(boss.active_time);
                     let dir = nearest_globe_delta(boss.pos, self.player.pos).normalize_or_zero();
                     move_on_globe(&mut boss.pos, dir * boss.speed * dt);
 
@@ -2352,11 +2367,13 @@ impl Game {
                                 SENTINEL_SHIELD_SPIN * (1.0 + phase_scale * 0.25) * dt;
                             boss.state_timer -= dt;
                             if boss.state_timer <= 0.0 {
-                                boss.state_timer = match boss.phase {
+                                let base_interval = match boss.phase {
                                     0 => 3.0,
                                     1 => 2.4,
                                     _ => 1.8,
                                 };
+                                boss.state_timer =
+                                    (base_interval - escalation as f32 * 0.10).max(0.75);
                                 let kind = match boss.phase {
                                     0 => EnemyKind::Drone,
                                     1 => EnemyKind::Dasher,
@@ -2366,7 +2383,7 @@ impl Game {
                                     0 => 2,
                                     1 => 1,
                                     _ => 3,
-                                };
+                                } + escalation;
                                 add_spawn = Some((boss.pos, kind, count));
                             }
                         }
@@ -2390,10 +2407,15 @@ impl Game {
                             // Periodic projectile volley from surviving lobes.
                             boss.fire_timer -= dt;
                             if boss.fire_timer <= 0.0 {
-                                boss.fire_timer = HYDRA_FIRE_INTERVAL - dead_count as f32 * 0.28;
+                                boss.fire_timer = (HYDRA_FIRE_INTERVAL
+                                    - dead_count as f32 * 0.28
+                                    - escalation as f32 * 0.04)
+                                    .max(0.45);
+                                let shot_count = 1 + escalation.min(5);
                                 for i in 0..3usize {
                                     if boss.lobe_hp[i] > 0.0 {
-                                        hydra_fire_positions.push(Self::hydra_lobe_pos(boss, i));
+                                        hydra_fire_positions
+                                            .push((Self::hydra_lobe_pos(boss, i), shot_count));
                                     }
                                 }
                             }
@@ -2411,12 +2433,27 @@ impl Game {
                             }
                             boss.fire_timer -= dt;
                             if boss.fire_timer <= 0.0 {
-                                boss.fire_timer = if boss.phase == 0 {
+                                let base_interval = if boss.phase == 0 {
                                     VOID_PRISM_SHOCKWAVE_INTERVAL_P1
                                 } else {
                                     VOID_PRISM_SHOCKWAVE_INTERVAL_P2
                                 };
-                                void_shockwave_origin = Some(boss.pos);
+                                boss.fire_timer =
+                                    (base_interval - escalation as f32 * 0.05).max(0.55);
+                                let wave_count = 1 + (escalation / 2).min(4);
+                                void_shockwave_origins.push(boss.pos);
+                                let base_angle = boss.active_time * 0.7;
+                                for i in 1..wave_count {
+                                    let angle = base_angle
+                                        + i as f32 * std::f32::consts::TAU / wave_count as f32;
+                                    let mut origin = boss.pos;
+                                    move_on_globe(
+                                        &mut origin,
+                                        Vec2::new(angle.cos(), angle.sin())
+                                            * (VOID_PRISM_RADIUS + 46.0),
+                                    );
+                                    void_shockwave_origins.push(origin);
+                                }
                             }
                         }
                     }
@@ -2469,18 +2506,24 @@ impl Game {
         }
         // Hydra: fire a projectile from each surviving lobe toward the player.
         let player_pos = self.player.pos;
-        for lobe_pos in hydra_fire_positions {
+        for (lobe_pos, shot_count) in hydra_fire_positions {
             let dir = nearest_globe_delta(lobe_pos, player_pos).normalize_or_zero();
-            self.projectiles.push(Projectile {
-                pos: lobe_pos,
-                vel: dir * BOSS_PROJ_SPEED,
-                radius: PROJ_RADIUS,
-                damage: BOSS_PROJ_DAMAGE,
-                life: 0.0,
-            });
+            let base_angle = dir.y.atan2(dir.x);
+            let half_spread = (shot_count.saturating_sub(1)) as f32 * 0.5;
+            for shot in 0..shot_count {
+                let angle = base_angle + (shot as f32 - half_spread) * 0.16;
+                let shot_dir = Vec2::new(angle.cos(), angle.sin());
+                self.projectiles.push(Projectile {
+                    pos: lobe_pos,
+                    vel: shot_dir * BOSS_PROJ_SPEED,
+                    radius: PROJ_RADIUS,
+                    damage: BOSS_PROJ_DAMAGE,
+                    life: 0.0,
+                });
+            }
         }
         // Void Prism: emit a player-damaging shockwave ring.
-        if let Some(origin) = void_shockwave_origin {
+        for origin in void_shockwave_origins {
             let phase = self.boss.as_ref().map(|b| b.phase).unwrap_or(0);
             let max_radius = VOID_PRISM_SHOCKWAVE_MAX_RADIUS * if phase == 1 { 1.25 } else { 1.0 };
             let duration = max_radius / 180.0;
@@ -2583,10 +2626,15 @@ impl Game {
             });
         }
 
-        for i in 0..18 {
-            let angle = i as f32 * std::f32::consts::TAU / 18.0;
+        let reward_gem_count = BOSS_REWARD_GEM_BASE_COUNT * BOSS_REWARD_MULTIPLIER;
+        for i in 0..reward_gem_count {
+            let angle = i as f32 * std::f32::consts::TAU / reward_gem_count as f32;
+            let ring = i / BOSS_REWARD_GEM_BASE_COUNT;
             let mut pos = boss.pos;
-            move_on_globe(&mut pos, Vec2::new(angle.cos(), angle.sin()) * 44.0);
+            move_on_globe(
+                &mut pos,
+                Vec2::new(angle.cos(), angle.sin()) * (38.0 + ring as f32 * 14.0),
+            );
             self.gems.push(XpGem {
                 pos,
                 value: 3,
