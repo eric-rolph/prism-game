@@ -8,6 +8,7 @@
 //!  - Timing modifier (Echo) — queues delayed re-fires; handled in game.rs.
 //!  - Passive / triggered effects (Halo, Cascade, Interference) — their own
 //!    update code in game.rs.
+//!  - Extra weapon emitters (Arc, Minefield, Lance) — timer-driven in game.rs.
 //!  - Defensive effects (Barrier, Thorns) — handled in game.rs.
 
 use crate::entities::Enemy;
@@ -37,9 +38,12 @@ pub enum ShardKind {
     Luck = 17,
     PrismHeart = 18,
     PhaseStep = 19,
+    Arc = 20,
+    Minefield = 21,
+    Lance = 22,
 }
 
-pub const SHARD_COUNT: usize = 20;
+pub const SHARD_COUNT: usize = 23;
 pub const MAX_SHARD_LEVEL: u8 = 6;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -99,6 +103,9 @@ impl ShardKind {
             17 => Some(Self::Luck),
             18 => Some(Self::PrismHeart),
             19 => Some(Self::PhaseStep),
+            20 => Some(Self::Arc),
+            21 => Some(Self::Minefield),
+            22 => Some(Self::Lance),
             _ => None,
         }
     }
@@ -232,15 +239,21 @@ impl Inventory {
             ShardKind::Halo,
             ShardKind::Thorns,
             ShardKind::PhaseStep,
+            ShardKind::Arc,
+            ShardKind::Lance,
         ];
-        let legendary_shards = [ShardKind::Cascade, ShardKind::Interference];
+        let legendary_shards = [
+            ShardKind::Cascade,
+            ShardKind::Interference,
+            ShardKind::Minefield,
+        ];
         let luck = self.levels[ShardKind::Luck as usize];
 
         let mut candidates: Vec<(ShardKind, f32)> = (0..SHARD_COUNT as u8)
             .filter_map(ShardKind::from_index)
             .filter(|s| !self.is_maxed(*s))
             .map(|s| {
-                let mut weight = if matches!(s, ShardKind::Siphon | ShardKind::Barrier)
+                let weight = if matches!(s, ShardKind::Siphon | ShardKind::Barrier)
                     && self.levels[s.as_index()] >= 2
                 {
                     0.4
@@ -358,7 +371,7 @@ impl Inventory {
 /// Canonical synergy table: (shard_a, shard_b, name). Bit i in
 /// `active_synergy_bits` / `near_synergy_bits` corresponds to entry i here.
 /// Must stay in index-lock with SYNERGY_NAMES in web/src/main.ts.
-pub const SYNERGY_COUNT: usize = 11;
+pub const SYNERGY_COUNT: usize = 17;
 pub const SYNERGIES: &[(ShardKind, ShardKind, &'static str)] = &[
     (ShardKind::Split, ShardKind::Cascade, "CHAIN REACTION"),
     (ShardKind::Split, ShardKind::Frost, "BLIZZARD"),
@@ -371,6 +384,16 @@ pub const SYNERGIES: &[(ShardKind, ShardKind, &'static str)] = &[
     (ShardKind::Thorns, ShardKind::Cascade, "MARTYRDOM"),
     (ShardKind::Barrier, ShardKind::Interference, "RESONANCE"),
     (ShardKind::Magnet, ShardKind::Interference, "GRAVITY WELL"),
+    (ShardKind::Arc, ShardKind::Frost, "STATIC FREEZE"),
+    (ShardKind::Arc, ShardKind::Cascade, "STORM FRONT"),
+    (ShardKind::Minefield, ShardKind::Magnet, "GRAVITY MINES"),
+    (
+        ShardKind::Minefield,
+        ShardKind::Interference,
+        "SEISMIC FIELD",
+    ),
+    (ShardKind::Lance, ShardKind::Lens, "RAIL FOCUS"),
+    (ShardKind::Lance, ShardKind::Siphon, "SURGICAL DRAIN"),
 ];
 
 /// A ready-to-fire beam with concrete world-space endpoints.

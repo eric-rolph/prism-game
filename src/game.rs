@@ -6,8 +6,8 @@
 
 use crate::entities::{
     Beam, Boss, BossKind, BossState, CorruptionPatch, Crystal, Enemy, EnemyKind, EnemyState,
-    FrostField, Halo, InterferencePulse, Particle, Player, Projectile, VoidShell, VoidShockwave,
-    XpGem,
+    FrostField, Halo, InterferencePulse, MiniBossKind, Particle, Player, Projectile, VoidShell,
+    VoidShockwave, XpGem,
 };
 use crate::math::Rng;
 use crate::shards::{
@@ -61,7 +61,7 @@ pub struct Game {
     boss: Option<Boss>,
 
     input: Vec2,
-    jump_timer: f32,  // counts down from JUMP_DURATION; altitude = sin(t/T * π)
+    jump_timer: f32, // counts down from JUMP_DURATION; altitude = sin(t/T * π)
     dash_input: bool,
     seed: u32,
     rng: Rng,
@@ -85,6 +85,9 @@ pub struct Game {
     pending_echoes: Vec<f32>,
     pending_afterimages: Vec<(f32, Vec2)>,
     interference_timer: f32,
+    arc_timer: f32,
+    mine_timer: f32,
+    lance_timer: f32,
 
     // Level-up modal state.
     leveling_up: bool,
@@ -103,6 +106,7 @@ pub struct Game {
     void_prism_spawned: bool,
     void_victory: bool,
     boss_breather_timer: f32,
+    mini_boss_timer: f32,
     boss_kills: u32,
     void_shockwaves: Vec<VoidShockwave>,
     corruption_patches: Vec<CorruptionPatch>,
@@ -160,8 +164,11 @@ const DASH_COOLDOWN: f32 = 3.0;
 const WAVE_DURATION: f32 = 30.0;
 const BASE_ENEMY_CAP: usize = 300;
 const ENEMY_CAP_PER_WAVE: usize = 35;
-const MAX_ENEMIES: usize = 1500;
-const MAX_SPAWNS_PER_FRAME: u32 = 4;
+const MAX_ENEMIES: usize = 5000;
+const BASE_SPAWNS_PER_FRAME: u32 = 4;
+const MAX_SPAWNS_PER_FRAME: u32 = 14;
+const RANK_PRESSURE_START: u32 = 10;
+const RANK_PRESSURE_END: u32 = 30;
 const SESSION_LENGTH: f32 = 900.0; // 15 minutes
 const OVERDRIVE_START: f32 = 600.0; // 10 minutes
 const WAVE_CLEAR_BANNER_DURATION: f32 = 1.5;
@@ -222,6 +229,8 @@ const BOSS_REWARD_MULTIPLIER: u32 = 4;
 const BOSS_REWARD_GEM_BASE_COUNT: u32 = 18;
 const BOSS_ESCALATION_INTERVAL: f32 = 6.0;
 const BOSS_ESCALATION_MAX_TIER: u32 = 8;
+const BOSS_WEAPON_DAMAGE_RANK_MULT: f32 = 0.55;
+const BOSS_WEAPON_DAMAGE_ESCALATION_MULT: f32 = 0.08;
 
 // Audio event bits (per-frame, cleared at top of update).
 pub const AUDIO_RANK_UP: u32 = 1 << 0;
@@ -445,6 +454,11 @@ fn xp_for_rank(rank: u32) -> u32 {
     8 + rank * 6 + rank * rank * 2
 }
 
+fn smoothstep01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 // Shard-specific constants. Split / Mirror / Chromatic / Lens / Refract
 // all live in the shards module; these are for the runtime-side shards.
 const HALO_DPS: f32 = 38.0;
@@ -531,29 +545,49 @@ const CASCADE_LIFETIME: f32 = 0.14;
 
 // --- Altitude ---
 
-
 // --- Corruption ---
-const CORRUPTION_START_WAVE: u32 = 3;          // wave gate — patches can't form before this
+const CORRUPTION_START_WAVE: u32 = 3; // wave gate — patches can't form before this
 const CORRUPTION_PATCH_RADIUS: f32 = 65.0;
-const CORRUPTION_REINFORCE_DELAY: f32 = 3.0;  // seconds on surface before enemy contributes
-const CORRUPTION_LEVEL_RATE: f32 = 0.07;      // level gain/sec while enemy near
-const CORRUPTION_DECAY_RATE: f32 = 0.06;      // level loss/sec with no nearby enemy
+const CORRUPTION_REINFORCE_DELAY: f32 = 3.0; // seconds on surface before enemy contributes
+const CORRUPTION_LEVEL_RATE: f32 = 0.07; // level gain/sec while enemy near
+const CORRUPTION_DECAY_RATE: f32 = 0.06; // level loss/sec with no nearby enemy
 const CORRUPTION_CLEANSE_RADIUS: f32 = 80.0;
-const CORRUPTION_CLEANSE_RATE: f32 = 0.55;    // level loss/sec from player presence
+const CORRUPTION_CLEANSE_RATE: f32 = 0.55; // level loss/sec from player presence
 const CORRUPTION_MAX_PATCHES: usize = 48;
-const CORRUPTION_DEBUFF_SPEED: f32 = 0.15;    // 15% speed penalty inside corruption
-const CORRUPTION_WALK_HEAL: f32 = 0.4;        // HP/sec healed while inside corruption
+const CORRUPTION_DEBUFF_SPEED: f32 = 0.15; // 15% speed penalty inside corruption
+const CORRUPTION_WALK_HEAL: f32 = 0.4; // HP/sec healed while inside corruption
 
 // Void Spawn — mini-boss that erupts from a large, old corruption patch.
-const VOID_SPAWN_PATCH_AGE: f32 = 14.0;       // minimum patch age before a spawn can erupt
-const VOID_SPAWN_PATCH_LEVEL: f32 = 0.75;     // minimum patch level required
-const VOID_SPAWN_COOLDOWN: f32 = 22.0;        // seconds before the same patch can spawn again
+const VOID_SPAWN_PATCH_AGE: f32 = 14.0; // minimum patch age before a spawn can erupt
+const VOID_SPAWN_PATCH_LEVEL: f32 = 0.75; // minimum patch level required
+const VOID_SPAWN_COOLDOWN: f32 = 22.0; // seconds before the same patch can spawn again
 const VOID_SPAWN_HP: f32 = 900.0;
 const VOID_SPAWN_RADIUS: f32 = 17.0;
 const VOID_SPAWN_SPEED: f32 = 52.0;
 const VOID_SPAWN_CONTACT_DAMAGE: f32 = 16.0;
 const VOID_SPAWN_XP: u32 = 15;
 const VOID_SPAWN_CLEANSE_RADIUS: f32 = 110.0; // cleanse radius on Void Spawn death
+const MINI_BOSS_BASE_INTERVAL: f32 = 52.0;
+const MINI_BOSS_MIN_INTERVAL: f32 = 24.0;
+const MINI_BOSS_ACTIVE_CAP_LATE: usize = 2;
+const MINI_BOSS_XP_BASE: u32 = 18;
+
+// Extra weapon shards.
+const ARC_BASE_INTERVAL: f32 = 1.15;
+const ARC_CHAIN_RANGE: f32 = 240.0;
+const ARC_BASE_DAMAGE: f32 = 34.0;
+const ARC_DAMAGE_PER_LEVEL: f32 = 8.0;
+const ARC_BEAM_LIFETIME: f32 = 0.10;
+const ARC_BEAM_THICKNESS: f32 = 2.0;
+const MINE_BASE_INTERVAL: f32 = 1.9;
+const MINE_BASE_RADIUS: f32 = 130.0;
+const MINE_RADIUS_PER_LEVEL: f32 = 18.0;
+const MINE_PULSE_LIFETIME: f32 = 0.55;
+const LANCE_BASE_INTERVAL: f32 = 2.9;
+const LANCE_REACH: f32 = 620.0;
+const LANCE_BASE_DAMAGE: f32 = 130.0;
+const LANCE_DAMAGE_PER_LEVEL: f32 = 42.0;
+const LANCE_THICKNESS: f32 = 5.0;
 
 const POLAR_BOUNDARY_Y: f32 = GLOBE_RADIUS * 1.0; // |y| > this = polar zone
 
@@ -636,6 +670,9 @@ impl Game {
             pending_echoes: Vec::new(),
             pending_afterimages: Vec::new(),
             interference_timer: 0.0,
+            arc_timer: 0.0,
+            mine_timer: 0.0,
+            lance_timer: 0.0,
             leveling_up: false,
             level_choices: [None; 3],
             reroll_charges: 2,
@@ -671,6 +708,7 @@ impl Game {
             void_prism_spawned: false,
             void_victory: false,
             boss_breather_timer: 0.0,
+            mini_boss_timer: MINI_BOSS_BASE_INTERVAL,
             boss_kills: 0,
             void_shockwaves: Vec::new(),
             corruption_patches: Vec::new(),
@@ -698,7 +736,9 @@ impl Game {
     }
 
     fn globe_luminosity_inner(&self) -> f32 {
-        let total: f32 = self.corruption_patches.iter()
+        let total: f32 = self
+            .corruption_patches
+            .iter()
             .map(|p| p.level * (p.radius / CORRUPTION_PATCH_RADIUS).powi(2))
             .sum();
         (1.0 - total / 20.0).clamp(0.0, 1.0)
@@ -882,6 +922,12 @@ impl Game {
                         self.player.max_hp += PRISM_HEART_HP_PER_LEVEL;
                         self.player.hp =
                             (self.player.hp + PRISM_HEART_HP_PER_LEVEL).min(self.player.max_hp);
+                    }
+                    match kind {
+                        ShardKind::Arc => self.arc_timer = self.arc_timer.min(0.0),
+                        ShardKind::Minefield => self.mine_timer = self.mine_timer.min(0.0),
+                        ShardKind::Lance => self.lance_timer = self.lance_timer.min(0.0),
+                        _ => {}
                     }
                 }
                 UpgradeOffer::Evolution(evolution) => {
@@ -1160,14 +1206,17 @@ impl Game {
         // Movement (suppressed during dash).
         if self.player.dash_timer <= 0.0 {
             let corruption_speed_mult = if self.player.altitude < 0.2
-                && self.corruption_patches.iter().any(|p| {
-                    p.level > 0.2 && globe_distance(self.player.pos, p.pos) < p.radius
-                }) {
+                && self
+                    .corruption_patches
+                    .iter()
+                    .any(|p| p.level > 0.2 && globe_distance(self.player.pos, p.pos) < p.radius)
+            {
                 1.0 - CORRUPTION_DEBUFF_SPEED
             } else {
                 1.0
             };
-            let player_step = self.input * self.effective_player_speed() * corruption_speed_mult * dt;
+            let player_step =
+                self.input * self.effective_player_speed() * corruption_speed_mult * dt;
             move_on_globe(&mut self.player.pos, player_step);
         }
         self.camera = self.player.pos;
@@ -1227,6 +1276,7 @@ impl Game {
 
         // Spawn enemies (wave-based).
         let enemy_cap = self.enemy_cap_for_wave();
+        self.update_rank_minibosses(dt, enemy_cap);
         let boss_spawn_limited = self.boss.is_some() && self.enemies.len() >= BOSS_SPAWN_SOFT_CAP;
         if !in_breather
             && self.boss_breather_timer <= 0.0
@@ -1238,7 +1288,7 @@ impl Game {
             while self.spawn_timer <= 0.0
                 && self.enemies.len() < enemy_cap
                 && !(self.boss.is_some() && self.enemies.len() >= BOSS_SPAWN_SOFT_CAP)
-                && spawned < MAX_SPAWNS_PER_FRAME
+                && spawned < self.max_spawns_per_frame()
             {
                 self.spawn_wave_enemy();
                 let rate = self.spawn_rate_for_wave();
@@ -1437,7 +1487,9 @@ impl Game {
         // Patches only form once the run is far enough along.
         if self.wave >= CORRUPTION_START_WAVE {
             // Collect surface enemy positions (avoid borrow conflict).
-            let surface_enemy_positions: Vec<Vec2> = self.enemies.iter()
+            let surface_enemy_positions: Vec<Vec2> = self
+                .enemies
+                .iter()
                 .filter(|e| {
                     e.state == EnemyState::Drifting
                         && !is_polar_zone(e.pos)
@@ -1447,7 +1499,9 @@ impl Game {
                 .collect();
 
             for pos in surface_enemy_positions {
-                let found = self.corruption_patches.iter_mut()
+                let found = self
+                    .corruption_patches
+                    .iter_mut()
                     .find(|p| globe_distance(p.pos, pos) < p.radius * 0.7);
                 if let Some(p) = found {
                     p.level = (p.level + CORRUPTION_LEVEL_RATE * dt).min(1.0);
@@ -1465,16 +1519,18 @@ impl Game {
 
         // Age and decay patches.
         {
-            let enemy_positions: Vec<Vec2> = self.enemies.iter()
+            let enemy_positions: Vec<Vec2> = self
+                .enemies
+                .iter()
                 .filter(|e| e.state == EnemyState::Drifting)
                 .map(|e| e.pos)
                 .collect();
             for p in &mut self.corruption_patches {
                 p.age += dt;
                 p.spawn_cooldown = (p.spawn_cooldown - dt).max(0.0);
-                let reinforced = enemy_positions.iter().any(|&epos| {
-                    globe_distance(epos, p.pos) < p.radius
-                });
+                let reinforced = enemy_positions
+                    .iter()
+                    .any(|&epos| globe_distance(epos, p.pos) < p.radius);
                 if !reinforced {
                     p.level = (p.level - CORRUPTION_DECAY_RATE * dt).max(0.0);
                 }
@@ -1493,7 +1549,8 @@ impl Game {
                 }
             }
             if in_corruption {
-                self.player.hp = (self.player.hp + CORRUPTION_WALK_HEAL * dt).min(self.player.max_hp);
+                self.player.hp =
+                    (self.player.hp + CORRUPTION_WALK_HEAL * dt).min(self.player.max_hp);
             }
         }
 
@@ -1538,7 +1595,7 @@ impl Game {
                     no_xp: true,
                     spawn_grace: 0.5,
                     surface_time: 0.0,
-                    is_void_spawn: true,
+                    mini_boss: Some(MiniBossKind::VoidSpawn),
                 });
             }
         }
@@ -1567,8 +1624,7 @@ impl Game {
                 && globe_distance(self.player.pos, s.target) < VOID_SHELL_LAND_RADIUS_DAMAGE
             {
                 let armor = self.inventory.level(ShardKind::Armor) as f32;
-                let dmg = VOID_SHELL_LAND_DAMAGE
-                    * (1.0 - armor * ARMOR_DR_PER_LEVEL).max(0.0);
+                let dmg = VOID_SHELL_LAND_DAMAGE * (1.0 - armor * ARMOR_DR_PER_LEVEL).max(0.0);
                 self.player.hp -= dmg;
                 self.player.iframe_timer = IFRAME_DURATION;
                 self.shake_amount = SHAKE_HIT_PX;
@@ -1595,7 +1651,9 @@ impl Game {
 
         // VoidShell beam interception (player must be at altitude).
         if self.player.altitude >= VOID_SHELL_INTERCEPT_ALTITUDE && !self.void_shells.is_empty() {
-            let beam_segments: Vec<(Vec2, Vec2, f32)> = self.beams.iter()
+            let beam_segments: Vec<(Vec2, Vec2, f32)> = self
+                .beams
+                .iter()
                 .map(|b| (b.start, b.end, b.thickness))
                 .collect();
             let mut intercepted: Vec<usize> = Vec::new();
@@ -1637,13 +1695,29 @@ impl Game {
             if e.kind == EnemyKind::Emitter && e.state == EnemyState::Shooting {
                 // Fire when timer just reset (within dt tolerance).
                 if e.state_timer >= EMITTER_FIRE_INTERVAL - dt * 1.1 {
-                    new_projectiles.push(Projectile {
-                        pos: e.pos,
-                        vel: e.charge_dir * PROJ_SPEED,
-                        life: 0.0,
-                        damage: PROJ_DAMAGE,
-                        radius: PROJ_RADIUS,
-                    });
+                    let shots = if e.mini_boss == Some(MiniBossKind::Riftcaller) {
+                        3
+                    } else {
+                        1
+                    };
+                    let base_angle = e.charge_dir.y.atan2(e.charge_dir.x);
+                    let half_spread = (shots - 1) as f32 * 0.5;
+                    for shot in 0..shots {
+                        let angle = base_angle + (shot as f32 - half_spread) * 0.20;
+                        let dir = Vec2::new(angle.cos(), angle.sin());
+                        let mini_mult = if e.mini_boss == Some(MiniBossKind::Riftcaller) {
+                            1.45
+                        } else {
+                            1.0
+                        };
+                        new_projectiles.push(Projectile {
+                            pos: e.pos,
+                            vel: dir * PROJ_SPEED,
+                            life: 0.0,
+                            damage: PROJ_DAMAGE * mini_mult,
+                            radius: PROJ_RADIUS * mini_mult.sqrt(),
+                        });
+                    }
                 }
             }
         }
@@ -1825,6 +1899,8 @@ impl Game {
             }
         }
 
+        self.update_extra_weapons(dt);
+
         // Beam visual ageing.
         for b in &mut self.beams {
             b.life += dt;
@@ -1833,12 +1909,20 @@ impl Game {
 
         // Beams instantly destroy any corruption patch they touch.
         if !self.corruption_patches.is_empty() && !self.beams.is_empty() {
-            let beam_segs: Vec<(Vec2, Vec2, f32)> = self.beams.iter()
+            let beam_segs: Vec<(Vec2, Vec2, f32)> = self
+                .beams
+                .iter()
                 .map(|b| (b.start, b.end, b.thickness))
                 .collect();
             self.corruption_patches.retain(|p| {
                 !beam_segs.iter().any(|(s, e, thick)| {
-                    capsule_circle_intersect_globe(*s, *e, thick * 0.5 + 12.0, p.pos, p.radius * 0.5)
+                    capsule_circle_intersect_globe(
+                        *s,
+                        *e,
+                        thick * 0.5 + 12.0,
+                        p.pos,
+                        p.radius * 0.5,
+                    )
                 })
             });
         }
@@ -2007,6 +2091,9 @@ impl Game {
         let gravity_pull: Option<f32> = if self
             .inventory
             .has_synergy(ShardKind::Magnet, ShardKind::Interference)
+            || self
+                .inventory
+                .has_synergy(ShardKind::Minefield, ShardKind::Magnet)
             || singularity
         {
             let base = 70.0
@@ -2024,8 +2111,13 @@ impl Game {
         } else {
             110.0
         };
+        let seismic_field = self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Interference);
         let interference_dmg_mult = if singularity {
             SINGULARITY_DAMAGE_MULT
+        } else if seismic_field {
+            1.35
         } else {
             1.0
         };
@@ -2065,7 +2157,7 @@ impl Game {
                         _ => {
                             let d = globe_distance(boss.pos, *ppos);
                             if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + boss.radius {
-                                boss.hp -= INTERFERENCE_DPS * dt;
+                                boss.hp -= INTERFERENCE_DPS * interference_dmg_mult * dt;
                             }
                         }
                     }
@@ -2143,7 +2235,7 @@ impl Game {
                     cascade_depth,
                     dead.no_xp,
                     dead.slow_timer > 0.0,
-                    dead.is_void_spawn,
+                    dead.mini_boss,
                 );
             }
             cascade_depth += 1;
@@ -2301,10 +2393,12 @@ impl Game {
         let mut activated = false;
         let mut phase_changed = false;
         let mut add_spawn: Option<(Vec2, EnemyKind, u32)> = None;
-        let mut hydra_fire_positions: Vec<(Vec2, u32)> = Vec::new();
+        let mut sentinel_fire_positions: Vec<(Vec2, f32)> = Vec::new();
+        let mut hydra_fire_positions: Vec<(Vec2, u32, f32)> = Vec::new();
         let mut lobes_died: Vec<(Vec2, usize)> = Vec::new();
         let mut finish_death = false;
-        let mut void_shockwave_origins: Vec<Vec2> = Vec::new();
+        let mut void_shockwave_origins: Vec<(Vec2, f32)> = Vec::new();
+        let rank_weapon_scale = 1.0 + self.rank_pressure() * BOSS_WEAPON_DAMAGE_RANK_MULT;
 
         if let Some(boss) = &mut self.boss {
             match boss.state {
@@ -2342,6 +2436,8 @@ impl Game {
                 BossState::Active => {
                     boss.active_time += dt;
                     let escalation = Self::boss_escalation_tier(boss.active_time);
+                    let weapon_scale =
+                        rank_weapon_scale + escalation as f32 * BOSS_WEAPON_DAMAGE_ESCALATION_MULT;
                     let dir = nearest_globe_delta(boss.pos, self.player.pos).normalize_or_zero();
                     move_on_globe(&mut boss.pos, dir * boss.speed * dt);
 
@@ -2384,6 +2480,14 @@ impl Game {
                                     1 => 1,
                                     _ => 3,
                                 } + escalation;
+                                for i in 0..boss.shield_hp.len() {
+                                    if boss.shield_hp[i] > 0.0 {
+                                        sentinel_fire_positions.push((
+                                            Self::sentinel_shield_pos(boss, i),
+                                            weapon_scale,
+                                        ));
+                                    }
+                                }
                                 add_spawn = Some((boss.pos, kind, count));
                             }
                         }
@@ -2414,8 +2518,11 @@ impl Game {
                                 let shot_count = 1 + escalation.min(5);
                                 for i in 0..3usize {
                                     if boss.lobe_hp[i] > 0.0 {
-                                        hydra_fire_positions
-                                            .push((Self::hydra_lobe_pos(boss, i), shot_count));
+                                        hydra_fire_positions.push((
+                                            Self::hydra_lobe_pos(boss, i),
+                                            shot_count,
+                                            weapon_scale,
+                                        ));
                                     }
                                 }
                             }
@@ -2441,7 +2548,7 @@ impl Game {
                                 boss.fire_timer =
                                     (base_interval - escalation as f32 * 0.05).max(0.55);
                                 let wave_count = 1 + (escalation / 2).min(4);
-                                void_shockwave_origins.push(boss.pos);
+                                void_shockwave_origins.push((boss.pos, weapon_scale));
                                 let base_angle = boss.active_time * 0.7;
                                 for i in 1..wave_count {
                                     let angle = base_angle
@@ -2452,7 +2559,7 @@ impl Game {
                                         Vec2::new(angle.cos(), angle.sin())
                                             * (VOID_PRISM_RADIUS + 46.0),
                                     );
-                                    void_shockwave_origins.push(origin);
+                                    void_shockwave_origins.push((origin, weapon_scale));
                                 }
                             }
                         }
@@ -2504,9 +2611,20 @@ impl Game {
                 });
             }
         }
-        // Hydra: fire a projectile from each surviving lobe toward the player.
+        // Sentinel: living shield satellites now fire targeted shots while summoning adds.
         let player_pos = self.player.pos;
-        for (lobe_pos, shot_count) in hydra_fire_positions {
+        for (shield_pos, damage_scale) in sentinel_fire_positions {
+            let dir = nearest_globe_delta(shield_pos, player_pos).normalize_or_zero();
+            self.projectiles.push(Projectile {
+                pos: shield_pos,
+                vel: dir * BOSS_PROJ_SPEED * 1.08,
+                radius: PROJ_RADIUS * 1.12,
+                damage: BOSS_PROJ_DAMAGE * 0.75 * damage_scale,
+                life: 0.0,
+            });
+        }
+        // Hydra: fire a projectile from each surviving lobe toward the player.
+        for (lobe_pos, shot_count, damage_scale) in hydra_fire_positions {
             let dir = nearest_globe_delta(lobe_pos, player_pos).normalize_or_zero();
             let base_angle = dir.y.atan2(dir.x);
             let half_spread = (shot_count.saturating_sub(1)) as f32 * 0.5;
@@ -2517,13 +2635,13 @@ impl Game {
                     pos: lobe_pos,
                     vel: shot_dir * BOSS_PROJ_SPEED,
                     radius: PROJ_RADIUS,
-                    damage: BOSS_PROJ_DAMAGE,
+                    damage: BOSS_PROJ_DAMAGE * damage_scale,
                     life: 0.0,
                 });
             }
         }
         // Void Prism: emit a player-damaging shockwave ring.
-        for origin in void_shockwave_origins {
+        for (origin, damage_scale) in void_shockwave_origins {
             let phase = self.boss.as_ref().map(|b| b.phase).unwrap_or(0);
             let max_radius = VOID_PRISM_SHOCKWAVE_MAX_RADIUS * if phase == 1 { 1.25 } else { 1.0 };
             let duration = max_radius / 180.0;
@@ -2532,7 +2650,7 @@ impl Game {
                 life: 0.0,
                 max_life: duration,
                 max_radius,
-                damage: VOID_PRISM_SHOCKWAVE_DAMAGE,
+                damage: VOID_PRISM_SHOCKWAVE_DAMAGE * damage_scale,
                 hit_player: false,
             });
             self.shake_amount += 3.0;
@@ -2581,7 +2699,136 @@ impl Game {
             no_xp: false,
             spawn_grace: SPAWN_GRACE,
             surface_time: 0.0,
-            is_void_spawn: false,
+            mini_boss: None,
+        });
+    }
+
+    fn mini_boss_active_count(&self) -> usize {
+        self.enemies
+            .iter()
+            .filter(|e| e.mini_boss.is_some())
+            .count()
+    }
+
+    fn update_rank_minibosses(&mut self, dt: f32, enemy_cap: usize) {
+        if self.rank <= RANK_PRESSURE_START || self.boss.is_some() {
+            return;
+        }
+        let active_cap = if self.rank >= 24 {
+            MINI_BOSS_ACTIVE_CAP_LATE
+        } else {
+            1
+        };
+        if self.mini_boss_active_count() >= active_cap {
+            return;
+        }
+
+        self.mini_boss_timer -= dt;
+        if self.mini_boss_timer > 0.0 {
+            return;
+        }
+
+        let interval = MINI_BOSS_BASE_INTERVAL
+            - (MINI_BOSS_BASE_INTERVAL - MINI_BOSS_MIN_INTERVAL) * self.rank_pressure();
+        self.mini_boss_timer = interval;
+
+        if self.enemies.len() >= enemy_cap {
+            return;
+        }
+        let Some(kind) = self.pick_rank_miniboss_kind() else {
+            return;
+        };
+        self.spawn_rank_miniboss(kind);
+    }
+
+    fn pick_rank_miniboss_kind(&mut self) -> Option<MiniBossKind> {
+        let rank_after_10 = self.rank.saturating_sub(RANK_PRESSURE_START);
+        let pool = [
+            (MiniBossKind::Bulwark, 5u32),
+            (MiniBossKind::Riftcaller, 4),
+            (
+                MiniBossKind::MirrorWraith,
+                if rank_after_10 >= 5 { 4 } else { 0 },
+            ),
+            (
+                MiniBossKind::SplitCore,
+                if rank_after_10 >= 10 { 3 } else { 0 },
+            ),
+        ];
+        weighted_pick(&pool, &mut self.rng)
+    }
+
+    fn spawn_rank_miniboss(&mut self, kind: MiniBossKind) {
+        let angle = self.rng.angle();
+        let dir = Vec2::new(angle.cos(), angle.sin());
+        let mut pos = self.player.pos;
+        move_on_globe(&mut pos, dir * self.screen_size.length() * 0.46);
+        self.spawn_miniboss_at(kind, pos);
+    }
+
+    fn spawn_miniboss_at(&mut self, mini_kind: MiniBossKind, pos: Vec2) {
+        let rank_scale = 1.0 + self.rank.saturating_sub(RANK_PRESSURE_START) as f32 * 0.12;
+        let pressure = self.rank_pressure();
+        let (kind, radius, hp, speed, contact_damage, color) = match mini_kind {
+            MiniBossKind::VoidSpawn => (
+                EnemyKind::Brute,
+                VOID_SPAWN_RADIUS,
+                VOID_SPAWN_HP,
+                VOID_SPAWN_SPEED,
+                VOID_SPAWN_CONTACT_DAMAGE,
+                [0.55, 0.05, 0.82],
+            ),
+            MiniBossKind::Bulwark => (
+                EnemyKind::Brute,
+                30.0,
+                5200.0 * rank_scale,
+                44.0 + pressure * 18.0,
+                34.0,
+                [1.0, 0.34, 0.18],
+            ),
+            MiniBossKind::Riftcaller => (
+                EnemyKind::Emitter,
+                18.0,
+                3600.0 * rank_scale,
+                62.0 + pressure * 20.0,
+                18.0,
+                [0.82, 0.22, 1.0],
+            ),
+            MiniBossKind::MirrorWraith => (
+                EnemyKind::Umbra,
+                15.0,
+                3300.0 * rank_scale,
+                122.0 + pressure * 26.0,
+                26.0,
+                [0.62, 0.22, 1.0],
+            ),
+            MiniBossKind::SplitCore => (
+                EnemyKind::Splitter,
+                21.0,
+                4300.0 * rank_scale,
+                78.0 + pressure * 22.0,
+                24.0,
+                [0.28, 1.0, 0.48],
+            ),
+        };
+
+        self.shake_amount += 5.0;
+        self.enemies.push(Enemy {
+            pos,
+            radius,
+            hp,
+            speed,
+            kind,
+            state: EnemyState::Drifting,
+            state_timer: 0.0,
+            charge_dir: Vec2::ZERO,
+            color,
+            contact_damage,
+            slow_timer: 0.0,
+            no_xp: true,
+            spawn_grace: 0.6,
+            surface_time: 0.0,
+            mini_boss: Some(mini_kind),
         });
     }
 
@@ -2749,6 +2996,7 @@ impl Game {
 
     fn fire_shield_break_burst(&mut self, shield_pos: Vec2) {
         self.audio_event_bits |= AUDIO_SHIELD_BREAK;
+        let damage_scale = 1.0 + self.rank_pressure() * BOSS_WEAPON_DAMAGE_RANK_MULT;
         for i in 0..BOSS_SHIELD_BURST_COUNT {
             let angle = (i as f32 / BOSS_SHIELD_BURST_COUNT as f32) * std::f32::consts::TAU;
             let dir = Vec2::new(angle.cos(), angle.sin());
@@ -2756,7 +3004,7 @@ impl Game {
                 pos: shield_pos,
                 vel: dir * BOSS_PROJ_SPEED,
                 radius: PROJ_RADIUS,
-                damage: BOSS_PROJ_DAMAGE * 0.6,
+                damage: BOSS_PROJ_DAMAGE * 0.6 * damage_scale,
                 life: 0.0,
             });
         }
@@ -2792,6 +3040,217 @@ impl Game {
     }
 
     // --- Firing ---------------------------------------------------------
+
+    fn update_extra_weapons(&mut self, dt: f32) {
+        let arc = self.inventory.level(ShardKind::Arc);
+        if arc > 0 {
+            self.arc_timer -= dt;
+            if self.arc_timer <= 0.0 {
+                self.fire_arc(arc);
+                let storm_front = self
+                    .inventory
+                    .has_synergy(ShardKind::Arc, ShardKind::Cascade);
+                let interval =
+                    (ARC_BASE_INTERVAL - arc as f32 * 0.07 - if storm_front { 0.16 } else { 0.0 })
+                        .max(0.48);
+                self.arc_timer += interval;
+            }
+        }
+
+        let minefield = self.inventory.level(ShardKind::Minefield);
+        if minefield > 0 {
+            self.mine_timer -= dt;
+            if self.mine_timer <= 0.0 {
+                self.drop_minefield(minefield);
+                let seismic = self
+                    .inventory
+                    .has_synergy(ShardKind::Minefield, ShardKind::Interference);
+                let interval = (MINE_BASE_INTERVAL
+                    - minefield as f32 * 0.12
+                    - if seismic { 0.30 } else { 0.0 })
+                .max(0.72);
+                self.mine_timer += interval;
+            }
+        }
+
+        let lance = self.inventory.level(ShardKind::Lance);
+        if lance > 0 {
+            self.lance_timer -= dt;
+            if self.lance_timer <= 0.0 {
+                self.fire_lance(lance);
+                let rail_focus = self
+                    .inventory
+                    .has_synergy(ShardKind::Lance, ShardKind::Lens);
+                let interval = (LANCE_BASE_INTERVAL
+                    - lance as f32 * 0.14
+                    - if rail_focus { 0.35 } else { 0.0 })
+                .max(1.25);
+                self.lance_timer += interval;
+            }
+        }
+    }
+
+    fn fire_arc(&mut self, level: u8) {
+        let static_freeze = self.inventory.has_synergy(ShardKind::Arc, ShardKind::Frost);
+        let storm_front = self
+            .inventory
+            .has_synergy(ShardKind::Arc, ShardKind::Cascade);
+        let max_chains = 2 + level as usize + if storm_front { 2 } else { 0 };
+        let chain_range = ARC_CHAIN_RANGE + level as f32 * 18.0;
+        let mut from = self.player.pos;
+        let mut used: Vec<usize> = Vec::new();
+        let mut hits: Vec<(usize, Vec2, Vec2)> = Vec::new();
+
+        for _ in 0..max_chains {
+            let next = self
+                .enemies
+                .iter()
+                .enumerate()
+                .filter(|(idx, e)| e.hp > 0.0 && !used.contains(idx))
+                .map(|(idx, e)| {
+                    let target = nearest_globe_pos(from, e.pos);
+                    let dist_sq = (target - from).length_squared();
+                    (idx, target, dist_sq)
+                })
+                .filter(|(_, _, dist_sq)| *dist_sq <= chain_range * chain_range)
+                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+            let Some((idx, target, _)) = next else {
+                break;
+            };
+            used.push(idx);
+            hits.push((idx, from, target));
+            from = target;
+        }
+
+        if hits.is_empty() {
+            return;
+        }
+
+        let mut cascade_origins = Vec::new();
+        let damage = ARC_BASE_DAMAGE + ARC_DAMAGE_PER_LEVEL * level as f32;
+        for (idx, start, end) in &hits {
+            if let Some(e) = self.enemies.get_mut(*idx) {
+                let was_alive = e.hp > 0.0;
+                let mut dmg = damage;
+                if static_freeze {
+                    if e.slow_timer > 0.0 {
+                        dmg *= 1.35;
+                    }
+                    e.slow_timer = e.slow_timer.max(FROST_SLOW_DURATION * 0.8);
+                }
+                e.hp -= dmg;
+                self.hit_flash_positions.push(e.pos);
+                if storm_front && was_alive && e.hp <= 0.0 {
+                    cascade_origins.push(e.pos);
+                }
+            }
+            self.beams.push(Beam {
+                start: *start,
+                end: *end,
+                life: 0.0,
+                max_life: ARC_BEAM_LIFETIME,
+                thickness: ARC_BEAM_THICKNESS + level as f32 * 0.18,
+                color: if static_freeze {
+                    [0.58, 0.95, 1.0]
+                } else {
+                    [0.86, 0.72, 1.0]
+                },
+            });
+        }
+
+        if storm_front {
+            let cascade_level = self.inventory.level(ShardKind::Cascade).max(1);
+            for pos in cascade_origins {
+                self.fire_cascade_beams(pos, cascade_level, 2, [0.55, 0.84, 1.0]);
+            }
+        }
+        self.audio_beam_count += 1;
+    }
+
+    fn drop_minefield(&mut self, level: u8) {
+        let gravity_mines = self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Magnet);
+        let seismic = self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Interference);
+        let count = 1 + (level / 3) as u32 + if seismic { 1 } else { 0 };
+        let radius = MINE_BASE_RADIUS
+            + MINE_RADIUS_PER_LEVEL * level as f32
+            + if gravity_mines { 70.0 } else { 0.0 };
+
+        for i in 0..count {
+            let mut pos = if i == 0 {
+                self.find_nearest_enemy_pos_from(self.player.pos)
+                    .unwrap_or(self.player.pos)
+            } else {
+                let angle = self.rng.angle();
+                let mut p = self.player.pos;
+                move_on_globe(
+                    &mut p,
+                    Vec2::new(angle.cos(), angle.sin()) * self.rng.range(70.0, 240.0),
+                );
+                p
+            };
+            if is_polar_zone(pos) {
+                pos.y = pos.y.signum() * POLAR_BOUNDARY_Y * 0.9;
+            }
+            self.pulses.push(InterferencePulse {
+                pos,
+                life: 0.0,
+                max_life: MINE_PULSE_LIFETIME,
+                max_radius: radius,
+            });
+            for _ in 0..5 {
+                let a = self.rng.angle();
+                self.particles.push(Particle {
+                    pos,
+                    vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(35.0, 110.0),
+                    life: 0.0,
+                    max_life: self.rng.range(0.18, 0.36),
+                    color: [0.65, 1.0, 0.74],
+                    size: self.rng.range(1.8, 4.0),
+                });
+            }
+        }
+    }
+
+    fn fire_lance(&mut self, level: u8) {
+        let Some(target) = self.find_nearest_enemy_pos_from(self.player.pos) else {
+            return;
+        };
+        let dir = nearest_globe_delta(self.player.pos, target).normalize_or_zero();
+        if dir.length_squared() < 1e-4 {
+            return;
+        }
+        let rail_focus = self
+            .inventory
+            .has_synergy(ShardKind::Lance, ShardKind::Lens);
+        let surgical_drain = self
+            .inventory
+            .has_synergy(ShardKind::Lance, ShardKind::Siphon);
+        let reach = LANCE_REACH * if rail_focus { 1.18 } else { 1.0 };
+        let damage = (LANCE_BASE_DAMAGE + LANCE_DAMAGE_PER_LEVEL * level as f32)
+            * if rail_focus { 1.55 } else { 1.0 }
+            * if surgical_drain { 1.18 } else { 1.0 };
+        let thickness = LANCE_THICKNESS + level as f32 * 0.65 + if rail_focus { 4.0 } else { 0.0 };
+
+        self.fire_beam(
+            BeamRequest {
+                start: self.player.pos,
+                end: self.player.pos + dir * reach,
+                thickness,
+                damage,
+                color: if surgical_drain {
+                    [0.72, 1.0, 0.88]
+                } else {
+                    [1.0, 0.94, 0.58]
+                },
+            },
+            self.player.pos,
+        );
+    }
 
     fn fire_primary(&mut self) -> bool {
         self.fire_primary_inner(true, None, None)
@@ -2836,7 +3295,7 @@ impl Game {
                             no_xp: true,
                             spawn_grace: 0.0,
                             surface_time: 0.0,
-                            is_void_spawn: false,
+                            mini_boss: None,
                         });
                     }
                     BossKind::Hydra => {
@@ -2858,7 +3317,7 @@ impl Game {
                                     no_xp: true,
                                     spawn_grace: 0.0,
                                     surface_time: 0.0,
-                                    is_void_spawn: false,
+                                    mini_boss: None,
                                 });
                             }
                         }
@@ -2879,7 +3338,7 @@ impl Game {
                             no_xp: true,
                             spawn_grace: 0.0,
                             surface_time: 0.0,
-                            is_void_spawn: false,
+                            mini_boss: None,
                         });
                     }
                 }
@@ -3063,35 +3522,15 @@ impl Game {
         cascade_depth: u32,
         no_xp: bool,
         was_frozen: bool,
-        is_void_spawn: bool,
+        mini_boss: Option<MiniBossKind>,
     ) {
         self.kills_total += 1;
         self.kills_by_kind[kind as usize] = self.kills_by_kind[kind as usize].saturating_add(1);
         self.audio_kill_count += 1;
         self.spawn_death_particles(pos, kind);
 
-        // Void Spawn death: cleanse nearby corruption and drop a generous XP burst.
-        if is_void_spawn {
-            self.corruption_patches.retain(|p| {
-                globe_distance(pos, p.pos) >= VOID_SPAWN_CLEANSE_RADIUS
-            });
-            self.gems.push(XpGem {
-                pos,
-                value: VOID_SPAWN_XP,
-                life: 0.0,
-            });
-            self.shake_amount += 6.0;
-            for _ in 0..20 {
-                let a = self.rng.angle();
-                self.particles.push(Particle {
-                    pos,
-                    vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(60.0, 160.0),
-                    life: 0.0,
-                    max_life: self.rng.range(0.3, 0.7),
-                    color: [0.85, 0.65, 1.0],
-                    size: self.rng.range(2.0, 5.0),
-                });
-            }
+        if let Some(mini_boss) = mini_boss {
+            self.on_miniboss_death(pos, mini_boss);
             return;
         }
 
@@ -3155,7 +3594,7 @@ impl Game {
                     no_xp: true,
                     spawn_grace: SPAWN_GRACE,
                     surface_time: 0.0,
-                    is_void_spawn: false,
+                    mini_boss: None,
                 });
             }
         }
@@ -3321,6 +3760,81 @@ impl Game {
         }
     }
 
+    fn drop_xp_burst(&mut self, pos: Vec2, count: u32, value: u32, radius: f32) {
+        for i in 0..count {
+            let angle = i as f32 * std::f32::consts::TAU / count as f32;
+            let mut gem_pos = pos;
+            move_on_globe(&mut gem_pos, Vec2::new(angle.cos(), angle.sin()) * radius);
+            self.gems.push(XpGem {
+                pos: gem_pos,
+                value,
+                life: 0.0,
+            });
+        }
+    }
+
+    fn on_miniboss_death(&mut self, pos: Vec2, mini_boss: MiniBossKind) {
+        let (color, particle_count) = match mini_boss {
+            MiniBossKind::VoidSpawn => ([0.85, 0.65, 1.0], 20),
+            MiniBossKind::Bulwark => ([1.0, 0.46, 0.22], 28),
+            MiniBossKind::Riftcaller => ([0.92, 0.35, 1.0], 24),
+            MiniBossKind::MirrorWraith => ([0.65, 0.72, 1.0], 24),
+            MiniBossKind::SplitCore => ([0.35, 1.0, 0.58], 26),
+        };
+
+        if mini_boss == MiniBossKind::VoidSpawn {
+            self.corruption_patches
+                .retain(|p| globe_distance(pos, p.pos) >= VOID_SPAWN_CLEANSE_RADIUS);
+            self.gems.push(XpGem {
+                pos,
+                value: VOID_SPAWN_XP,
+                life: 0.0,
+            });
+        } else {
+            let reward_value = (MINI_BOSS_XP_BASE / 4) + self.rank / 10;
+            self.drop_xp_burst(pos, 7, reward_value.max(4), 28.0);
+        }
+
+        match mini_boss {
+            MiniBossKind::Bulwark => {
+                self.pulses.push(InterferencePulse {
+                    pos,
+                    life: 0.0,
+                    max_life: 0.55,
+                    max_radius: 240.0,
+                });
+            }
+            MiniBossKind::Riftcaller => {
+                self.spawn_boss_adds(pos, EnemyKind::Emitter, 3, 18.0);
+            }
+            MiniBossKind::MirrorWraith => {
+                self.fire_cascade_beams(pos, 2, 5, [0.64, 0.72, 1.0]);
+            }
+            MiniBossKind::SplitCore => {
+                for i in 0..6 {
+                    let angle = i as f32 * std::f32::consts::TAU / 6.0;
+                    let mut spawn_pos = pos;
+                    move_on_globe(&mut spawn_pos, Vec2::new(angle.cos(), angle.sin()) * 24.0);
+                    self.spawn_enemy_near_pos(EnemyKind::Dasher, spawn_pos);
+                }
+            }
+            MiniBossKind::VoidSpawn => {}
+        }
+
+        self.shake_amount += 7.0;
+        for _ in 0..particle_count {
+            let a = self.rng.angle();
+            self.particles.push(Particle {
+                pos,
+                vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(70.0, 190.0),
+                life: 0.0,
+                max_life: self.rng.range(0.3, 0.8),
+                color,
+                size: self.rng.range(2.2, 5.8),
+            });
+        }
+    }
+
     fn check_for_level_up(&mut self) {
         if self.leveling_up {
             return;
@@ -3411,10 +3925,7 @@ impl Game {
                     .iter()
                     .map(|h| {
                         let mut p = self.player.pos;
-                        move_on_globe(
-                            &mut p,
-                            Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius,
-                        );
+                        move_on_globe(&mut p, Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius);
                         p
                     })
                     .collect();
@@ -3423,8 +3934,7 @@ impl Game {
                         let a = self.rng.angle();
                         self.particles.push(Particle {
                             pos: hpos,
-                            vel: Vec2::new(a.cos(), a.sin())
-                                * self.rng.range(80.0, 240.0),
+                            vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(80.0, 240.0),
                             life: 0.0,
                             max_life: self.rng.range(0.14, 0.32),
                             color: [1.0, 0.92, 0.42],
@@ -3546,19 +4056,35 @@ impl Game {
         self.kills_total + self.rank * 5 + time_bonus + self.boss_kills * 500
     }
 
+    fn rank_pressure(&self) -> f32 {
+        let span = (RANK_PRESSURE_END - RANK_PRESSURE_START) as f32;
+        let t = self.rank.saturating_sub(RANK_PRESSURE_START) as f32 / span;
+        smoothstep01(t)
+    }
+
+    fn max_spawns_per_frame(&self) -> u32 {
+        let extra = (MAX_SPAWNS_PER_FRAME - BASE_SPAWNS_PER_FRAME) as f32 * self.rank_pressure();
+        BASE_SPAWNS_PER_FRAME + extra.round() as u32
+    }
+
     fn enemy_cap_for_wave(&self) -> usize {
         let overdrive_minutes = ((self.time - OVERDRIVE_START) / 60.0).max(0.0);
         let overdrive_bonus = (overdrive_minutes * 18.0) as usize;
-        (BASE_ENEMY_CAP + self.wave as usize * ENEMY_CAP_PER_WAVE + overdrive_bonus)
-            .min(MAX_ENEMIES)
+        let wave_cap = (BASE_ENEMY_CAP + self.wave as usize * ENEMY_CAP_PER_WAVE + overdrive_bonus)
+            .min(MAX_ENEMIES);
+        let rank_cap = BASE_ENEMY_CAP
+            + ((MAX_ENEMIES - BASE_ENEMY_CAP) as f32 * self.rank_pressure()) as usize;
+        wave_cap.max(rank_cap).min(MAX_ENEMIES)
     }
 
     fn spawn_rate_for_wave(&self) -> f32 {
         let minute = self.time / 60.0;
         let overdrive_minutes = ((self.time - OVERDRIVE_START) / 60.0).max(0.0);
+        let rank_pressure = self.rank_pressure();
         let base = 0.34 - self.wave as f32 * 0.018 - minute * 0.006;
         let overdrive_mult = (1.0 - overdrive_minutes * 0.05).max(0.80);
-        let min_interval = (0.050 - overdrive_minutes * 0.004).max(0.032);
+        let rank_mult = 1.0 - rank_pressure * 0.45;
+        let min_interval = (0.050 - overdrive_minutes * 0.004 - rank_pressure * 0.024).max(0.018);
         // Shape multiplier: Surge/Swarm spawn faster, Steady is normal.
         let shape_mult = match self.wave_shape() {
             WaveShape::Surge => 0.6,
@@ -3570,7 +4096,7 @@ impl Game {
             }
             _ => 1.0,
         };
-        (base * shape_mult * overdrive_mult).max(min_interval)
+        (base * shape_mult * overdrive_mult * rank_mult).max(min_interval)
     }
 
     fn spawn_wave_enemy(&mut self) {
@@ -3613,7 +4139,7 @@ impl Game {
             no_xp: false,
             spawn_grace: SPAWN_GRACE,
             surface_time: 0.0,
-            is_void_spawn: false,
+            mini_boss: None,
         });
     }
 
@@ -3715,6 +4241,26 @@ impl Game {
             ];
             if let Some(kind) = weighted_pick(&pool, &mut self.rng) {
                 return kind;
+            }
+        }
+
+        let rank_after_10 = self.rank.saturating_sub(RANK_PRESSURE_START);
+        if rank_after_10 > 0 {
+            let diversity_chance = (22 + rank_after_10 * 3).min(78);
+            if self.rng.next_u32() % 100 < diversity_chance {
+                let pool = [
+                    (EnemyKind::Drone, 3u32),
+                    (EnemyKind::Brute, 4 + rank_after_10.min(8)),
+                    (EnemyKind::Dasher, 5 + rank_after_10.min(10)),
+                    (EnemyKind::Splitter, 4 + rank_after_10.min(8)),
+                    (EnemyKind::Orbiter, 4 + rank_after_10.min(8)),
+                    (EnemyKind::Emitter, 4 + rank_after_10.min(10)),
+                    (EnemyKind::Pulsar, 3 + rank_after_10.min(8)),
+                    (EnemyKind::Umbra, 2 + rank_after_10.min(8)),
+                ];
+                if let Some(kind) = weighted_pick(&pool, &mut self.rng) {
+                    return kind;
+                }
             }
         }
 
@@ -4415,9 +4961,10 @@ impl Game {
                             1.0,
                         )
                     }
-                    _ if e.is_void_spawn => {
+                    _ if e.mini_boss.is_some() => {
                         let pulse = (self.time * 4.5).sin() * 0.5 + 0.5;
-                        (1.2 + pulse * 2.0, 0.55, 0.05 + pulse * 0.12, 0.82, 1.0)
+                        let glow = 1.4 + pulse * 2.4;
+                        (glow, e.color[0], e.color[1], e.color[2], 1.0)
                     }
                     _ => (0.6, e.color[0], e.color[1], e.color[2], 1.0),
                 }

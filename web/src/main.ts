@@ -17,6 +17,7 @@ const BEAM_STRIDE_FLOATS = 10;
 const SYNERGY_NAMES: string[] = [
   'CHAIN REACTION', 'BLIZZARD', 'SUPERNOVA', 'PRISM CANNON', 'TRACKING ECHO',
   'FROZEN ORBIT', 'EVENT HORIZON', 'BLOOD PACT', 'MARTYRDOM', 'RESONANCE', 'GRAVITY WELL',
+  'STATIC FREEZE', 'STORM FRONT', 'GRAVITY MINES', 'SEISMIC FIELD', 'RAIL FOCUS', 'SURGICAL DRAIN',
 ];
 const BOSS_NAMES: string[] = ['PRISM SENTINEL', 'HYDRA', 'VOID PRISM'];
 const DAMAGE_SOURCE_NAMES: string[] = ['ENEMY CONTACT', 'PROJECTILE', 'BOSS CONTACT', 'VOID SHOCKWAVE'];
@@ -50,6 +51,9 @@ const SHARDS: ShardMeta[] = [
   { name: 'LUCK',         color: '#ffd740', rarity: 'rare',      desc: 'rare and legendary shards appear more often', synergies: [] },
   { name: 'PRISM HEART',  color: '#ff7eb3', rarity: 'common',    desc: '+15 max HP per level; level-up heals more',   synergies: [] },
   { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: 'dash grants longer i-frames; L3: afterimage', synergies: [] },
+  { name: 'ARC',          color: '#b58cff', rarity: 'rare',      desc: 'chain lightning leaps between nearby enemies', synergies: ['FROST → STATIC FREEZE', 'CASCADE → STORM FRONT'] },
+  { name: 'MINEFIELD',    color: '#7dff98', rarity: 'legendary', desc: 'seed expanding pulse mines near threats',      synergies: ['MAGNET → GRAVITY MINES', 'INTERFERENCE → SEISMIC FIELD'] },
+  { name: 'LANCE',        color: '#fff06a', rarity: 'rare',      desc: 'periodic heavy piercing rail shot',            synergies: ['LENS → RAIL FOCUS', 'SIPHON → SURGICAL DRAIN'] },
 ];
 
 // Must stay in index-lock with Rust's EvolutionKind enum (src/shards.rs).
