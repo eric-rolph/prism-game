@@ -82,7 +82,7 @@
         transition: width 120ms ease-out;
       }
 
-      /* Shard tray: 20 pips at the bottom-left, filling with color as their level rises. */
+      /* Shard tray: compact faceted pips, filling with color as their level rises. */
       #shards-tray {
         position: absolute;
         left: 14px;
@@ -95,7 +95,8 @@
       .shard-pip {
         width: 12px;
         height: 12px;
-        border-radius: 50%;
+        border-radius: 1px;
+        clip-path: polygon(50% 0%, 100% 36%, 82% 100%, 18% 100%, 0% 36%);
         border: 1px solid var(--faint);
         background: transparent;
         position: relative;
@@ -154,7 +155,7 @@
         min-height: 240px;
         padding: 22px 20px;
         border: 1px solid var(--faint);
-        border-radius: 2px;
+        border-radius: 4px;
         background: rgba(10, 8, 20, 0.55);
         display: flex;
         flex-direction: column;
@@ -169,7 +170,8 @@
       .shard-icon {
         width: 48px;
         height: 48px;
-        border-radius: 50%;
+        border-radius: 1px;
+        clip-path: polygon(50% 0%, 100% 34%, 78% 100%, 22% 100%, 0% 34%);
         box-shadow: 0 0 20px currentColor, 0 0 42px currentColor inset;
         margin-bottom: 4px;
       }
@@ -191,12 +193,16 @@
       .shard-synergy {
         display: flex;
         flex-direction: column;
-        gap: 2px;
+        gap: 4px;
         margin-top: 4px;
         font-size: 10px;
-        color: #ffd740;
+        color: #dfffb0;
         text-transform: uppercase;
         letter-spacing: 0.5px;
+      }
+      .shard-synergy span {
+        padding-left: 7px;
+        border-left: 2px solid currentColor;
       }
       .shard-hotkey {
         margin-top: auto;

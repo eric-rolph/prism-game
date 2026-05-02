@@ -6,8 +6,8 @@
 
 use crate::entities::{
     Beam, Boss, BossKind, BossState, CorruptionPatch, Crystal, Enemy, EnemyKind, EnemyState,
-    FrostField, Halo, InterferencePulse, MiniBossKind, Particle, Player, Projectile, VoidShell,
-    VoidShockwave, XpGem,
+    FrostField, Halo, InterferencePulse, MiniBossKind, Particle, Player, Projectile, PulseKind,
+    VoidShell, VoidShockwave, XpGem,
 };
 use crate::math::Rng;
 use crate::shards::{
@@ -159,6 +159,13 @@ const BEAM_COOLDOWN: f32 = 0.20;
 const DASH_DISTANCE: f32 = 120.0;
 const DASH_DURATION: f32 = 0.10;
 const DASH_COOLDOWN: f32 = 3.0;
+const DASH_BLAST_BASE_RADIUS: f32 = 92.0;
+const DASH_BLAST_RADIUS_PER_PHASE: f32 = 9.0;
+const DASH_BLAST_BASE_DAMAGE: f32 = 210.0;
+const DASH_BLAST_DAMAGE_PER_MOMENTUM: f32 = 18.0;
+const DASH_BLAST_PUSH: f32 = 260.0;
+const DASH_BLAST_LIFETIME: f32 = 0.34;
+const DASH_BLAST_BOSS_DAMAGE_MULT: f32 = 0.40;
 
 // Wave system.
 const WAVE_DURATION: f32 = 30.0;
@@ -238,6 +245,8 @@ pub const AUDIO_PLAYER_HIT: u32 = 1 << 1;
 pub const AUDIO_BOSS_SPAWN: u32 = 1 << 2;
 pub const AUDIO_BOSS_PHASE: u32 = 1 << 3;
 pub const AUDIO_SHIELD_BREAK: u32 = 1 << 4;
+pub const AUDIO_DASH_BLAST: u32 = 1 << 5;
+pub const AUDIO_MINE_BURST: u32 = 1 << 6;
 
 // Boss milestones.
 const SENTINEL_SPAWN_TIME: f32 = 300.0;
@@ -492,8 +501,8 @@ const AFTERIMAGE_ENGINE_DELAYS: [f32; 2] = [0.06, 0.16];
 const AFTERIMAGE_ENGINE_PARTICLES: u32 = 14;
 const MAGNET_RADIUS_PER_LEVEL: f32 = 45.0;
 const MAGNET_SPEED_PER_LEVEL: f32 = 70.0;
-const MOMENTUM_SPEED_PER_LEVEL: f32 = 4.24;
-const MOMENTUM_DASH_REDUCTION_PER_LEVEL: f32 = 0.075;
+const MOMENTUM_SPEED_PER_LEVEL: f32 = 2.12;
+const MOMENTUM_DASH_REDUCTION_PER_LEVEL: f32 = 0.0375;
 
 // Blizzard: frost field dropped on frozen enemy death.
 const BLIZZARD_FIELD_RADIUS: f32 = 72.0;
@@ -581,8 +590,16 @@ const ARC_BEAM_LIFETIME: f32 = 0.10;
 const ARC_BEAM_THICKNESS: f32 = 2.0;
 const MINE_BASE_INTERVAL: f32 = 1.9;
 const MINE_BASE_RADIUS: f32 = 130.0;
-const MINE_RADIUS_PER_LEVEL: f32 = 18.0;
+const MINE_RADIUS_GROWTH: f32 = 1.12;
+const MINE_COUNT_GROWTH: f32 = 1.50;
+const MINE_BASE_DAMAGE: f32 = 135.0;
+const MINE_DAMAGE_GROWTH: f32 = 1.32;
+const MINE_BASE_IMPULSE: f32 = 125.0;
+const MINE_MAX_COUNT: u32 = 18;
 const MINE_PULSE_LIFETIME: f32 = 0.55;
+const MINE_TRIPWIRE_BASE_BEAMS: u32 = 6;
+const MINE_TRIPWIRE_DAMAGE: f32 = 34.0;
+const MINE_TRIPWIRE_REACH_MULT: f32 = 0.68;
 const LANCE_BASE_INTERVAL: f32 = 2.9;
 const LANCE_REACH: f32 = 620.0;
 const LANCE_BASE_DAMAGE: f32 = 130.0;
@@ -1155,6 +1172,7 @@ impl Game {
             // Every dash launches a jump arc; Phase Step extends hang time.
             let phase_step_lvl = self.inventory.level(ShardKind::PhaseStep) as f32;
             self.jump_timer = JUMP_DURATION * (1.0 + phase_step_lvl * 0.35);
+            self.emit_dash_blast(dash_start_pos, dir);
             // Phase Step L3+: leave a brief particle afterimage at the start position.
             if phase_step >= 3 {
                 for _ in 0..8 {
@@ -2072,6 +2090,8 @@ impl Game {
                     life: 0.0,
                     max_life: 0.9,
                     max_radius: 320.0 + 40.0 * interf_level as f32,
+                    kind: PulseKind::Interference,
+                    damage_multiplier: 1.0,
                 });
                 let resonance = self
                     .inventory
@@ -2082,10 +2102,10 @@ impl Game {
         for p in &mut self.pulses {
             p.life += dt;
         }
-        let pulse_snapshots: Vec<(Vec2, f32)> = self
+        let pulse_snapshots: Vec<(Vec2, f32, PulseKind, f32)> = self
             .pulses
             .iter()
-            .map(|p| (p.pos, p.current_radius()))
+            .map(|p| (p.pos, p.current_radius(), p.kind, p.damage_multiplier))
             .collect();
         let singularity = self.inventory.has_evolution(EvolutionKind::Singularity);
         let gravity_pull: Option<f32> = if self
@@ -2121,18 +2141,35 @@ impl Game {
         } else {
             1.0
         };
-        for (ppos, pradius) in &pulse_snapshots {
+        for (ppos, pradius, kind, damage_multiplier) in &pulse_snapshots {
+            let ring_thickness = match kind {
+                PulseKind::Interference => INTERFERENCE_RING_THICKNESS,
+                PulseKind::Mine => INTERFERENCE_RING_THICKNESS * 1.6,
+                PulseKind::DashBlast => INTERFERENCE_RING_THICKNESS * 1.35,
+            };
+            let kind_damage_mult = match kind {
+                PulseKind::Interference => 1.0,
+                PulseKind::Mine => 1.45,
+                PulseKind::DashBlast => 0.95,
+            };
+            let pulse_damage =
+                INTERFERENCE_DPS * interference_dmg_mult * kind_damage_mult * *damage_multiplier;
+            let pulse_pull = match kind {
+                PulseKind::Interference => gravity_pull,
+                PulseKind::Mine => gravity_pull.map(|pull| pull * 1.35),
+                PulseKind::DashBlast => None,
+            };
             for e in &mut self.enemies {
                 let d = globe_distance(e.pos, *ppos);
-                if let Some(pull) = gravity_pull {
+                if let Some(pull) = pulse_pull {
                     if d > 1.0 && d < *pradius + pull_range_bonus {
                         let falloff = (1.0 - d / (*pradius + pull_range_bonus)).clamp(0.0, 1.0);
                         let to_center = nearest_globe_delta(e.pos, *ppos).normalize_or_zero();
                         move_on_globe(&mut e.pos, to_center * pull * falloff * dt);
                     }
                 }
-                if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + e.radius {
-                    e.hp -= INTERFERENCE_DPS * interference_dmg_mult * dt;
+                if (d - *pradius).abs() < ring_thickness + e.radius {
+                    e.hp -= pulse_damage * dt;
                 }
             }
             if let Some(boss) = &mut self.boss {
@@ -2145,19 +2182,16 @@ impl Game {
                                 if boss.lobe_hp[i] > 0.0 {
                                     let lp = Game::hydra_lobe_pos(boss, i);
                                     let d = globe_distance(lp, *ppos);
-                                    if (d - *pradius).abs()
-                                        < INTERFERENCE_RING_THICKNESS + HYDRA_LOBE_RADIUS
-                                    {
-                                        boss.lobe_hp[i] -=
-                                            INTERFERENCE_DPS * interference_dmg_mult * dt;
+                                    if (d - *pradius).abs() < ring_thickness + HYDRA_LOBE_RADIUS {
+                                        boss.lobe_hp[i] -= pulse_damage * dt;
                                     }
                                 }
                             }
                         }
                         _ => {
                             let d = globe_distance(boss.pos, *ppos);
-                            if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + boss.radius {
-                                boss.hp -= INTERFERENCE_DPS * interference_dmg_mult * dt;
+                            if (d - *pradius).abs() < ring_thickness + boss.radius {
+                                boss.hp -= pulse_damage * dt;
                             }
                         }
                     }
@@ -3039,6 +3073,377 @@ impl Game {
         }
     }
 
+    fn damage_boss_area(&mut self, origin: Vec2, radius: f32, damage: f32, boss_mult: f32) -> u32 {
+        let Some(boss) = &mut self.boss else {
+            return 0;
+        };
+        if boss.state != BossState::Active {
+            return 0;
+        }
+
+        let mut hits = 0;
+        match boss.kind {
+            BossKind::Hydra => {
+                for i in 0..3usize {
+                    if boss.lobe_hp[i] <= 0.0 {
+                        continue;
+                    }
+                    let lp = Self::hydra_lobe_pos(boss, i);
+                    let d = globe_distance(lp, origin);
+                    if d <= radius + HYDRA_LOBE_RADIUS {
+                        let falloff = (1.0 - d / radius.max(1.0)).clamp(0.0, 1.0);
+                        boss.lobe_hp[i] = (boss.lobe_hp[i]
+                            - damage * boss_mult * (0.45 + 0.55 * falloff))
+                            .max(0.0);
+                        self.hit_flash_positions.push(lp);
+                        hits += 1;
+                    }
+                }
+                boss.hp = boss.lobe_hp.iter().sum();
+            }
+            BossKind::Sentinel | BossKind::VoidPrism => {
+                let d = globe_distance(boss.pos, origin);
+                if d <= radius + boss.radius {
+                    let falloff = (1.0 - d / radius.max(1.0)).clamp(0.0, 1.0);
+                    boss.hp -= damage * boss_mult * (0.45 + 0.55 * falloff);
+                    self.hit_flash_positions.push(boss.pos);
+                    hits += 1;
+                }
+            }
+        }
+        hits
+    }
+
+    fn damage_area(
+        &mut self,
+        origin: Vec2,
+        radius: f32,
+        damage: f32,
+        impulse: f32,
+        slow_duration: f32,
+        boss_mult: f32,
+    ) -> u32 {
+        let mut hits = 0;
+        for e in &mut self.enemies {
+            if e.hp <= 0.0 {
+                continue;
+            }
+            let d = globe_distance(e.pos, origin);
+            if d <= radius + e.radius {
+                let falloff = (1.0 - d / radius.max(1.0)).clamp(0.0, 1.0);
+                e.hp -= damage * (0.45 + 0.55 * falloff);
+                if impulse.abs() > 0.0 && d > 1.0 {
+                    let away = nearest_globe_delta(origin, e.pos).normalize_or_zero();
+                    let dir = if impulse >= 0.0 { away } else { -away };
+                    move_on_globe(&mut e.pos, dir * impulse.abs() * falloff);
+                }
+                if slow_duration > 0.0 {
+                    e.slow_timer = e.slow_timer.max(slow_duration * (0.45 + 0.55 * falloff));
+                }
+                self.hit_flash_positions.push(e.pos);
+                hits += 1;
+            }
+        }
+        hits + self.damage_boss_area(origin, radius, damage, boss_mult)
+    }
+
+    fn emit_dash_blast(&mut self, pos: Vec2, dir: Vec2) {
+        let phase_step = self.inventory.level(ShardKind::PhaseStep) as f32;
+        let momentum = self.inventory.level(ShardKind::Momentum) as f32;
+        let afterimage = self
+            .inventory
+            .has_evolution(EvolutionKind::AfterimageEngine);
+        let phase_wake = self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::PhaseStep);
+
+        let radius = DASH_BLAST_BASE_RADIUS
+            + phase_step * DASH_BLAST_RADIUS_PER_PHASE
+            + if afterimage { 14.0 } else { 0.0 }
+            + if phase_wake { 22.0 } else { 0.0 };
+        let damage =
+            DASH_BLAST_BASE_DAMAGE + momentum * DASH_BLAST_DAMAGE_PER_MOMENTUM + phase_step * 12.0;
+        let hits = self.damage_area(
+            pos,
+            radius,
+            damage,
+            DASH_BLAST_PUSH,
+            0.0,
+            DASH_BLAST_BOSS_DAMAGE_MULT,
+        );
+
+        self.pulses.push(InterferencePulse {
+            pos,
+            life: 0.0,
+            max_life: DASH_BLAST_LIFETIME,
+            max_radius: radius * 1.08,
+            kind: PulseKind::DashBlast,
+            damage_multiplier: 0.75,
+        });
+
+        let base_angle = dir.y.atan2(dir.x);
+        for i in 0..5 {
+            let a = base_angle + (i as f32 - 2.0) * 0.58;
+            let beam_dir = Vec2::new(a.cos(), a.sin());
+            self.beams.push(Beam {
+                start: pos,
+                end: tangent_endpoint_on_globe(pos, beam_dir * radius * 0.78),
+                life: 0.0,
+                max_life: 0.13,
+                thickness: 2.4 + phase_step * 0.18,
+                color: [0.58, 1.0, 0.92],
+            });
+        }
+        for _ in 0..14 {
+            let a = self.rng.angle();
+            self.particles.push(Particle {
+                pos,
+                vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(90.0, 290.0),
+                life: 0.0,
+                max_life: self.rng.range(0.16, 0.38),
+                color: [0.62, 1.0, 0.96],
+                size: self.rng.range(2.0, 5.8),
+            });
+        }
+
+        if phase_wake {
+            let mine_level = self.inventory.level(ShardKind::Minefield);
+            if mine_level > 0 {
+                let wake_radius = self.mine_radius(mine_level) * 0.62 + phase_step * 6.0;
+                let wake_damage = self.mine_damage(mine_level) * 0.52;
+                self.emit_mine(pos, wake_radius, wake_damage, mine_level, 0.65);
+            }
+        }
+
+        self.audio_event_bits |= AUDIO_DASH_BLAST;
+        self.shake_amount += if hits > 0 { 3.8 } else { 1.5 };
+    }
+
+    fn mine_count(&self, level: u8) -> u32 {
+        let idx = level.saturating_sub(1) as i32;
+        let mut count = MINE_COUNT_GROWTH.powi(idx).ceil() as u32;
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Magnet)
+        {
+            count += 1 + self.inventory.level(ShardKind::Magnet) as u32 / 2;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Interference)
+        {
+            count += 1 + self.inventory.level(ShardKind::Interference) as u32 / 3;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Arc)
+        {
+            count += 1;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::PhaseStep)
+        {
+            count += self.inventory.level(ShardKind::PhaseStep) as u32 / 3;
+        }
+        count.min(MINE_MAX_COUNT).max(1)
+    }
+
+    fn mine_radius(&self, level: u8) -> f32 {
+        let idx = level.saturating_sub(1) as i32;
+        let mut radius = MINE_BASE_RADIUS * MINE_RADIUS_GROWTH.powi(idx);
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Magnet)
+        {
+            radius += self.inventory.level(ShardKind::Magnet) as f32 * 16.0;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Interference)
+        {
+            radius *= 1.0 + self.inventory.level(ShardKind::Interference) as f32 * 0.035;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Arc)
+        {
+            radius += self.inventory.level(ShardKind::Arc) as f32 * 7.0;
+        }
+        radius
+    }
+
+    fn mine_damage(&self, level: u8) -> f32 {
+        let idx = level.saturating_sub(1) as i32;
+        let mut damage = MINE_BASE_DAMAGE * MINE_DAMAGE_GROWTH.powi(idx);
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Interference)
+        {
+            damage *= 1.18;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Arc)
+        {
+            damage *= 1.12;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Magnet)
+        {
+            damage *= 1.08;
+        }
+        damage
+    }
+
+    fn mine_interval(&self, level: u8) -> f32 {
+        let mut interval = MINE_BASE_INTERVAL / (1.0 + level as f32 * 0.11);
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Interference)
+        {
+            interval *= 0.84;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Arc)
+        {
+            interval *= 0.93;
+        }
+        if self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::PhaseStep)
+        {
+            interval *= 0.94;
+        }
+        interval.max(0.46)
+    }
+
+    fn emit_mine(&mut self, pos: Vec2, radius: f32, damage: f32, level: u8, effect_scale: f32) {
+        let gravity_mines = self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Magnet);
+        let seismic = self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Interference);
+        let magnet = self.inventory.level(ShardKind::Magnet) as f32;
+        let impulse = if gravity_mines {
+            -MINE_BASE_IMPULSE * (1.0 + magnet * 0.18) * effect_scale
+        } else {
+            MINE_BASE_IMPULSE * 0.55 * effect_scale
+        };
+        let slow = if gravity_mines || seismic {
+            FROST_SLOW_DURATION * (0.32 + level as f32 * 0.035)
+        } else {
+            0.0
+        };
+        let blast_radius = radius * (if seismic { 0.82 } else { 0.70 });
+        let blast_damage = damage
+            * effect_scale
+            * (if seismic { 1.12 } else { 1.0 })
+            * (if gravity_mines { 1.08 } else { 1.0 });
+
+        let hits = self.damage_area(pos, blast_radius, blast_damage, impulse, slow, 0.38);
+        self.pulses.push(InterferencePulse {
+            pos,
+            life: 0.0,
+            max_life: MINE_PULSE_LIFETIME * effect_scale.max(0.72),
+            max_radius: radius,
+            kind: PulseKind::Mine,
+            damage_multiplier: (1.0 + level as f32 * 0.16) * effect_scale,
+        });
+        if seismic {
+            self.pulses.push(InterferencePulse {
+                pos,
+                life: 0.0,
+                max_life: MINE_PULSE_LIFETIME * 1.35,
+                max_radius: radius * 1.22,
+                kind: PulseKind::Mine,
+                damage_multiplier: (1.15 + level as f32 * 0.12) * effect_scale,
+            });
+        }
+
+        self.fire_mine_tripwires(pos, radius, level, effect_scale);
+
+        let particle_count = 10 + level as u32 * 2 + if seismic { 6 } else { 0 };
+        for i in 0..particle_count {
+            let a = self.rng.angle();
+            let speed = self.rng.range(55.0, 185.0) * effect_scale.max(0.72);
+            let color = if i % 3 == 0 {
+                [1.0, 0.82, 0.34]
+            } else if gravity_mines {
+                [0.38, 1.0, 0.84]
+            } else {
+                [0.74, 1.0, 0.48]
+            };
+            self.particles.push(Particle {
+                pos,
+                vel: Vec2::new(a.cos(), a.sin()) * speed,
+                life: 0.0,
+                max_life: self.rng.range(0.20, 0.52),
+                color,
+                size: self.rng.range(1.8, 5.2),
+            });
+        }
+
+        self.audio_event_bits |= AUDIO_MINE_BURST;
+        self.shake_amount += if hits > 0 { 2.8 } else { 0.9 };
+    }
+
+    fn fire_mine_tripwires(&mut self, pos: Vec2, radius: f32, _level: u8, effect_scale: f32) {
+        if !self
+            .inventory
+            .has_synergy(ShardKind::Minefield, ShardKind::Arc)
+        {
+            return;
+        }
+
+        let arc_level = self.inventory.level(ShardKind::Arc).max(1);
+        let storm_front = self
+            .inventory
+            .has_synergy(ShardKind::Arc, ShardKind::Cascade);
+        let static_freeze = self.inventory.has_synergy(ShardKind::Arc, ShardKind::Frost);
+        let beam_count =
+            MINE_TRIPWIRE_BASE_BEAMS + arc_level as u32 / 2 + if storm_front { 2 } else { 0 };
+        let reach = radius * MINE_TRIPWIRE_REACH_MULT * (if storm_front { 1.16 } else { 1.0 });
+        let damage = MINE_TRIPWIRE_DAMAGE
+            * effect_scale
+            * (1.0 + arc_level as f32 * 0.16)
+            * (if storm_front { 1.16 } else { 1.0 });
+        let color = if static_freeze {
+            [0.58, 0.95, 1.0]
+        } else {
+            [0.96, 0.72, 1.0]
+        };
+        let base = self.rng.angle();
+
+        for i in 0..beam_count {
+            let a = base + i as f32 * std::f32::consts::TAU / beam_count as f32;
+            let dir = Vec2::new(a.cos(), a.sin());
+            let end = tangent_endpoint_on_globe(pos, dir * reach);
+            let thickness = 1.8 + arc_level as f32 * 0.12;
+            for e in &mut self.enemies {
+                if capsule_circle_intersect_globe(pos, end, thickness * 0.5, e.pos, e.radius) {
+                    e.hp -= damage;
+                    if static_freeze {
+                        e.slow_timer = e.slow_timer.max(FROST_SLOW_DURATION);
+                    }
+                    self.hit_flash_positions.push(e.pos);
+                }
+            }
+            self.damage_boss_with_secondary_beam(pos, end, thickness * 0.5, damage * 0.45);
+            self.beams.push(Beam {
+                start: pos,
+                end,
+                life: 0.0,
+                max_life: 0.15,
+                thickness,
+                color,
+            });
+        }
+    }
+
     // --- Firing ---------------------------------------------------------
 
     fn update_extra_weapons(&mut self, dt: f32) {
@@ -3062,14 +3467,7 @@ impl Game {
             self.mine_timer -= dt;
             if self.mine_timer <= 0.0 {
                 self.drop_minefield(minefield);
-                let seismic = self
-                    .inventory
-                    .has_synergy(ShardKind::Minefield, ShardKind::Interference);
-                let interval = (MINE_BASE_INTERVAL
-                    - minefield as f32 * 0.12
-                    - if seismic { 0.30 } else { 0.0 })
-                .max(0.72);
-                self.mine_timer += interval;
+                self.mine_timer += self.mine_interval(minefield);
             }
         }
 
@@ -3172,47 +3570,34 @@ impl Game {
         let gravity_mines = self
             .inventory
             .has_synergy(ShardKind::Minefield, ShardKind::Magnet);
-        let seismic = self
-            .inventory
-            .has_synergy(ShardKind::Minefield, ShardKind::Interference);
-        let count = 1 + (level / 3) as u32 + if seismic { 1 } else { 0 };
-        let radius = MINE_BASE_RADIUS
-            + MINE_RADIUS_PER_LEVEL * level as f32
-            + if gravity_mines { 70.0 } else { 0.0 };
+        let count = self.mine_count(level);
+        let radius = self.mine_radius(level);
+        let damage = self.mine_damage(level);
+        let anchor = self
+            .find_nearest_enemy_pos_from(self.player.pos)
+            .unwrap_or(self.player.pos);
 
         for i in 0..count {
             let mut pos = if i == 0 {
-                self.find_nearest_enemy_pos_from(self.player.pos)
-                    .unwrap_or(self.player.pos)
+                anchor
             } else {
                 let angle = self.rng.angle();
-                let mut p = self.player.pos;
+                let mut p = if gravity_mines && i % 2 == 0 {
+                    anchor
+                } else {
+                    self.player.pos
+                };
                 move_on_globe(
                     &mut p,
-                    Vec2::new(angle.cos(), angle.sin()) * self.rng.range(70.0, 240.0),
+                    Vec2::new(angle.cos(), angle.sin()) * self.rng.range(60.0, 260.0),
                 );
                 p
             };
             if is_polar_zone(pos) {
                 pos.y = pos.y.signum() * POLAR_BOUNDARY_Y * 0.9;
             }
-            self.pulses.push(InterferencePulse {
-                pos,
-                life: 0.0,
-                max_life: MINE_PULSE_LIFETIME,
-                max_radius: radius,
-            });
-            for _ in 0..5 {
-                let a = self.rng.angle();
-                self.particles.push(Particle {
-                    pos,
-                    vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(35.0, 110.0),
-                    life: 0.0,
-                    max_life: self.rng.range(0.18, 0.36),
-                    color: [0.65, 1.0, 0.74],
-                    size: self.rng.range(1.8, 4.0),
-                });
-            }
+            let scale = self.rng.range(0.88, 1.12);
+            self.emit_mine(pos, radius * scale, damage, level, 1.0);
         }
     }
 
@@ -3802,6 +4187,8 @@ impl Game {
                     life: 0.0,
                     max_life: 0.55,
                     max_radius: 240.0,
+                    kind: PulseKind::Interference,
+                    damage_multiplier: 1.25,
                 });
             }
             MiniBossKind::Riftcaller => {
@@ -3916,6 +4303,8 @@ impl Game {
                     life: 0.0,
                     max_life: 0.6,
                     max_radius: 200.0,
+                    kind: PulseKind::Interference,
+                    damage_multiplier: 1.0,
                 });
             }
             // Solar Crown: barrier absorption flares all halo orbitals.
@@ -4512,61 +4901,141 @@ impl Game {
             });
         }
 
-        // Interference pulses underneath everything else.
+        // Ground pulses underneath everything else.
         let singularity_visual = self.inventory.has_evolution(EvolutionKind::Singularity);
         for p in &self.pulses {
             let t = p.life / p.max_life;
             let r = p.current_radius();
             let pos = nearest_globe_pos(camera, p.pos);
-            self.circle_buf.push(CircleInstance {
-                x: pos.x,
-                y: pos.y,
-                radius: r,
-                r: if singularity_visual { 0.25 } else { 0.4 },
-                g: if singularity_visual { 0.18 } else { 0.55 },
-                b: 1.0,
-                a: if singularity_visual { 0.35 } else { 0.20 } * (1.0 - t),
-                glow: (if singularity_visual { 1.4 } else { 0.9 }) * (1.0 - t),
-            });
-            // Singularity: dark absorption core grows as the ring expands.
-            if singularity_visual {
-                self.circle_buf.push(CircleInstance {
-                    x: pos.x,
-                    y: pos.y,
-                    radius: (r * 0.38).max(6.0),
-                    r: 0.06,
-                    g: 0.04,
-                    b: 0.18,
-                    a: 0.85 * (1.0 - t),
-                    glow: 0.0,
-                });
+            let fade = (1.0 - t).clamp(0.0, 1.0);
+            match p.kind {
+                PulseKind::Interference => {
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: r,
+                        r: if singularity_visual { 0.25 } else { 0.4 },
+                        g: if singularity_visual { 0.18 } else { 0.55 },
+                        b: 1.0,
+                        a: if singularity_visual { 0.35 } else { 0.20 } * fade,
+                        glow: (if singularity_visual { 1.4 } else { 0.9 }) * fade,
+                    });
+                    // Singularity: dark absorption core grows as the ring expands.
+                    if singularity_visual {
+                        self.circle_buf.push(CircleInstance {
+                            x: pos.x,
+                            y: pos.y,
+                            radius: (r * 0.38).max(6.0),
+                            r: 0.06,
+                            g: 0.04,
+                            b: 0.18,
+                            a: 0.85 * fade,
+                            glow: 0.0,
+                        });
+                    }
+                }
+                PulseKind::Mine => {
+                    let pulse = 0.85 + (self.time * 7.0 + p.pos.x * 0.01).sin() * 0.15;
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: r,
+                        r: 0.18,
+                        g: 0.96 * pulse,
+                        b: 0.58,
+                        a: 0.18 * fade,
+                        glow: 1.35 * fade,
+                    });
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: (r * 0.18).max(7.0),
+                        r: 1.0,
+                        g: 0.72,
+                        b: 0.24,
+                        a: 0.62 * fade,
+                        glow: 2.4 * fade,
+                    });
+                    let glyph_r = (r * 0.43).max(12.0);
+                    let spin = self.time * 3.2 + p.pos.x * 0.002 + p.pos.y * 0.003;
+                    for i in 0..3 {
+                        let a = spin + i as f32 * std::f32::consts::TAU / 3.0;
+                        let node = pos + Vec2::new(a.cos(), a.sin()) * glyph_r;
+                        self.beam_buf.push(BeamInstance {
+                            x0: pos.x,
+                            y0: pos.y,
+                            x1: node.x,
+                            y1: node.y,
+                            thickness: 1.4 + fade,
+                            r: 0.86,
+                            g: 1.0,
+                            b: 0.42,
+                            a: 0.34 * fade,
+                            glow: 1.2 * fade,
+                        });
+                        self.circle_buf.push(CircleInstance {
+                            x: node.x,
+                            y: node.y,
+                            radius: 4.5 + 2.0 * fade,
+                            r: 0.5,
+                            g: 1.0,
+                            b: 0.72,
+                            a: 0.78 * fade,
+                            glow: 2.0 * fade,
+                        });
+                    }
+                }
+                PulseKind::DashBlast => {
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: r,
+                        r: 0.48,
+                        g: 1.0,
+                        b: 0.94,
+                        a: 0.20 * fade,
+                        glow: 1.8 * fade,
+                    });
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: (r * 0.46).max(9.0),
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.25 * fade,
+                        glow: 0.7 * fade,
+                    });
+                }
             }
         }
 
-        // Jump shadow — two rings sell the "above the surface" read.
+        // Jump shadow — offset from the player so the hop reads as height.
         if self.player.altitude > 0.02 {
-            let pos = nearest_globe_pos(camera, self.player.pos);
+            let mut shadow_pos = self.player.pos;
             let alt = self.player.altitude;
+            move_on_globe(&mut shadow_pos, Vec2::new(-18.0, 24.0) * alt);
+            let pos = nearest_globe_pos(camera, shadow_pos);
             // Outer diffuse shadow (cast area shrinks as player rises).
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: self.player.radius * (1.6 + alt * 2.8),
+                radius: self.player.radius * (1.45 + alt * 3.1),
                 r: 0.0,
                 g: 0.0,
                 b: 0.04,
-                a: alt * 0.30,
+                a: alt * 0.26,
                 glow: 0.0,
             });
             // Inner sharp occlusion directly below.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: self.player.radius * (0.85 + alt * 0.35),
+                radius: self.player.radius * (0.78 + alt * 0.28),
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
-                a: alt * 0.72,
+                a: alt * 0.62,
                 glow: 0.0,
             });
         }
