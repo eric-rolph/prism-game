@@ -416,6 +416,22 @@ const BEAM_COLOR: [f32; 3] = [0.55, 1.0, 1.0];
 /// Hard cap on beams per salvo to prevent combinatorial explosion.
 const MAX_SALVO_BEAMS: usize = 96;
 
+/// Maps hue 0..1 → fully-saturated RGB (value = 1). Used for rainbow ring beams.
+fn hue_to_rgb(h: f32) -> [f32; 3] {
+    let h = h.rem_euclid(1.0);
+    let h6 = h * 6.0;
+    let i = h6 as u32;
+    let f = h6 - i as f32;
+    match i % 6 {
+        0 => [1.0, f, 0.0],
+        1 => [1.0 - f, 1.0, 0.0],
+        2 => [0.0, 1.0, f],
+        3 => [0.0, 1.0 - f, 1.0],
+        4 => [f, 0.0, 1.0],
+        _ => [1.0, 0.0, 1.0 - f],
+    }
+}
+
 /// Build the full set of beams to fire this tick, given the player's position,
 /// a target direction, the world (for refraction homing), and the inventory.
 pub fn compose_salvo(
@@ -448,6 +464,48 @@ pub fn compose_salvo(
             color: BEAM_COLOR,
         })
         .collect();
+
+    // Stage 2.5: Per-shard beam tinting for visual variety as upgrades stack.
+    {
+        let frost = inventory.level(ShardKind::Frost);
+        let refract = inventory.level(ShardKind::Refract);
+        let siphon = inventory.level(ShardKind::Siphon);
+        let split = inventory.level(ShardKind::Split);
+        let n = beams.len().max(1);
+        for (i, b) in beams.iter_mut().enumerate() {
+            let [mut cr, mut cg, mut cb] = b.color;
+            // Frost: shift toward ice blue as level increases.
+            if frost > 0 {
+                let t = (frost as f32 / 6.0) * 0.55;
+                cr = cr * (1.0 - t) + 0.3 * t;
+                cg = cg * (1.0 - t) + 0.85 * t;
+                cb = cb * (1.0 - t) + 1.0 * t;
+            }
+            // Refract: shift toward violet.
+            if refract > 0 {
+                let t = (refract as f32 / 6.0) * 0.45;
+                cr = cr * (1.0 - t) + 0.75 * t;
+                cg = cg * (1.0 - t) + 0.2 * t;
+                cb = cb * (1.0 - t) + 1.0 * t;
+            }
+            // Siphon: warm red-gold accent (life drain energy).
+            if siphon > 0 {
+                let t = (siphon as f32 / 6.0) * 0.28;
+                cr = (cr + t * 0.6).min(1.0);
+                cg = (cg - t * 0.08).max(0.35);
+            }
+            // Split L3+: spread hue across fan directions for visible banding.
+            if split >= 3 && n > 1 {
+                let phase = i as f32 / (n - 1).max(1) as f32;
+                let [hr, hg, hb] = hue_to_rgb(phase * 0.28 + 0.45);
+                let t = ((split as f32 - 2.0) / 4.0) * 0.30;
+                cr = cr * (1.0 - t) + hr * t;
+                cg = cg * (1.0 - t) + hg * t;
+                cb = cb * (1.0 - t) + hb * t;
+            }
+            b.color = [cr, cg, cb];
+        }
+    }
 
     // Stage 3: linear modifiers.
     apply_lens(&mut beams, inventory.level(ShardKind::Lens));
@@ -488,7 +546,7 @@ pub fn compose_salvo(
                 end: player_pos + dir * BEAM_REACH,
                 thickness: BEAM_THICKNESS * 0.6,
                 damage: ring_damage,
-                color: [0.55, 0.8, 1.0],
+                color: hue_to_rgb(i as f32 / ring_count as f32),
             });
         }
     }
@@ -511,7 +569,7 @@ pub fn compose_salvo(
                 end: player_pos + dir * BEAM_REACH * 0.8,
                 thickness: BEAM_THICKNESS * 0.7,
                 damage: BEAM_DAMAGE * 0.35,
-                color: [0.85, 0.55, 1.0],
+                color: hue_to_rgb(i as f32 / ring_count as f32 + 0.07),
             });
         }
     }

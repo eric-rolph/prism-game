@@ -5688,14 +5688,22 @@ impl Game {
         // lens thickness, echo tint, inner core overlay.
         let chromatic_lvl = self.inventory.level(ShardKind::Chromatic);
         let lens_lvl = self.inventory.level(ShardKind::Lens);
+        let cascade_lvl = self.inventory.level(ShardKind::Cascade);
+        let diffract_lvl = self.inventory.level(ShardKind::Diffract);
+        let interference_lvl = self.inventory.level(ShardKind::Interference);
+        // Dramatic shards boost glow intensity across all beams.
+        let drama_glow = 1.0
+            + cascade_lvl as f32 * 0.18
+            + diffract_lvl as f32 * 0.13
+            + interference_lvl as f32 * 0.22;
         for b in &self.beams {
             let life_frac = b.life / b.max_life; // 0 = just spawned, 1 = expired
             let t = 1.0 - life_frac;
             let start = nearest_globe_pos(camera, b.start);
             let end = nearest_globe_pos(camera, b.end);
 
-            // Echo tint: orange hue, 30% lower alpha.
-            let (beam_r, beam_g, beam_b, alpha_scale) = if b.is_echo {
+            // Echo: orange tint. Otherwise apply shard-specific color accents.
+            let (mut beam_r, mut beam_g, mut beam_b, alpha_scale) = if b.is_echo {
                 (
                     b.color[0] * 0.9 + 0.1,
                     b.color[1] * 0.7 + 0.3 * 0.6,
@@ -5705,9 +5713,23 @@ impl Game {
             } else {
                 (b.color[0], b.color[1], b.color[2], 1.0_f32)
             };
+            // Cascade L3+: emerald shimmer (chain potential reads as green energy).
+            if cascade_lvl >= 3 && !b.is_echo {
+                let t = (cascade_lvl as f32 - 2.0) / 4.0 * 0.22;
+                beam_r = beam_r * (1.0 - t) + 0.1 * t;
+                beam_g = (beam_g + t * 0.35).min(1.0);
+                beam_b = beam_b * (1.0 - t) + 0.3 * t;
+            }
+            // Interference L3+: teal/aqua resonance accent.
+            if interference_lvl >= 3 && !b.is_echo {
+                let t = (interference_lvl as f32 - 2.0) / 4.0 * 0.18;
+                beam_r = beam_r * (1.0 - t) + 0.15 * t;
+                beam_g = (beam_g + t * 0.10).min(1.0);
+                beam_b = (beam_b + t * 0.35).min(1.0);
+            }
 
-            // Glow varies with remaining lifetime: peaks near spawn.
-            let glow = (2.5 + life_frac * 1.5) * t;
+            // Glow varies with remaining lifetime + drama-shard boost.
+            let glow = (2.5 + life_frac * 1.5) * t * drama_glow;
 
             // Lens shard: visual thickness scales with level.
             let vis_thick = if lens_lvl > 0 {

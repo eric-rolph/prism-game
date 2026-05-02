@@ -188,9 +188,14 @@ void main() {
   float t = dt.y;
   float r = v_thickness * 0.5;
 
-  // Energy ripple along beam length — scrolling noise pattern.
-  float ripple = noise1d(t * 12.0 + v_time * 25.0) * 0.3 + 0.85;
-  float ripple2 = noise1d(t * 20.0 - v_time * 18.0) * 0.2 + 0.9;
+  // Per-beam phase seed derived from color (each beam type desyncs independently).
+  float beam_phase = fract(dot(v_color.rgb, vec3(1.0, 2.0, 3.0))) * 6.28318;
+  // Hue proxy — shifts spectral fringe to be centered on beam's own color family.
+  float beam_hue = fract(dot(v_color.rgb, vec3(0.333, 0.667, 1.0)));
+
+  // Energy ripple — slower frequencies, phase-offset per beam to prevent sync.
+  float ripple = noise1d(t * 8.0 + v_time * 6.0 + beam_phase) * 0.18 + 0.85;
+  float ripple2 = noise1d(t * 14.0 - v_time * 4.0 + beam_phase * 1.37) * 0.12 + 0.92;
   float energy = ripple * ripple2;
 
   // Core zones (from center outward):
@@ -214,25 +219,27 @@ void main() {
   // Spectral fringe — rainbow dispersion at beam edges.
   float fringeZone = smoothstep(colorEdge - 1.0, colorEdge + 0.5, dist)
                    * (1.0 - smoothstep(fringeEdge - 0.5, fringeEdge + 2.0, dist));
-  // Shift the spectrum based on angle from beam center + time for shimmer.
-  float specPhase = dist / max(r, 1.0) + t * 0.5 + v_time * 0.4;
+  // Shift spectrum by beam hue so each beam type has its own color family at edges.
+  float specPhase = dist / max(r, 1.0) + t * 0.5 + v_time * 0.25 + beam_hue;
   vec3 rainbow = spectral(specPhase) * 1.3;
 
   // Outer glow falloff.
   float glowDist = max(dist - r, 0.0);
   float glow = exp(-glowDist * 0.12) * v_glow;
 
-  // Photon ripple: animated sine modulation along beam length.
-  float photonRipple = sin(t * 8.0 + v_time * 30.0) * 0.12 + 1.0;
+  // Photon ripple — slowed and phase-offset per beam to prevent synchronized flash.
+  float photonRipple = sin(t * 5.0 + v_time * 4.5 + beam_phase) * 0.06 + 1.0;
 
-  // Prism core dispersion: interference fringes when near center.
+  // Prism core dispersion: interference bands tinted toward beam color identity.
   vec3 prismCore = vec3(0.0);
   if (dist < r * 0.5) {
-    float bandR = max(0.0, sin(t * 18.0 + v_time * 5.0) * 0.5 + 0.5);
-    float bandG = max(0.0, sin(t * 18.0 + v_time * 5.0 + 2.094) * 0.5 + 0.5);
-    float bandB = max(0.0, sin(t * 18.0 + v_time * 5.0 + 4.189) * 0.5 + 0.5);
+    float bandR = max(0.0, sin(t * 14.0 + v_time * 3.5 + beam_phase) * 0.5 + 0.5);
+    float bandG = max(0.0, sin(t * 14.0 + v_time * 3.5 + beam_phase + 2.094) * 0.5 + 0.5);
+    float bandB = max(0.0, sin(t * 14.0 + v_time * 3.5 + beam_phase + 4.189) * 0.5 + 0.5);
     float coreMask = 1.0 - smoothstep(0.0, r * 0.5, dist);
-    prismCore = vec3(bandR, bandG, bandB) * coreMask * 0.5;
+    vec3 tintedBands = mix(vec3(bandR, bandG, bandB),
+                           v_color.rgb * vec3(bandR, bandG, bandB) + 0.3, 0.45);
+    prismCore = tintedBands * coreMask * 0.42;
   }
 
   // Compose layers.
