@@ -132,7 +132,7 @@ impl Game {
         self.inner.level_choice(slot)
     }
 
-    /// The current level (0..6) of the given shard kind index (0..16).
+    /// The current level (0..6) of the given shard kind index (0..22).
     pub fn inventory_level(&self, kind: u8) -> u8 {
         self.inner.inventory_level(kind)
     }

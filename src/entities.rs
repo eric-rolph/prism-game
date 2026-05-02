@@ -30,6 +30,15 @@ pub enum EnemyKind {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MiniBossKind {
+    VoidSpawn,
+    Bulwark,
+    Riftcaller,
+    MirrorWraith,
+    SplitCore,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EnemyState {
     Drifting,
     /// Dasher telegraph before charge (countdown timer stored in `state_timer`).
@@ -60,7 +69,7 @@ pub struct Enemy {
     pub no_xp: bool,
     pub spawn_grace: f32,
     pub surface_time: f32, // seconds spent drifting on the surface
-    pub is_void_spawn: bool, // spawned by a mature corruption patch; death cleanses it
+    pub mini_boss: Option<MiniBossKind>,
 }
 
 pub struct XpGem {
@@ -191,17 +200,17 @@ pub struct FrostField {
 pub struct CorruptionPatch {
     pub pos: Vec2,
     pub radius: f32,
-    pub level: f32,           // 0.0 to 1.0
-    pub age: f32,             // seconds since spawn
-    pub spawn_cooldown: f32,  // remaining cooldown before next Void Spawn can emerge
+    pub level: f32,          // 0.0 to 1.0
+    pub age: f32,            // seconds since spawn
+    pub spawn_cooldown: f32, // remaining cooldown before next Void Spawn can emerge
 }
 
 /// Descending void projectile fired by Pulsars. Corrupts and deals area damage on landing.
 #[derive(Clone)]
 pub struct VoidShell {
     pub pos: Vec2,
-    pub target: Vec2,     // surface target position
-    pub altitude: f32,    // 1.0 (spawned high) to 0.0 (landed)
+    pub target: Vec2,  // surface target position
+    pub altitude: f32, // 1.0 (spawned high) to 0.0 (landed)
     pub radius: f32,
     pub descent_speed: f32, // altitude units per second
 }
