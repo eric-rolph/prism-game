@@ -61,7 +61,7 @@ pub struct Game {
     boss: Option<Boss>,
 
     input: Vec2,
-    altitude_input: f32, // -1.0 to +1.0; positive = rise
+    jump_timer: f32,  // counts down from JUMP_DURATION; altitude = sin(t/T * π)
     dash_input: bool,
     seed: u32,
     rng: Rng,
@@ -215,7 +215,7 @@ const MAX_CRYSTALS: usize = 6;
 const CRYSTAL_SPAWN_INTERVAL: f32 = 45.0;
 
 const BOSS_PROJ_SPEED: f32 = 210.0;
-const BOSS_PROJ_DAMAGE: f32 = 18.0;
+const BOSS_PROJ_DAMAGE: f32 = 28.0;
 const BOSS_SHIELD_BURST_COUNT: u32 = 5;
 
 // Audio event bits (per-frame, cleared at top of update).
@@ -228,37 +228,37 @@ pub const AUDIO_SHIELD_BREAK: u32 = 1 << 4;
 // Boss milestones.
 const SENTINEL_SPAWN_TIME: f32 = 300.0;
 const HYDRA_SPAWN_TIME: f32 = 600.0;
-const HYDRA_HP_PER_LOBE: f32 = 9500.0;
+const HYDRA_HP_PER_LOBE: f32 = 38000.0;
 const HYDRA_ORBIT_RADIUS: f32 = 58.0;
 const HYDRA_ORBIT_SPEED: f32 = 0.55;
 const HYDRA_LOBE_RADIUS: f32 = 20.0;
-const HYDRA_CONTACT_DAMAGE: f32 = 30.0;
-const HYDRA_BODY_SPEED: f32 = 50.0;
-const HYDRA_FIRE_INTERVAL: f32 = 2.0;
+const HYDRA_CONTACT_DAMAGE: f32 = 45.0;
+const HYDRA_BODY_SPEED: f32 = 65.0;
+const HYDRA_FIRE_INTERVAL: f32 = 1.3;
 const HYDRA_LOBE_COLORS: [[f32; 3]; 3] = [[1.0, 0.22, 0.18], [0.18, 1.0, 0.32], [0.28, 0.52, 1.0]];
 const HYDRA_LOBE_ADDS: [EnemyKind; 3] = [EnemyKind::Dasher, EnemyKind::Emitter, EnemyKind::Orbiter];
 const BOSS_TELEGRAPH_TIME: f32 = 2.0;
 const BOSS_DEATH_TIME: f32 = 1.0;
 const BOSS_POST_BREATHER: f32 = 3.0;
 const BOSS_SPAWN_SOFT_CAP: usize = 45;
-const SENTINEL_HP: f32 = 15000.0;
+const SENTINEL_HP: f32 = 60000.0;
 const SENTINEL_RADIUS: f32 = 46.0;
-const SENTINEL_BASE_SPEED: f32 = 34.0;
-const SENTINEL_SHIELD_HP: f32 = 1100.0;
+const SENTINEL_BASE_SPEED: f32 = 44.0;
+const SENTINEL_SHIELD_HP: f32 = 4400.0;
 const SENTINEL_SHIELD_RADIUS: f32 = 12.0;
 const SENTINEL_SHIELD_ORBIT: f32 = 72.0;
 const SENTINEL_SHIELD_SPIN: f32 = 1.35;
 const VOID_PRISM_SPAWN_TIME: f32 = 780.0; // 13:00
-const VOID_PRISM_HP: f32 = 30000.0;
+const VOID_PRISM_HP: f32 = 120000.0;
 const VOID_PRISM_RADIUS: f32 = 50.0;
-const VOID_PRISM_BASE_SPEED: f32 = 26.0;
-const VOID_PRISM_P2_SPEED: f32 = 42.0;
-const VOID_PRISM_CONTACT_DAMAGE: f32 = 40.0;
-const VOID_PRISM_P2_CONTACT_DAMAGE: f32 = 52.0;
-const VOID_PRISM_SHOCKWAVE_INTERVAL_P1: f32 = 3.5;
-const VOID_PRISM_SHOCKWAVE_INTERVAL_P2: f32 = 2.0;
+const VOID_PRISM_BASE_SPEED: f32 = 34.0;
+const VOID_PRISM_P2_SPEED: f32 = 55.0;
+const VOID_PRISM_CONTACT_DAMAGE: f32 = 60.0;
+const VOID_PRISM_P2_CONTACT_DAMAGE: f32 = 78.0;
+const VOID_PRISM_SHOCKWAVE_INTERVAL_P1: f32 = 2.0;
+const VOID_PRISM_SHOCKWAVE_INTERVAL_P2: f32 = 1.2;
 const VOID_PRISM_SHOCKWAVE_MAX_RADIUS: f32 = 380.0;
-const VOID_PRISM_SHOCKWAVE_DAMAGE: f32 = 22.0;
+const VOID_PRISM_SHOCKWAVE_DAMAGE: f32 = 30.0;
 const VOID_PRISM_PULL_STRENGTH: f32 = 150.0;
 const VOID_SHOCKWAVE_IFRAME_DURATION: f32 = 0.25;
 
@@ -525,8 +525,7 @@ const CASCADE_THICKNESS: f32 = 2.0;
 const CASCADE_LIFETIME: f32 = 0.14;
 
 // --- Altitude ---
-const ALTITUDE_RISE_SPEED: f32 = 2.5;   // normalized units/sec (0→1 in 0.4s)
-const ALTITUDE_FALL_SPEED: f32 = 1.8;   // normalized units/sec
+
 
 // --- Corruption ---
 const CORRUPTION_PATCH_RADIUS: f32 = 65.0;
@@ -540,6 +539,10 @@ const CORRUPTION_DEBUFF_SPEED: f32 = 0.15;   // 15% speed penalty inside corrupt
 const CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD: f32 = 0.4;
 const CORRUPTION_LUMINOSITY_HP_DRAIN: f32 = 6.0; // HP/sec at 0% luminosity
 const POLAR_BOUNDARY_Y: f32 = GLOBE_RADIUS * 1.0; // |y| > this = polar zone
+
+// Dash-jump arc. Every dash launches a brief hop; altitude = sin(t/T * π).
+const JUMP_DURATION: f32 = 0.55;
+const BEAM_CLEANSE_RATE: f32 = 1.2; // corruption level removed per second along beam path
 
 // --- VoidShell ---
 const VOID_SHELL_RADIUS: f32 = 11.0;
@@ -598,7 +601,7 @@ impl Game {
             crystals: Vec::new(),
             boss: None,
             input: Vec2::ZERO,
-            altitude_input: 0.0,
+            jump_timer: 0.0,
             dash_input: false,
             seed,
             rng: Rng::new(seed),
@@ -675,10 +678,6 @@ impl Game {
 
     pub fn set_dash_input(&mut self, pressed: bool) {
         self.dash_input = pressed;
-    }
-
-    pub fn set_altitude_input(&mut self, v: f32) {
-        self.altitude_input = v.clamp(-1.0, 1.0);
     }
 
     fn globe_luminosity_inner(&self) -> f32 {
@@ -1090,6 +1089,8 @@ impl Game {
             self.player.dash_cooldown = self.dash_cooldown_duration();
             self.player.iframe_timer =
                 DASH_DURATION + phase_step as f32 * PHASE_STEP_IFRAME_PER_LEVEL;
+            // Every dash launches a brief jump arc above the surface.
+            self.jump_timer = JUMP_DURATION;
             // Phase Step L3+: leave a brief particle afterimage at the start position.
             if phase_step >= 3 {
                 for _ in 0..8 {
@@ -1153,11 +1154,13 @@ impl Game {
         }
         self.camera = self.player.pos;
 
-        // --- Altitude update ---
-        if self.altitude_input > 0.0 {
-            self.player.altitude = (self.player.altitude + ALTITUDE_RISE_SPEED * dt).min(1.0);
+        // --- Jump arc (triggered by dash) ---
+        if self.jump_timer > 0.0 {
+            self.jump_timer = (self.jump_timer - dt).max(0.0);
+            let t = self.jump_timer / JUMP_DURATION;
+            self.player.altitude = (t * std::f32::consts::PI).sin();
         } else {
-            self.player.altitude = (self.player.altitude - ALTITUDE_FALL_SPEED * dt).max(0.0);
+            self.player.altitude = 0.0;
         }
 
         // Wave clear banner timer.
@@ -1745,6 +1748,21 @@ impl Game {
             b.life += dt;
         }
         self.beams.retain(|b| b.life < b.max_life);
+
+        // Beams cleanse corruption along their path — firing IS reclaiming territory.
+        if !self.corruption_patches.is_empty() {
+            let beam_segs: Vec<(Vec2, Vec2, f32)> = self.beams.iter()
+                .map(|b| (b.start, b.end, b.thickness))
+                .collect();
+            for p in &mut self.corruption_patches {
+                let hit = beam_segs.iter().any(|(s, e, thick)| {
+                    capsule_circle_intersect_globe(*s, *e, thick * 0.5 + 10.0, p.pos, p.radius * 0.45)
+                });
+                if hit {
+                    p.level = (p.level - BEAM_CLEANSE_RATE * dt).max(0.0);
+                }
+            }
+        }
 
         // Halos: orbit + contact damage.
         // Synergy: FROZEN ORBIT (Halo+Frost 3+) — halo beads slow enemies.
@@ -3761,32 +3779,34 @@ impl Game {
             });
         }
 
-        // Corruption patches — dark purplish void zones.
+        // Corruption patches — dark voids on the surface.
+        // Zero glow intentionally — high glow compounds in the persistence buffer
+        // and creates the "permanent trail" artifact at full corruption.
         for p in &self.corruption_patches {
             if p.level < 0.05 {
                 continue;
             }
             let pos = nearest_globe_pos(camera, p.pos);
-            let pulse = 0.7 + (self.time * 1.2 + p.pos.x * 0.008).sin() * 0.3;
+            let pulse = 0.85 + (self.time * 0.9 + p.pos.x * 0.006).sin() * 0.15;
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
                 radius: p.radius,
-                r: 0.1 * p.level,
+                r: 0.08 * p.level,
                 g: 0.0,
-                b: 0.4 * p.level * pulse,
-                a: 0.22 * p.level,
-                glow: 0.4 * p.level,
+                b: 0.28 * p.level * pulse,
+                a: 0.30 * p.level,
+                glow: 0.0,
             });
             // Dark void core.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: p.radius * 0.4,
-                r: 0.05,
+                radius: p.radius * 0.38,
+                r: 0.03,
                 g: 0.0,
-                b: 0.12,
-                a: 0.45 * p.level,
+                b: 0.08,
+                a: 0.55 * p.level,
                 glow: 0.0,
             });
         }

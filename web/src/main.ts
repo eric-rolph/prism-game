@@ -811,7 +811,6 @@ async function main(): Promise<void> {
     const [ix, iy] = input.direction();
     game.set_input(ix, iy);
     game.set_dash_input(input.consumeDash());
-    game.set_altitude_input(input.altitudeInput());
     game.update(dt);
 
     // Audio tick — reads per-frame counters set during game.update().
