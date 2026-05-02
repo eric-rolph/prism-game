@@ -469,7 +469,7 @@ const AFTERIMAGE_ENGINE_DELAYS: [f32; 2] = [0.06, 0.16];
 const AFTERIMAGE_ENGINE_PARTICLES: u32 = 14;
 const MAGNET_RADIUS_PER_LEVEL: f32 = 45.0;
 const MAGNET_SPEED_PER_LEVEL: f32 = 70.0;
-const MOMENTUM_SPEED_PER_LEVEL: f32 = 0.05;
+const MOMENTUM_SPEED_PER_LEVEL: f32 = 4.24;
 const MOMENTUM_DASH_REDUCTION_PER_LEVEL: f32 = 0.075;
 
 // Blizzard: frost field dropped on frozen enemy death.
