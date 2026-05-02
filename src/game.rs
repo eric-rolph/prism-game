@@ -406,56 +406,56 @@ fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
             150.0 * hp_scale,
             100.0 * spd_scale,
             14.0 * dmg_scale,
-            [0.35, 0.18, 0.55],
+            [1.00, 0.37, 0.48], // design: Grunt — hot pink-red
         ),
         EnemyKind::Brute => (
             22.0,
             1100.0 * hp_scale,
             52.0 * spd_scale,
             28.0 * dmg_scale,
-            [0.7, 0.15, 0.15],
+            [1.00, 0.67, 0.33], // design: Bruiser — bright orange
         ),
         EnemyKind::Dasher => (
             7.0,
             110.0 * hp_scale,
             76.0 * spd_scale,
             20.0 * dmg_scale,
-            [0.2, 0.8, 0.9],
+            [0.67, 0.40, 1.00], // design: Darter — bright violet
         ),
         EnemyKind::Splitter => (
             14.0,
             370.0 * hp_scale,
             82.0 * spd_scale,
             16.0 * dmg_scale,
-            [0.2, 0.7, 0.3],
+            [0.40, 0.87, 1.00], // design: Tank — ice blue
         ),
         EnemyKind::Orbiter => (
             10.0,
             280.0 * hp_scale,
             124.0 * spd_scale,
             14.0 * dmg_scale,
-            [0.9, 0.5, 0.15],
+            [0.95, 0.55, 0.15], // amber-orange (distinct from Brute)
         ),
         EnemyKind::Emitter => (
             11.0,
             230.0 * hp_scale,
             64.0 * spd_scale,
             10.0 * dmg_scale,
-            [0.7, 0.3, 0.8],
+            [0.60, 0.35, 1.00], // bright purple (lighter than Dasher)
         ),
         EnemyKind::Pulsar => (
             PULSAR_IDLE_RADIUS,
             420.0 * hp_scale,
             46.0 * spd_scale,
             11.0 * dmg_scale,
-            [0.95, 0.86, 0.22],
+            [0.97, 0.88, 0.22], // bright gold-yellow
         ),
         EnemyKind::Umbra => (
             8.0,
             190.0 * hp_scale,
             118.0 * spd_scale,
             20.0 * dmg_scale,
-            [0.48, 0.16, 0.72],
+            [0.45, 0.15, 0.70], // dark violet (stealth)
         ),
     }
 }
@@ -5205,6 +5205,29 @@ impl Game {
                 }
             }
 
+            // Targeting ring — dotted circle showing attack intent, design-spec dashed orbit.
+            // Rotates slowly; 12 dots spaced at 30° = visual dash pattern.
+            {
+                let ring_r = 28.0;
+                let dot_count = 12usize;
+                let ring_alpha = (0.14 + intensity * 0.10).min(0.28);
+                let spin = self.time * 0.10;
+                for i in 0..dot_count {
+                    let angle = spin + i as f32 * std::f32::consts::TAU / dot_count as f32;
+                    let offset = Vec2::new(angle.cos(), angle.sin()) * ring_r;
+                    let mut dot_world = self.player.pos;
+                    move_on_globe(&mut dot_world, offset);
+                    let dp = nearest_globe_pos(camera, dot_world);
+                    self.circle_buf.push(CircleInstance {
+                        x: dp.x, y: dp.y,
+                        radius: 1.2,
+                        r: 0.66, g: 0.92, b: 1.0,
+                        a: ring_alpha,
+                        glow: 0.0, // crisp dot, no halo
+                    });
+                }
+            }
+
             // Core player circle — bright cyan-white, base glow 2.4 (as specified).
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
@@ -5560,68 +5583,89 @@ impl Game {
             });
         }
 
-        // Enemies — colored per-type, flash white on hit.
+        // Enemies — design-spec 3-layer rendering: atmospheric glow + crisp fill + white core.
+        // Layering on additive blend: outer wide halo → solid body (glow≈0 = crisp) → hot center.
         let hit_set: Vec<Vec2> = self.hit_flash_positions.clone();
         for e in &self.enemies {
             let pos = nearest_globe_pos(camera, e.pos);
             let is_hit = hit_set.iter().any(|h| globe_distance(*h, e.pos) < 1.0);
-            let (glow, r, g, b, alpha) = if is_hit {
-                (3.0, 1.0_f32, 1.0_f32, 1.0_f32, 1.0_f32)
+
+            if is_hit {
+                // Hit flash: single bright white burst.
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x, y: pos.y,
+                    radius: e.radius * 1.5,
+                    r: 1.0, g: 1.0, b: 1.0, a: 1.0,
+                    glow: 3.5,
+                });
             } else {
-                match e.state {
+                let (er, eg, eb, base_alpha, glow_mult) = match e.state {
                     EnemyState::Telegraphing => {
-                        let flash = if (e.state_timer * 12.0) as u32 % 2 == 0 {
-                            2.0
-                        } else {
-                            0.8
-                        };
-                        (flash, e.color[0], e.color[1], e.color[2], 1.0)
+                        let flash = if (e.state_timer * 12.0) as u32 % 2 == 0 { 1.8 } else { 0.7 };
+                        (e.color[0], e.color[1], e.color[2], 1.0_f32, flash)
                     }
                     EnemyState::Pulsing => {
                         let pulse = (1.0 - e.state_timer / PULSAR_PULSE_TIME).clamp(0.0, 1.0);
-                        (
-                            1.8 + pulse * 2.8,
-                            1.0,
-                            0.95 + pulse * 0.05,
-                            0.35 + pulse * 0.35,
-                            0.72 + pulse * 0.20,
-                        )
+                        (1.0_f32, 0.95 + pulse * 0.05, 0.35 + pulse * 0.35,
+                         0.72 + pulse * 0.20, 1.8 + pulse * 3.0)
                     }
                     _ if e.kind == EnemyKind::Umbra => {
                         let phase = (self.time * 2.7 + e.state_timer).sin() * 0.5 + 0.5;
-                        let alpha = 0.18 + phase * 0.62;
-                        let glow = 0.35 + phase * 2.45;
-                        (glow, e.color[0], e.color[1], e.color[2], alpha)
+                        (e.color[0], e.color[1], e.color[2], 0.18 + phase * 0.62, 0.4 + phase * 2.0)
                     }
                     _ if e.kind == EnemyKind::Orbiter && e.state == EnemyState::Orbiting => {
-                        let collapse =
-                            (1.0 - (e.charge_dir.x - ORBITER_MIN_RADIUS) / 160.0).clamp(0.0, 1.0);
-                        (
-                            1.0 + collapse * 1.8,
-                            e.color[0],
-                            e.color[1],
-                            e.color[2],
-                            1.0,
-                        )
+                        let collapse = (1.0 - (e.charge_dir.x - ORBITER_MIN_RADIUS) / 160.0).clamp(0.0, 1.0);
+                        (e.color[0], e.color[1], e.color[2], 1.0, 1.0 + collapse * 2.0)
                     }
                     _ if e.mini_boss.is_some() => {
                         let pulse = (self.time * 4.5).sin() * 0.5 + 0.5;
-                        let glow = 1.4 + pulse * 2.4;
-                        (glow, e.color[0], e.color[1], e.color[2], 1.0)
+                        (e.color[0], e.color[1], e.color[2], 1.0, 1.6 + pulse * 2.2)
                     }
-                    _ => (0.6, e.color[0], e.color[1], e.color[2], 1.0),
+                    _ => (e.color[0], e.color[1], e.color[2], 1.0_f32, 1.0_f32),
+                };
+
+                // Layer 1: Wide atmospheric glow — sets the colored halo / mood.
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x, y: pos.y,
+                    radius: e.radius * 2.4,
+                    r: er, g: eg, b: eb,
+                    a: base_alpha * 0.16,
+                    glow: glow_mult * 1.1,
+                });
+
+                // Layer 2: Crisp solid body — near-zero glow gives hard-edged circle.
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x, y: pos.y,
+                    radius: e.radius,
+                    r: er, g: eg, b: eb,
+                    a: base_alpha * 0.88,
+                    glow: 0.06,
+                });
+
+                // Layer 3: White-hot inner core (skipped for stealth Umbra).
+                if e.kind != EnemyKind::Umbra {
+                    let core_alpha = if e.mini_boss.is_some() { 0.80 } else { 0.55 };
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x, y: pos.y,
+                        radius: e.radius * 0.38,
+                        r: 1.0, g: 1.0, b: 0.95,
+                        a: core_alpha * base_alpha,
+                        glow: 0.25 * glow_mult,
+                    });
                 }
-            };
-            self.circle_buf.push(CircleInstance {
-                x: pos.x,
-                y: pos.y,
-                radius: e.radius,
-                r,
-                g,
-                b,
-                a: alpha,
-                glow,
-            });
+
+                // Frost slow overlay: ice crystal tint when slowed.
+                if e.slow_timer > 0.0 {
+                    let ice_t = (e.slow_timer / FROST_SLOW_DURATION).clamp(0.0, 1.0);
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x, y: pos.y,
+                        radius: e.radius * 1.15,
+                        r: 0.38, g: 0.85, b: 1.0,
+                        a: ice_t * 0.38,
+                        glow: 0.35,
+                    });
+                }
+            }
         }
 
         // Radiance gems — pickup-only crystals, not enemy-like round dots.
