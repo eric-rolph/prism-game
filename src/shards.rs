@@ -189,7 +189,7 @@ impl Inventory {
 
     /// Three upgrade offers for the next level-up. Ready evolutions occupy one
     /// slot, then remaining slots are filled with normal shard offers.
-    pub fn roll_choices(&self, rng: &mut Rng) -> [Option<UpgradeOffer>; 3] {
+    pub fn roll_choices(&self, rng: &mut Rng, mods: &crate::meta::RunModifiers) -> [Option<UpgradeOffer>; 3] {
         let mut result = [None, None, None];
         let mut slot = 0usize;
         let evolutions = self.available_evolutions();
@@ -199,7 +199,7 @@ impl Inventory {
             slot += 1;
         }
 
-        for shard in self.roll_shard_choices(rng) {
+        for shard in self.roll_shard_choices(rng, mods) {
             if slot >= result.len() {
                 break;
             }
@@ -216,7 +216,7 @@ impl Inventory {
     /// Luck level boosts rare/legendary shard weights; passive shards appear
     /// slightly less often than active ones; at least one active (non-passive,
     /// non-defensive) shard is always included if possible.
-    fn roll_shard_choices(&self, rng: &mut Rng) -> [Option<ShardKind>; 3] {
+    fn roll_shard_choices(&self, rng: &mut Rng, mods: &crate::meta::RunModifiers) -> [Option<ShardKind>; 3] {
         let defensive = [
             ShardKind::Siphon,
             ShardKind::Barrier,
@@ -240,14 +240,13 @@ impl Inventory {
             .filter_map(ShardKind::from_index)
             .filter(|s| !self.is_maxed(*s))
             .map(|s| {
-                let weight = if matches!(s, ShardKind::Siphon | ShardKind::Barrier)
+                let mut weight = if matches!(s, ShardKind::Siphon | ShardKind::Barrier)
                     && self.levels[s.as_index()] >= 2
                 {
                     0.4
                 } else if matches!(s, ShardKind::Armor | ShardKind::PrismHeart) {
                     0.65
                 } else if s == ShardKind::Luck {
-                    // Static reduced weight so Luck can't inflate its own offer rate.
                     0.78
                 } else if legendary_shards.contains(&s) {
                     1.0 + luck as f32 * 0.50
@@ -256,6 +255,10 @@ impl Inventory {
                 } else {
                     1.0
                 };
+                
+                // Increase synergy/rare likelihood via refraction mod
+                weight *= mods.refraction;
+                
                 (s, weight)
             })
             .collect();
@@ -399,16 +402,21 @@ pub fn compose_salvo(
     target: Vec2,
     enemies: &[Enemy],
     inventory: &Inventory,
+    mods: &crate::meta::RunModifiers,
 ) -> Vec<BeamRequest> {
     let base_dir = (target - player_pos).normalize_or_zero();
     if base_dir.length_squared() < 1e-4 {
         return Vec::new();
     }
 
+    // Apply refraction bonus level
+    let bonus_split = if mods.refraction > 1.2 { 1 } else { 0 };
+    let bonus_mirror = if mods.refraction > 1.5 { 1 } else { 0 };
+
     // Stage 1: expand the direction set.
     let mut directions = vec![base_dir];
-    directions = apply_mirror(&directions, inventory.level(ShardKind::Mirror));
-    directions = apply_split(&directions, inventory.level(ShardKind::Split));
+    directions = apply_mirror(&directions, inventory.level(ShardKind::Mirror) + bonus_mirror);
+    directions = apply_split(&directions, inventory.level(ShardKind::Split) + bonus_split);
 
     // Cap directions before generating full beams.
     directions.truncate(MAX_SALVO_BEAMS);

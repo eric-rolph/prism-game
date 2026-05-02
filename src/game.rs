@@ -137,6 +137,9 @@ pub struct Game {
     // Draw buffers, rebuilt every frame.
     circle_buf: Vec<CircleInstance>,
     beam_buf: Vec<BeamInstance>,
+
+    // Interferometer modifiers
+    modifiers: crate::meta::RunModifiers,
 }
 
 // --- Tuning -------------------------------------------------------------
@@ -366,11 +369,14 @@ enum WaveShape {
 }
 
 // Per-type enemy stats: (radius, hp, speed, contact_damage, color)
-fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
+fn enemy_stats(kind: EnemyKind, minute: f32, mods: &crate::meta::RunModifiers) -> (f32, f32, f32, f32, [f32; 3]) {
     let overdrive = (minute - OVERDRIVE_START / 60.0).max(0.0);
-    let hp_scale = (1.32_f32).powf(minute) * (1.0 + overdrive * overdrive * 0.015);
+    let mut hp_scale = (1.32_f32).powf(minute) * (1.0 + overdrive * overdrive * 0.015);
     let dmg_scale = 1.0 + minute * 0.10 + overdrive * 0.04;
-    let spd_scale = 1.0 + minute * 0.035 + overdrive * 0.015;
+    let mut spd_scale = 1.0 + minute * 0.035 + overdrive * 0.015;
+
+    hp_scale *= mods.enemy_mass;
+    spd_scale *= mods.game_speed;
     match kind {
         EnemyKind::Drone => (
             9.0,
@@ -535,14 +541,14 @@ fn weighted_pick<T: Copy>(pool: &[(T, u32)], rng: &mut Rng) -> Option<T> {
 }
 
 impl Game {
-    pub fn new(w: f32, h: f32, seed: u32) -> Self {
+    pub fn new(w: f32, h: f32, seed: u32, modifiers: crate::meta::RunModifiers) -> Self {
         Self {
             time: 0.0,
             screen_size: Vec2::new(w.max(1.0), h.max(1.0)),
             player: Player {
                 pos: Vec2::ZERO,
                 radius: PLAYER_RADIUS,
-                speed: PLAYER_SPEED,
+                speed: PLAYER_SPEED * modifiers.game_speed.max(0.5),
                 hp: PLAYER_MAX_HP,
                 max_hp: PLAYER_MAX_HP,
                 iframe_timer: 0.0,
@@ -619,6 +625,7 @@ impl Game {
             void_shockwaves: Vec::new(),
             circle_buf: Vec::with_capacity(1024),
             beam_buf: Vec::with_capacity(256),
+            modifiers,
         }
     }
 
@@ -844,7 +851,7 @@ impl Game {
         }
         self.reroll_charges -= 1;
         self.reroll_count += 1;
-        self.level_choices = self.inventory.roll_choices(&mut self.rng);
+        self.level_choices = self.inventory.roll_choices(&mut self.rng, &self.modifiers);
     }
 
     pub fn reroll_charges(&self) -> u32 {
@@ -949,7 +956,8 @@ impl Game {
         let w = self.screen_size.x;
         let h = self.screen_size.y;
         let seed = self.rng.next_u32();
-        *self = Self::new(w, h, seed);
+        let mods = self.modifiers;
+        *self = Self::new(w, h, seed, mods);
     }
 
     fn record_upgrade_pick(&mut self, offer: UpgradeOffer) {
@@ -1279,7 +1287,7 @@ impl Game {
                     e.state_timer -= dt;
                     let t = (1.0 - e.state_timer / PULSAR_PULSE_TIME).clamp(0.0, 1.0);
                     let pulse = if t < 0.55 { t / 0.55 } else { (1.0 - t) / 0.45 }.clamp(0.0, 1.0);
-                    let (_, _, _, base_damage, _) = enemy_stats(EnemyKind::Pulsar, minute);
+                    let (_, _, _, base_damage, _) = enemy_stats(EnemyKind::Pulsar, minute, &self.modifiers);
                     e.radius =
                         PULSAR_IDLE_RADIUS + (PULSAR_PULSE_RADIUS - PULSAR_IDLE_RADIUS) * pulse;
                     e.contact_damage = base_damage * (1.0 + pulse * 1.4);
@@ -2184,7 +2192,7 @@ impl Game {
 
     fn spawn_enemy_near_pos(&mut self, kind: EnemyKind, pos: Vec2) {
         let minute = self.time / 60.0;
-        let (radius, hp, speed, contact_damage, color) = enemy_stats(kind, minute);
+        let (radius, hp, speed, contact_damage, color) = enemy_stats(kind, minute, &self.modifiers);
         self.enemies.push(Enemy {
             pos,
             radius,
@@ -2491,7 +2499,7 @@ impl Game {
                 }
             }
         }
-        let salvo = compose_salvo(origin, target, &local_enemies, &self.inventory);
+        let salvo = compose_salvo(origin, target, &local_enemies, &self.inventory, &self.modifiers);
         if salvo.is_empty() {
             return false;
         }
@@ -2717,7 +2725,7 @@ impl Game {
             for i in 0..3 {
                 let angle = (i as f32) * std::f32::consts::TAU / 3.0 + self.rng.angle() * 0.3;
                 let offset = Vec2::new(angle.cos(), angle.sin()) * 20.0;
-                let (_, _, _, _, color) = enemy_stats(EnemyKind::Drone, minute);
+                let (_, _, _, _, color) = enemy_stats(EnemyKind::Drone, minute, &self.modifiers);
                 let mut spawn_pos = pos;
                 move_on_globe(&mut spawn_pos, offset);
                 self.enemies.push(Enemy {
@@ -2914,7 +2922,7 @@ impl Game {
             let heal = (20.0 - self.rank as f32 * 1.0).max(5.0)
                 * (1.0 + prism_heart * PRISM_HEART_HEAL_MULT_PER_LEVEL);
             self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
-            self.level_choices = self.inventory.roll_choices(&mut self.rng);
+            self.level_choices = self.inventory.roll_choices(&mut self.rng, &self.modifiers);
             if self.level_choices.iter().any(|c| c.is_some()) {
                 self.leveling_up = true;
                 break;
@@ -3159,7 +3167,7 @@ impl Game {
 
     fn spawn_enemy_at(&mut self, kind: EnemyKind, angle: f32) {
         let minute = self.time / 60.0;
-        let (radius, hp, speed, contact_damage, color) = enemy_stats(kind, minute);
+        let (radius, hp, speed, contact_damage, color) = enemy_stats(kind, minute, &self.modifiers);
         let spawn_radius = self.screen_size.length() * 0.55;
         let dir = Vec2::new(angle.cos(), angle.sin());
         let mut pos = self.player.pos;
@@ -3453,7 +3461,7 @@ impl Game {
     }
 
     fn spawn_death_particles(&mut self, pos: Vec2, kind: EnemyKind) {
-        let (_, _, _, _, color) = enemy_stats(kind, self.time / 60.0);
+        let (_, _, _, _, color) = enemy_stats(kind, self.time / 60.0, &self.modifiers);
         let count = match kind {
             EnemyKind::Brute => 18,
             EnemyKind::Splitter => 14,

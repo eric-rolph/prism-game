@@ -85,6 +85,24 @@ export class AudioManager {
     this.note(1046.50, 0.36, 0.55, 0.10);
   }
 
+  playJackpot(): void {
+    if (!this.ctx) return;
+    this.note(440, 0.00, 0.08, 0.20, 880);
+    this.note(554.37, 0.10, 0.08, 0.20, 1108.73);
+    this.note(659.25, 0.20, 0.12, 0.40, 1318.51);
+  }
+
+  playGlitch(): void {
+    if (!this.ctx) return;
+    this.note(110, 0.00, 0.18, 0.30, 55, 'sawtooth');
+    this.note(82.41, 0.05, 0.20, 0.40, 41.20, 'square');
+  }
+
+  playSpin(): void {
+    if (!this.ctx) return;
+    this.note(880, 0.00, 0.06, 0.15, 440);
+  }
+
   // --- Private synthesis -------------------------------------------------
 
   private createBeamBed(): void {
