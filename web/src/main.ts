@@ -436,7 +436,40 @@ async function main(): Promise<void> {
   
   let game = new Game(viewW, viewH, seed, interferometer.evaluate());
   let isStarted = false;
+  let isPaused = false;
   let globalT = 0;
+  
+  // Pause Menu Elements
+  const pauseMenuEl = document.getElementById('pause-menu') as HTMLElement;
+  const btnResume = document.getElementById('btn-resume') as HTMLButtonElement;
+  const btnToggleSound = document.getElementById('btn-toggle-sound') as HTMLButtonElement;
+  
+  const togglePause = () => {
+    if (!isStarted || deathShown || modalShown) return;
+    isPaused = !isPaused;
+    if (isPaused) {
+      pauseMenuEl.classList.add('shown');
+      audio.duck(true);
+    } else {
+      pauseMenuEl.classList.remove('shown');
+      audio.duck(false);
+      input.clearKeys();
+      last = performance.now(); // avoid big dt jump
+    }
+  };
+  
+  btnResume.addEventListener('click', togglePause);
+  btnToggleSound.addEventListener('click', () => {
+    const isMuted = audio.toggleMute();
+    btnToggleSound.textContent = isMuted ? 'SOUND: OFF' : 'SOUND: ON';
+  });
+  
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      togglePause();
+      e.preventDefault();
+    }
+  });
   
   const drawInterferometer = () => {
     ctx.clearRect(0, 0, interfCanvas.width, interfCanvas.height);
@@ -827,7 +860,12 @@ async function main(): Promise<void> {
 
   const doRestart = (): void => {
     if (!deathShown) return;
-    game.restart();
+    interferometer.resonance += Math.floor(game.score() / 100);
+    resonanceVal.textContent = String(interferometer.resonance);
+    updateLocks();
+    
+    isStarted = false;
+    interfModal.classList.add('shown');
     input.clearKeys();
     hideDeathScreen();
   };
@@ -860,6 +898,11 @@ async function main(): Promise<void> {
 
     if (!isStarted) {
       drawInterferometer();
+      requestAnimationFrame(frame);
+      return;
+    }
+    
+    if (isPaused) {
       requestAnimationFrame(frame);
       return;
     }

@@ -535,6 +535,61 @@
       .start-btn:hover {
         background: rgba(102, 255, 136, 0.2);
       }
+      
+      #interf-legend {
+        display: flex;
+        gap: 30px;
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: var(--dim);
+        margin-top: -10px;
+        margin-bottom: 10px;
+      }
+      .interf-legend-item span {
+        color: var(--ink);
+      }
+      #interf-jackpot-hint {
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: #ffd740;
+        text-shadow: 0 0 8px rgba(255, 215, 64, 0.5);
+      }
+
+      /* Pause Menu */
+      #pause-menu {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 20px;
+        z-index: 40;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+      }
+      #pause-menu.shown { display: flex; }
+      #pause-title {
+        font-size: 24px;
+        letter-spacing: 8px;
+        color: var(--ink);
+      }
+      .pause-btn {
+        padding: 12px 32px;
+        border: 1px solid var(--faint);
+        background: rgba(10, 8, 20, 0.55);
+        color: var(--ink);
+        font-family: inherit;
+        font-size: 14px;
+        letter-spacing: 4px;
+        cursor: pointer;
+        transition: all 150ms ease;
+      }
+      .pause-btn:hover {
+        border-color: var(--ink);
+        background: rgba(255, 255, 255, 0.1);
+      }
     </style>
   </head>
   <body>
@@ -579,8 +634,14 @@
     </div>
 
     <div id="interferometer" class="shown">
-      <div id="interf-title">THE HARMONIC INTERFEROMETER</div>
+      <div id="interf-title">PRISM: THE HARMONIC INTERFEROMETER</div>
+      <div id="interf-legend">
+        <div class="interf-legend-item">W1: <span>ENEMY MASS</span></div>
+        <div class="interf-legend-item">W2: <span>GAME SPEED</span></div>
+        <div class="interf-legend-item">W3: <span>REFRACTION (PROJECTILES)</span></div>
+      </div>
       <canvas id="interf-canvas" width="1200" height="400" style="width:600px;height:200px;"></canvas>
+      <div id="interf-jackpot-hint">ALIGN ALL THREE WAVES FOR JACKPOT (2X EFFECTS)</div>
       <div id="interf-controls">
         <button id="btn-lock-1" class="lock-btn">LOCK W1</button>
         <button id="btn-lock-2" class="lock-btn">LOCK W2</button>
@@ -591,6 +652,12 @@
         <button id="btn-spin" class="spin-btn">SPIN (10)</button>
         <button id="btn-start" class="start-btn">ENGAGE</button>
       </div>
+    </div>
+
+    <div id="pause-menu">
+      <div id="pause-title">PAUSED</div>
+      <button id="btn-resume" class="pause-btn">RESUME</button>
+      <button id="btn-toggle-sound" class="pause-btn">SOUND: ON</button>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

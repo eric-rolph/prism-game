@@ -11,6 +11,7 @@ const AUDIO_SHIELD_BREAK = 1 << 4;
 export class AudioManager {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private isMuted = false;
   private beamBed: GainNode | null = null;
   private beamOscA: OscillatorNode | null = null;
   private beamOscB: OscillatorNode | null = null;
@@ -37,10 +38,20 @@ export class AudioManager {
   }
 
   duck(on: boolean): void {
-    if (!this.master || !this.ctx) return;
+    if (!this.master || !this.ctx || this.isMuted) return;
     const t = this.ctx.currentTime;
     this.master.gain.cancelAndHoldAtTime(t);
     this.master.gain.linearRampToValueAtTime(on ? 0.1 : 0.5, t + 0.12);
+  }
+
+  toggleMute(): boolean {
+    this.isMuted = !this.isMuted;
+    if (this.master && this.ctx) {
+      const t = this.ctx.currentTime;
+      this.master.gain.cancelAndHoldAtTime(t);
+      this.master.gain.linearRampToValueAtTime(this.isMuted ? 0 : 0.5, t + 0.1);
+    }
+    return this.isMuted;
   }
 
   tick(dt: number, beams: number, kills: number, gems: number, events: number, synergyBits: number): void {
