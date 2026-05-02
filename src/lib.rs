@@ -68,6 +68,18 @@ impl Game {
         self.inner.set_dash_input(pressed);
     }
 
+    pub fn set_altitude_input(&mut self, v: f32) {
+        self.inner.set_altitude_input(v);
+    }
+
+    pub fn globe_luminosity(&self) -> f32 {
+        self.inner.globe_luminosity()
+    }
+
+    pub fn player_altitude(&self) -> f32 {
+        self.inner.player_altitude()
+    }
+
     pub fn update(&mut self, dt: f32) {
         self.inner.update(dt);
     }

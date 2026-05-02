@@ -5,8 +5,9 @@
 //! JS side can show a picker UI in response to `is_leveling_up()`.
 
 use crate::entities::{
-    Beam, Boss, BossKind, BossState, Crystal, Enemy, EnemyKind, EnemyState, FrostField, Halo,
-    InterferencePulse, Particle, Player, Projectile, VoidShockwave, XpGem,
+    Beam, Boss, BossKind, BossState, CorruptionPatch, Crystal, Enemy, EnemyKind, EnemyState,
+    FrostField, Halo, InterferencePulse, Particle, Player, Projectile, VoidShell, VoidShockwave,
+    XpGem,
 };
 use crate::math::Rng;
 use crate::shards::{
@@ -60,6 +61,7 @@ pub struct Game {
     boss: Option<Boss>,
 
     input: Vec2,
+    altitude_input: f32, // -1.0 to +1.0; positive = rise
     dash_input: bool,
     seed: u32,
     rng: Rng,
@@ -103,6 +105,8 @@ pub struct Game {
     boss_breather_timer: f32,
     boss_kills: u32,
     void_shockwaves: Vec<VoidShockwave>,
+    corruption_patches: Vec<CorruptionPatch>,
+    void_shells: Vec<VoidShell>,
 
     // Run telemetry (reset on restart, read at death/victory).
     damage_taken: f32,
@@ -520,6 +524,35 @@ const CASCADE_REACH: f32 = 130.0;
 const CASCADE_THICKNESS: f32 = 2.0;
 const CASCADE_LIFETIME: f32 = 0.14;
 
+// --- Altitude ---
+const ALTITUDE_RISE_SPEED: f32 = 2.5;   // normalized units/sec (0→1 in 0.4s)
+const ALTITUDE_FALL_SPEED: f32 = 1.8;   // normalized units/sec
+
+// --- Corruption ---
+const CORRUPTION_PATCH_RADIUS: f32 = 65.0;
+const CORRUPTION_REINFORCE_DELAY: f32 = 1.5; // seconds on surface before enemy contributes
+const CORRUPTION_LEVEL_RATE: f32 = 0.12;     // level gain/sec while enemy near
+const CORRUPTION_DECAY_RATE: f32 = 0.06;     // level loss/sec with no nearby enemy
+const CORRUPTION_CLEANSE_RADIUS: f32 = 80.0;
+const CORRUPTION_CLEANSE_RATE: f32 = 0.55;   // level loss/sec from player presence
+const CORRUPTION_MAX_PATCHES: usize = 48;
+const CORRUPTION_DEBUFF_SPEED: f32 = 0.15;   // 15% speed penalty inside corruption
+const CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD: f32 = 0.4;
+const CORRUPTION_LUMINOSITY_HP_DRAIN: f32 = 6.0; // HP/sec at 0% luminosity
+const POLAR_BOUNDARY_Y: f32 = GLOBE_RADIUS * 1.0; // |y| > this = polar zone
+
+// --- VoidShell ---
+const VOID_SHELL_RADIUS: f32 = 11.0;
+const VOID_SHELL_DESCENT_TIME: f32 = 2.5; // seconds to descend from alt 1.0 to 0.0
+const VOID_SHELL_LAND_RADIUS: f32 = 90.0; // corruption patch radius on landing
+const VOID_SHELL_LAND_DAMAGE: f32 = 18.0; // area damage on landing
+const VOID_SHELL_LAND_RADIUS_DAMAGE: f32 = 70.0; // player must be within this to take damage
+const VOID_SHELL_INTERCEPT_ALTITUDE: f32 = 0.45; // player must be above this to intercept
+
+fn is_polar_zone(pos: Vec2) -> bool {
+    pos.y.abs() > POLAR_BOUNDARY_Y
+}
+
 fn weighted_pick<T: Copy>(pool: &[(T, u32)], rng: &mut Rng) -> Option<T> {
     let total: u32 = pool.iter().map(|p| p.1).sum();
     if total == 0 {
@@ -547,6 +580,7 @@ impl Game {
                 hp: PLAYER_MAX_HP,
                 max_hp: PLAYER_MAX_HP,
                 iframe_timer: 0.0,
+                altitude: 0.0,
                 dash_cooldown: 0.0,
                 dash_timer: 0.0,
                 dash_dir: Vec2::ZERO,
@@ -564,6 +598,7 @@ impl Game {
             crystals: Vec::new(),
             boss: None,
             input: Vec2::ZERO,
+            altitude_input: 0.0,
             dash_input: false,
             seed,
             rng: Rng::new(seed),
@@ -618,6 +653,8 @@ impl Game {
             boss_breather_timer: 0.0,
             boss_kills: 0,
             void_shockwaves: Vec::new(),
+            corruption_patches: Vec::new(),
+            void_shells: Vec::new(),
             circle_buf: Vec::with_capacity(1024),
             beam_buf: Vec::with_capacity(256),
         }
@@ -638,6 +675,25 @@ impl Game {
 
     pub fn set_dash_input(&mut self, pressed: bool) {
         self.dash_input = pressed;
+    }
+
+    pub fn set_altitude_input(&mut self, v: f32) {
+        self.altitude_input = v.clamp(-1.0, 1.0);
+    }
+
+    fn globe_luminosity_inner(&self) -> f32 {
+        let total: f32 = self.corruption_patches.iter()
+            .map(|p| p.level * (p.radius / CORRUPTION_PATCH_RADIUS).powi(2))
+            .sum();
+        (1.0 - total / 20.0).clamp(0.0, 1.0)
+    }
+
+    pub fn globe_luminosity(&self) -> f32 {
+        self.globe_luminosity_inner()
+    }
+
+    pub fn player_altitude(&self) -> f32 {
+        self.player.altitude
     }
 
     pub fn dash_cooldown_pct(&self) -> f32 {
@@ -1084,10 +1140,25 @@ impl Game {
 
         // Movement (suppressed during dash).
         if self.player.dash_timer <= 0.0 {
-            let player_step = self.input * self.effective_player_speed() * dt;
+            let corruption_speed_mult = if self.player.altitude < 0.2
+                && self.corruption_patches.iter().any(|p| {
+                    p.level > 0.2 && globe_distance(self.player.pos, p.pos) < p.radius
+                }) {
+                1.0 - CORRUPTION_DEBUFF_SPEED
+            } else {
+                1.0
+            };
+            let player_step = self.input * self.effective_player_speed() * corruption_speed_mult * dt;
             move_on_globe(&mut self.player.pos, player_step);
         }
         self.camera = self.player.pos;
+
+        // --- Altitude update ---
+        if self.altitude_input > 0.0 {
+            self.player.altitude = (self.player.altitude + ALTITUDE_RISE_SPEED * dt).min(1.0);
+        } else {
+            self.player.altitude = (self.player.altitude - ALTITUDE_FALL_SPEED * dt).max(0.0);
+        }
 
         // Wave clear banner timer.
         if self.wave_clear_timer > 0.0 {
@@ -1145,6 +1216,7 @@ impl Game {
             (b.kind == BossKind::VoidPrism && b.state == BossState::Active && b.phase >= 1)
                 .then_some(b.pos)
         });
+        let mut new_void_shells: Vec<VoidShell> = Vec::new();
         for e in &mut self.enemies {
             if e.spawn_grace > 0.0 {
                 e.spawn_grace = (e.spawn_grace - dt).max(0.0);
@@ -1289,8 +1361,27 @@ impl Game {
                         e.state_timer = 0.0;
                         e.radius = PULSAR_IDLE_RADIUS;
                         e.contact_damage = base_damage;
+                        // Spawn a VoidShell targeting the player (or near-polar redirect).
+                        let shell_target = if !is_polar_zone(player_pos) {
+                            player_pos
+                        } else {
+                            Vec2::new(player_pos.x, player_pos.y.signum() * POLAR_BOUNDARY_Y * 0.9)
+                        };
+                        new_void_shells.push(VoidShell {
+                            pos: e.pos,
+                            target: shell_target,
+                            altitude: 1.0,
+                            radius: VOID_SHELL_RADIUS,
+                            descent_speed: 1.0 / VOID_SHELL_DESCENT_TIME,
+                        });
                     }
                 }
+            }
+            // Surface time tracking for corruption.
+            if e.state == EnemyState::Drifting {
+                e.surface_time += dt;
+            } else {
+                e.surface_time = 0.0;
             }
             // Void Prism gravitational pull — all enemies drawn toward boss center.
             if let Some(vp_pos) = void_pull_pos {
@@ -1299,6 +1390,159 @@ impl Game {
                     let pull_dir = delta.normalize_or_zero();
                     move_on_globe(&mut e.pos, pull_dir * VOID_PRISM_PULL_STRENGTH * dt);
                 }
+            }
+        }
+
+        self.void_shells.extend(new_void_shells);
+
+        // --- Corruption update ---
+        // Collect surface enemy positions (avoid borrow conflict).
+        let surface_enemy_positions: Vec<Vec2> = self.enemies.iter()
+            .filter(|e| {
+                e.state == EnemyState::Drifting
+                    && !is_polar_zone(e.pos)
+                    && e.surface_time >= CORRUPTION_REINFORCE_DELAY
+            })
+            .map(|e| e.pos)
+            .collect();
+
+        for pos in surface_enemy_positions {
+            let found = self.corruption_patches.iter_mut()
+                .find(|p| globe_distance(p.pos, pos) < p.radius * 0.7);
+            if let Some(p) = found {
+                p.level = (p.level + CORRUPTION_LEVEL_RATE * dt).min(1.0);
+            } else if self.corruption_patches.len() < CORRUPTION_MAX_PATCHES {
+                self.corruption_patches.push(CorruptionPatch {
+                    pos,
+                    radius: CORRUPTION_PATCH_RADIUS,
+                    level: 0.05,
+                    reinforce_timer: 0.0,
+                });
+            }
+        }
+
+        // Patches decay without nearby enemies.
+        {
+            let enemy_positions: Vec<Vec2> = self.enemies.iter()
+                .filter(|e| e.state == EnemyState::Drifting)
+                .map(|e| e.pos)
+                .collect();
+            for p in &mut self.corruption_patches {
+                let reinforced = enemy_positions.iter().any(|&epos| {
+                    globe_distance(epos, p.pos) < p.radius
+                });
+                if !reinforced {
+                    p.level = (p.level - CORRUPTION_DECAY_RATE * dt).max(0.0);
+                }
+            }
+        }
+        self.corruption_patches.retain(|p| p.level > 0.01);
+
+        // Player cleanses nearby patches when at surface.
+        if self.player.altitude < 0.25 {
+            let ppos = self.player.pos;
+            for p in &mut self.corruption_patches {
+                if globe_distance(ppos, p.pos) < CORRUPTION_CLEANSE_RADIUS {
+                    p.level = (p.level - CORRUPTION_CLEANSE_RATE * dt).max(0.0);
+                }
+            }
+        }
+
+        // Low luminosity HP drain.
+        let luminosity = self.globe_luminosity_inner();
+        if luminosity < CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD {
+            let drain_frac = (CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD - luminosity)
+                / CORRUPTION_LUMINOSITY_DRAIN_THRESHOLD;
+            let drain = drain_frac * CORRUPTION_LUMINOSITY_HP_DRAIN * dt;
+            if self.player.hp > 5.0 {
+                self.player.hp -= drain;
+            }
+        }
+
+        // --- VoidShell update ---
+        for s in &mut self.void_shells {
+            s.altitude -= s.descent_speed * dt;
+        }
+        let (landed, active): (Vec<VoidShell>, Vec<VoidShell>) =
+            self.void_shells.drain(..).partition(|s| s.altitude <= 0.0);
+        self.void_shells = active;
+
+        for s in landed {
+            // Create corruption patch at landing site.
+            if !is_polar_zone(s.target) {
+                self.corruption_patches.push(CorruptionPatch {
+                    pos: s.target,
+                    radius: VOID_SHELL_LAND_RADIUS,
+                    level: 0.8,
+                    reinforce_timer: 0.0,
+                });
+            }
+            // Area damage to player.
+            if self.player.iframe_timer <= 0.0
+                && globe_distance(self.player.pos, s.target) < VOID_SHELL_LAND_RADIUS_DAMAGE
+            {
+                let armor = self.inventory.level(ShardKind::Armor) as f32;
+                let dmg = VOID_SHELL_LAND_DAMAGE
+                    * (1.0 - armor * ARMOR_DR_PER_LEVEL).max(0.0);
+                self.player.hp -= dmg;
+                self.player.iframe_timer = IFRAME_DURATION;
+                self.shake_amount = SHAKE_HIT_PX;
+                self.damage_taken += dmg;
+                self.damage_by_source[DamageSource::Projectile.as_index()] += dmg;
+                if self.player.hp <= 0.0 && self.death_cause.is_none() {
+                    self.death_cause = Some(DamageSource::Projectile);
+                }
+            }
+            // Spawn landing particles.
+            for _ in 0..12 {
+                let a = self.rng.angle();
+                self.particles.push(Particle {
+                    pos: s.target,
+                    vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(80.0, 220.0),
+                    life: 0.0,
+                    max_life: self.rng.range(0.3, 0.7),
+                    color: [0.3, 0.05, 0.6],
+                    size: self.rng.range(2.0, 5.0),
+                });
+            }
+            self.shake_amount = (self.shake_amount + 3.0).min(10.0);
+        }
+
+        // VoidShell beam interception (player must be at altitude).
+        if self.player.altitude >= VOID_SHELL_INTERCEPT_ALTITUDE && !self.void_shells.is_empty() {
+            let beam_segments: Vec<(Vec2, Vec2, f32)> = self.beams.iter()
+                .map(|b| (b.start, b.end, b.thickness))
+                .collect();
+            let mut intercepted: Vec<usize> = Vec::new();
+            for (si, shell) in self.void_shells.iter().enumerate() {
+                let hit = beam_segments.iter().any(|(bstart, bend, bthick)| {
+                    capsule_circle_intersect_globe(
+                        *bstart,
+                        *bend,
+                        bthick * 0.5,
+                        shell.pos,
+                        shell.radius * (2.0 - shell.altitude),
+                    )
+                });
+                if hit {
+                    intercepted.push(si);
+                }
+            }
+            for si in intercepted.iter().rev() {
+                let shell = self.void_shells.remove(*si);
+                for _ in 0..16 {
+                    let a = self.rng.angle();
+                    self.particles.push(Particle {
+                        pos: shell.pos,
+                        vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(100.0, 300.0),
+                        life: 0.0,
+                        max_life: self.rng.range(0.25, 0.55),
+                        color: [0.9, 0.7, 1.0],
+                        size: self.rng.range(3.0, 7.0),
+                    });
+                }
+                self.shake_amount = (self.shake_amount + 2.5).min(8.0);
+                self.audio_kill_count += 1;
             }
         }
 
@@ -2200,6 +2444,7 @@ impl Game {
             slow_timer: 0.0,
             no_xp: false,
             spawn_grace: SPAWN_GRACE,
+            surface_time: 0.0,
         });
     }
 
@@ -2448,6 +2693,7 @@ impl Game {
                             slow_timer: 0.0,
                             no_xp: true,
                             spawn_grace: 0.0,
+                            surface_time: 0.0,
                         });
                     }
                     BossKind::Hydra => {
@@ -2468,6 +2714,7 @@ impl Game {
                                     slow_timer: 0.0,
                                     no_xp: true,
                                     spawn_grace: 0.0,
+                                    surface_time: 0.0,
                                 });
                             }
                         }
@@ -2487,6 +2734,7 @@ impl Game {
                             slow_timer: 0.0,
                             no_xp: true,
                             spawn_grace: 0.0,
+                            surface_time: 0.0,
                         });
                     }
                 }
@@ -2735,6 +2983,7 @@ impl Game {
                     slow_timer: 0.0,
                     no_xp: true,
                     spawn_grace: SPAWN_GRACE,
+                    surface_time: 0.0,
                 });
             }
         }
@@ -3191,6 +3440,7 @@ impl Game {
             slow_timer: 0.0,
             no_xp: false,
             spawn_grace: SPAWN_GRACE,
+            surface_time: 0.0,
         });
     }
 
@@ -3511,6 +3761,36 @@ impl Game {
             });
         }
 
+        // Corruption patches — dark purplish void zones.
+        for p in &self.corruption_patches {
+            if p.level < 0.05 {
+                continue;
+            }
+            let pos = nearest_globe_pos(camera, p.pos);
+            let pulse = 0.7 + (self.time * 1.2 + p.pos.x * 0.008).sin() * 0.3;
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: p.radius,
+                r: 0.1 * p.level,
+                g: 0.0,
+                b: 0.4 * p.level * pulse,
+                a: 0.22 * p.level,
+                glow: 0.4 * p.level,
+            });
+            // Dark void core.
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: p.radius * 0.4,
+                r: 0.05,
+                g: 0.0,
+                b: 0.12,
+                a: 0.45 * p.level,
+                glow: 0.0,
+            });
+        }
+
         // Interference pulses underneath everything else.
         let singularity_visual = self.inventory.has_evolution(EvolutionKind::Singularity);
         for p in &self.pulses {
@@ -3542,6 +3822,22 @@ impl Game {
             }
         }
 
+        // Player altitude shadow (drawn before player circle so it appears behind).
+        if self.player.altitude > 0.05 {
+            let pos = nearest_globe_pos(camera, self.player.pos);
+            let shadow_r = self.player.radius * (1.2 + self.player.altitude * 0.8);
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: shadow_r,
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: self.player.altitude * 0.5,
+                glow: 0.0,
+            });
+        }
+
         // Player (blink during i-frames).
         let visible =
             self.player.iframe_timer <= 0.0 || ((self.player.iframe_timer * 16.0) as u32 % 2 == 0);
@@ -3556,6 +3852,22 @@ impl Game {
                 b: 1.0,
                 a: 1.0,
                 glow: 3.0,
+            });
+        }
+
+        // Altitude indicator ring.
+        if self.player.altitude > 0.05 {
+            let pos = nearest_globe_pos(camera, self.player.pos);
+            let ring_r = self.player.radius + 10.0 + self.player.altitude * 8.0;
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: ring_r,
+                r: 0.5,
+                g: 0.85,
+                b: 1.0,
+                a: self.player.altitude * 0.45,
+                glow: self.player.altitude * 1.5,
             });
         }
 
@@ -3841,6 +4153,34 @@ impl Game {
                     glow: 1.0,
                 });
             }
+        }
+
+        // VoidShells — descending dark orbs with target warning rings.
+        for s in &self.void_shells {
+            let pos = nearest_globe_pos(camera, s.target);
+            let t = 1.0 - s.altitude; // 0.0 = just spawned, 1.0 = landing
+            let visual_r = s.radius * (3.5 - t * 2.5); // large at altitude, shrinks as it lands
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: visual_r,
+                r: 0.45,
+                g: 0.08,
+                b: 0.9,
+                a: 0.5 + t * 0.3,
+                glow: 2.5 - t * 1.0,
+            });
+            // Warning target ring grows brighter as shell approaches.
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: VOID_SHELL_LAND_RADIUS * 0.55,
+                r: 0.55,
+                g: 0.0,
+                b: 0.7,
+                a: t * 0.18,
+                glow: t * 0.5,
+            });
         }
 
         // Enemies — colored per-type, flash white on hit.

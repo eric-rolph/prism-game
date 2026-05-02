@@ -6,6 +6,7 @@ const KEYS_LEFT = new Set(['ArrowLeft', 'a', 'A']);
 const KEYS_RIGHT = new Set(['ArrowRight', 'd', 'D']);
 const KEYS_UP = new Set(['ArrowUp', 'w', 'W']);
 const KEYS_DOWN = new Set(['ArrowDown', 's', 'S']);
+const KEYS_RISE = new Set(['q', 'Q']);
 
 export class Input {
   private pressed = new Set<string>();
@@ -71,7 +72,15 @@ export class Input {
   }
 
   private isTracked(key: string): boolean {
-    return KEYS_LEFT.has(key) || KEYS_RIGHT.has(key) || KEYS_UP.has(key) || KEYS_DOWN.has(key);
+    return KEYS_LEFT.has(key) || KEYS_RIGHT.has(key) || KEYS_UP.has(key) || KEYS_DOWN.has(key) || KEYS_RISE.has(key);
+  }
+
+  /// Returns 1.0 when Q is held (rise), 0.0 otherwise.
+  altitudeInput(): number {
+    for (const k of this.pressed) {
+      if (KEYS_RISE.has(k)) return 1.0;
+    }
+    return 0.0;
   }
 
   /// Returns the current movement direction in [-1, 1]^2. Magnitude ≤ 1.

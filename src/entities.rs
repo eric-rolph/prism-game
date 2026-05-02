@@ -14,6 +14,7 @@ pub struct Player {
     pub dash_dir: Vec2,
     pub barrier_hp: f32,
     pub barrier_max: f32,
+    pub altitude: f32, // 0.0 (surface) to 1.0 (max altitude)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -58,6 +59,7 @@ pub struct Enemy {
     pub slow_timer: f32,
     pub no_xp: bool,
     pub spawn_grace: f32,
+    pub surface_time: f32, // seconds spent drifting on the surface
 }
 
 pub struct XpGem {
@@ -181,4 +183,22 @@ pub struct FrostField {
     pub life: f32,
     pub max_life: f32,
     pub radius: f32,
+}
+
+/// Corruption left on the surface by lingering enemies.
+pub struct CorruptionPatch {
+    pub pos: Vec2,
+    pub radius: f32,
+    pub level: f32,          // 0.0 to 1.0
+    pub reinforce_timer: f32, // unused bookkeeping field (kept for future use)
+}
+
+/// Descending void projectile fired by Pulsars. Corrupts and deals area damage on landing.
+#[derive(Clone)]
+pub struct VoidShell {
+    pub pos: Vec2,
+    pub target: Vec2,     // surface target position
+    pub altitude: f32,    // 1.0 (spawned high) to 0.0 (landed)
+    pub radius: f32,
+    pub descent_speed: f32, // altitude units per second
 }
