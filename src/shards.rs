@@ -371,7 +371,7 @@ impl Inventory {
 /// Canonical synergy table: (shard_a, shard_b, name). Bit i in
 /// `active_synergy_bits` / `near_synergy_bits` corresponds to entry i here.
 /// Must stay in index-lock with SYNERGY_NAMES in web/src/main.ts.
-pub const SYNERGY_COUNT: usize = 17;
+pub const SYNERGY_COUNT: usize = 19;
 pub const SYNERGIES: &[(ShardKind, ShardKind, &'static str)] = &[
     (ShardKind::Split, ShardKind::Cascade, "CHAIN REACTION"),
     (ShardKind::Split, ShardKind::Frost, "BLIZZARD"),
@@ -392,6 +392,8 @@ pub const SYNERGIES: &[(ShardKind, ShardKind, &'static str)] = &[
         ShardKind::Interference,
         "SEISMIC FIELD",
     ),
+    (ShardKind::Minefield, ShardKind::Arc, "TRIPWIRE GRID"),
+    (ShardKind::Minefield, ShardKind::PhaseStep, "PHASE WAKE"),
     (ShardKind::Lance, ShardKind::Lens, "RAIL FOCUS"),
     (ShardKind::Lance, ShardKind::Siphon, "SURGICAL DRAIN"),
 ];

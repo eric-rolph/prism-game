@@ -155,13 +155,22 @@ pub struct Halo {
     pub angular_speed: f32,
 }
 
-/// Expanding ring emitted by the Interference shard. Damages any enemy the
-/// ring front passes through; rendered as a fading translucent disk.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PulseKind {
+    Interference,
+    Mine,
+    DashBlast,
+}
+
+/// Expanding ground pulse emitted by Interference, mines, or dash blasts.
+/// Damages enemies as the ring front passes through them.
 pub struct InterferencePulse {
     pub pos: Vec2,
     pub life: f32,
     pub max_life: f32,
     pub max_radius: f32,
+    pub kind: PulseKind,
+    pub damage_multiplier: f32,
 }
 
 impl InterferencePulse {

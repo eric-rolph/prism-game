@@ -7,6 +7,8 @@ const AUDIO_PLAYER_HIT   = 1 << 1;
 const AUDIO_BOSS_SPAWN   = 1 << 2;
 const AUDIO_BOSS_PHASE   = 1 << 3;
 const AUDIO_SHIELD_BREAK = 1 << 4;
+const AUDIO_DASH_BLAST   = 1 << 5;
+const AUDIO_MINE_BURST   = 1 << 6;
 
 export class AudioManager {
   private ctx: AudioContext | null = null;
@@ -74,6 +76,8 @@ export class AudioManager {
     if (events & AUDIO_BOSS_SPAWN)   this.playBossSpawn();
     if (events & AUDIO_BOSS_PHASE)   this.playBossPhase();
     if (events & AUDIO_SHIELD_BREAK) this.playShieldBreak();
+    if (events & AUDIO_DASH_BLAST)   this.playDashBlast();
+    if (events & AUDIO_MINE_BURST)   this.playMineBurst();
 
     // Detect first-activation of any synergy.
     const newBits = synergyBits & ~this.prevSynergyBits;
@@ -202,6 +206,16 @@ export class AudioManager {
     this.note(1800, 0.00, 0.09, 0.10, 900);
     this.note(900,  0.06, 0.07, 0.10, 450);
     this.note(450,  0.12, 0.06, 0.14, 200);
+  }
+
+  private playDashBlast(): void {
+    this.note(720, 0.00, 0.045, 0.08, 1320, 'triangle');
+    this.note(140, 0.00, 0.050, 0.12, 58, 'sine');
+  }
+
+  private playMineBurst(): void {
+    this.note(96, 0.00, 0.070, 0.16, 36, 'sine');
+    this.note(1180, 0.02, 0.032, 0.07, 620, 'triangle');
   }
 
   // Single voice: oscillator with exponential frequency sweep + gain envelope.
