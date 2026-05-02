@@ -11,6 +11,7 @@ export class Input {
   private pressed = new Set<string>();
   private touchStart: { x: number; y: number } | null = null;
   private touchCurrent: { x: number; y: number } | null = null;
+  private touchStartTime = 0;
   private _dashPressed = false;
 
   constructor(target: HTMLElement) {
@@ -34,7 +35,10 @@ export class Input {
       'touchstart',
       (e) => {
         const t = e.touches[0];
-        if (t) this.touchStart = this.touchCurrent = { x: t.clientX, y: t.clientY };
+        if (t) {
+          this.touchStart = this.touchCurrent = { x: t.clientX, y: t.clientY };
+          this.touchStartTime = performance.now();
+        }
         e.preventDefault();
       },
       { passive: false },
@@ -49,6 +53,16 @@ export class Input {
       { passive: false },
     );
     const end = () => {
+      if (this.touchStart && this.touchCurrent) {
+        const dx = this.touchCurrent.x - this.touchStart.x;
+        const dy = this.touchCurrent.y - this.touchStart.y;
+        const moved = Math.hypot(dx, dy);
+        const elapsed = performance.now() - this.touchStartTime;
+        // Short tap with minimal movement → dash.
+        if (moved < 12 && elapsed < 220) {
+          this._dashPressed = true;
+        }
+      }
       this.touchStart = null;
       this.touchCurrent = null;
     };

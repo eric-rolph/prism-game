@@ -1549,8 +1549,22 @@ impl Game {
                 // beam positioning, while close-range orbitals reward risky
                 // movement into the boss space.
                 for (hpos, hsize) in &halo_snapshots {
-                    if globe_distance(boss.pos, *hpos) < boss.radius + hsize {
-                        boss.hp -= HALO_DPS * dt;
+                    match boss.kind {
+                        BossKind::Hydra => {
+                            for i in 0..3usize {
+                                if boss.lobe_hp[i] > 0.0 {
+                                    let lp = Game::hydra_lobe_pos(boss, i);
+                                    if globe_distance(lp, *hpos) < HYDRA_LOBE_RADIUS + hsize {
+                                        boss.lobe_hp[i] -= HALO_DPS * dt;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            if globe_distance(boss.pos, *hpos) < boss.radius + hsize {
+                                boss.hp -= HALO_DPS * dt;
+                            }
+                        }
                     }
                 }
             }
@@ -1691,9 +1705,27 @@ impl Game {
                 if boss.state == BossState::Active {
                     // Interference is a radial field effect, intentionally not
                     // blocked by Sentinel shields.
-                    let d = globe_distance(boss.pos, *ppos);
-                    if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + boss.radius {
-                        boss.hp -= INTERFERENCE_DPS * dt;
+                    match boss.kind {
+                        BossKind::Hydra => {
+                            for i in 0..3usize {
+                                if boss.lobe_hp[i] > 0.0 {
+                                    let lp = Game::hydra_lobe_pos(boss, i);
+                                    let d = globe_distance(lp, *ppos);
+                                    if (d - *pradius).abs()
+                                        < INTERFERENCE_RING_THICKNESS + HYDRA_LOBE_RADIUS
+                                    {
+                                        boss.lobe_hp[i] -=
+                                            INTERFERENCE_DPS * interference_dmg_mult * dt;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            let d = globe_distance(boss.pos, *ppos);
+                            if (d - *pradius).abs() < INTERFERENCE_RING_THICKNESS + boss.radius {
+                                boss.hp -= INTERFERENCE_DPS * dt;
+                            }
+                        }
                     }
                 }
             }
@@ -3359,8 +3391,20 @@ impl Game {
             if b.state != BossState::Active {
                 return None;
             }
-            let delta = nearest_globe_delta(origin, b.pos);
-            Some((origin + delta, delta.length_squared()))
+            match b.kind {
+                BossKind::Hydra => (0..3usize)
+                    .filter(|&i| b.lobe_hp[i] > 0.0)
+                    .map(|i| {
+                        let lp = Game::hydra_lobe_pos(b, i);
+                        let delta = nearest_globe_delta(origin, lp);
+                        (origin + delta, delta.length_squared())
+                    })
+                    .min_by(|a, c| a.1.partial_cmp(&c.1).unwrap_or(std::cmp::Ordering::Equal)),
+                _ => {
+                    let delta = nearest_globe_delta(origin, b.pos);
+                    Some((origin + delta, delta.length_squared()))
+                }
+            }
         });
 
         match (nearest_enemy, nearest_boss) {

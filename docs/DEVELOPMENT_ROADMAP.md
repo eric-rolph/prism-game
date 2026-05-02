@@ -13,7 +13,7 @@ Prism is now a playable browser bullet-heaven with:
 - Player HP, i-frames, dash, death/victory screen, score, XP gems, level-up modal, shard tray, dash meter, HP meter, wave banner, and active/near synergy HUD.
 - Eight enemy roles: Drone, Brute, Dasher, Splitter, Orbiter, Emitter, Pulsar, Umbra.
 - Globe traversal with latitude/longitude grid, polar/limb visual cues, crystals as moving obstacles, and screen shake/hit flashes.
-- Sixteen shards at max level 6: Split, Refract, Mirror, Chromatic, Lens, Diffract, Echo, Halo, Cascade, Interference, Siphon, Frost, Barrier, Thorns, Magnet, Momentum.
+- Twenty shards at max level 6: Split, Refract, Mirror, Chromatic, Lens, Diffract, Echo, Halo, Cascade, Interference, Siphon, Frost, Barrier, Thorns, Magnet, Momentum (active), plus Armor, Luck, Prism Heart, Phase Step (passive).
 - Eleven implemented synergies: Chain Reaction, Blizzard, Supernova, Prism Cannon, Tracking Echo, Frozen Orbit, Event Horizon, Blood Pact, Martyrdom, Resonance, Gravity Well.
 
 ## Current Diagnosis
@@ -47,8 +47,8 @@ Immediate senior-dev execution sequence:
 4. ✅ Ship Hydra and Void Prism before deeper extraction work.
 5. ✅ Add procedural audio for beams, pickups, shield cracks, rank-up, boss warnings, death, and victory.
 6. ✅ Add high-granularity telemetry before heavy balance tuning.
-7. Add the remaining level-6 evolutions as the next major gameplay content.
-8. Extract boss/wave/progression modules from `game.rs` once telemetry and capstones stop changing those surfaces every pass.
+7. ✅ All five level-6 evolutions are shipped.
+8. Extract boss/wave/progression modules from `game.rs` once telemetry confirms stability.
 
 ## Slice 1: Boss Milestones
 
@@ -73,13 +73,13 @@ Goal: make the run feel like a beginning, middle, and finale rather than one con
 
 ### 1.3 10:00 Hydra
 
-- ✅ Three colored lobes (red/green/blue) orbiting a shared center, each with 4500 HP.
+- ✅ Three colored lobes (red/green/blue) orbiting a shared center, each with 6500 HP.
 - ✅ Lobe death spawns 3 type-specific adds (Dasher/Emitter/Orbiter) and a particle burst.
 - ✅ Formation speeds up as lobes die; surviving lobes fire projectiles periodically.
 - ✅ Boss HP bar reflects total remaining lobe health.
 - Intended lesson: target priority matters under late-wave pressure.
 
-### 1.4 15:00 Void Prism
+### 1.4 13:00 Void Prism
 
 - ✅ Final globe-bound boss with a dark core and bright violet rim.
 - ✅ Pulls all enemies inward, emits expanding player-damaging shockwave rings at intervals.
@@ -93,7 +93,7 @@ Goal: make the run feel like a beginning, middle, and finale rather than one con
 
 ## Slice 2: Upgrade Economy
 
-Status: in progress; skip/reroll, passive shards, and the first level-6 evolution are implemented.
+Status: ✅ complete; all evolutions, passive shards, skip, and reroll are implemented.
 
 Goal: give level-ups short-term tactics and long-term build planning.
 
@@ -104,17 +104,17 @@ Goal: give level-ups short-term tactics and long-term build planning.
   - ✅ Armor: reduces all incoming damage by 8% per level (up to 48% at L6).
   - ✅ Luck: boosts rare shard weight ×0.25/level and legendary ×0.50/level in rolls.
   - ✅ Prism Heart: +15 max HP per level (instant heal on pick); level-up heals 10% more per level.
-  - ✅ Phase Step: +0.18s dash i-frames per level; L3+: particle afterimage on dash start.
+  - ✅ Phase Step: +0.12s dash i-frames per level; L3+: particle afterimage on dash start.
 - ✅ Add evolution-offer plumbing: when a linked pair reaches level 6, level-up can offer a named super-shard instead of another normal upgrade.
-- Add the remaining planned level-6 evolutions.
+- ✅ Add all five planned level-6 evolutions.
 - Keep active synergies at level 3; evolutions are the level-6 “capstone” layer, not a replacement for synergies.
 
-Candidate evolutions:
+Evolutions (all shipped):
 
-- Kaleidoscope: Split 6 + Mirror 6; radial fan salvos become patterned great-circle bursts.
+- ✅ Kaleidoscope: Split 6 + Mirror 6; radial fan salvos become patterned great-circle bursts.
 - ✅ Whiteout: Frost 6 + Diffract 6; frozen kills emit freezing starbursts and longer frost fields.
-- Singularity: Magnet 6 + Interference 6; pulse rings become stronger gravity wells with a dark center.
-- Solar Crown: Halo 6 + Barrier 6; orbitals reinforce the shield and flare on contact.
+- ✅ Singularity: Magnet 6 + Interference 6; pulse rings become stronger gravity wells with a dark center.
+- ✅ Solar Crown: Halo 6 + Barrier 6; orbitals reinforce the shield and flare on contact.
 - ✅ Afterimage Engine: Echo 6 + Momentum 6; dash leaves a temporary firing echo.
 
 ## Slice 3: Audio Event System
@@ -197,14 +197,16 @@ Status: opportunistic, but do before public sharing.
 
 ## Near-Term Order
 
-1. Play three baseline 15-minute runs using the exported telemetry:
+1. ✅ Fix Hydra aura damage (Halo/Interference wrote boss.hp, overwritten each frame by lobe sum) and auto-targeting (aimed at center with no hitbox; now targets nearest living lobe).
+2. ✅ Add touch dash: short tap on mobile now triggers dash; HUD label updated to DASH [SPACE / TAP].
+3. Play three baseline 15-minute runs using the exported telemetry:
    - normal input, no forced build
    - aggressive close-range Halo/Barrier/Siphon path
    - runaway beam Split/Mirror/Cascade path
-2. Tune boss HP, shield/lobe HP, projectile cadence, and late-wave pressure from those runs.
-3. Add the remaining planned level-6 evolutions, one or two per pass, with each evolution creating a distinct build identity.
-4. Do technical hardening before public sharing: context loss/restore, Worker security headers, deterministic smoke tests, and selective `game.rs` extraction.
-5. Add endless mode only after the 15-minute arc and capstone economy feel stable.
+4. Tune boss HP, projectile cadence, and late-wave pressure from those runs.
+5. Add structured telemetry export (JSON history, fixed seed, boss TTK, offer sets, death context) before heavy balance tuning.
+6. Do technical hardening before public sharing: WebGL context loss/restore, Worker security headers, CI workflow, deterministic smoke tests, Rust/TS constant deduplication, and selective `game.rs` extraction.
+7. Add endless mode only after the 15-minute arc feels stable under telemetry evidence.
 
 ## Done / Completed
 
@@ -223,3 +225,11 @@ Status: opportunistic, but do before public sharing.
 - All 11 planned synergy effects.
 - Background globe/grid, screen shake, hit flash, HP ring, death/victory screen.
 - Boss infrastructure and 5:00 Prism Sentinel.
+- 10:00 Hydra (three 6500 HP lobes) and 13:00 Void Prism bosses.
+- All five level-6 evolutions: Kaleidoscope, Whiteout, Singularity, Solar Crown, Afterimage Engine.
+- All four passive shards: Armor, Luck, Prism Heart, Phase Step (+0.12s i-frames/level).
+- High-granularity run telemetry export.
+- Procedural audio event system.
+- Hydra aura-damage bug fixed: Halo and Interference now write lobe_hp[i], not boss.hp.
+- Hydra auto-targeting fixed: beams now aim at nearest living lobe, not the center.
+- Touch dash: tap to dash on mobile; tap detection threshold 12 px / 220 ms.
