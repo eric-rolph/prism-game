@@ -107,6 +107,7 @@ pub struct Boss {
     pub contact_damage: f32,
     pub state: BossState,
     pub state_timer: f32,
+    pub active_time: f32,
     pub phase: u8,
     // Sentinel fields
     pub shield_angle: f32,
