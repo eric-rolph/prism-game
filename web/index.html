@@ -5,13 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <meta name="color-scheme" content="dark" />
     <title>Prism</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Bricolage+Grotesque:wght@300;400;600;700&display=swap" rel="stylesheet" />
     <style>
       :root {
-        --ink: #eaeaf5;
-        --dim: rgba(234, 234, 245, 0.45);
-        --faint: rgba(234, 234, 245, 0.18);
-        --bg: #000;
+        --bg:      #020308;
+        --accent:  #a8f4ff;
+        --accent2: #c9a3ff;
+        --gold:    #ffd740;
+        --red:     #ff6e6e;
+        --green:   #66ff88;
+        --surface: rgba(168, 244, 255, 0.04);
+        --border:  rgba(168, 244, 255, 0.15);
+        --dim:     rgba(168, 244, 255, 0.45);
+        --faint:   rgba(168, 244, 255, 0.15);
+        --glow-sm: 0 0 12px rgba(168, 244, 255, 0.3);
+        --glow-md: 0 0 24px rgba(168, 244, 255, 0.25);
+        --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+        --font-display: "Bricolage Grotesque", system-ui, sans-serif;
       }
+
+      *, *::before, *::after { box-sizing: border-box; }
 
       html, body {
         margin: 0;
@@ -19,332 +34,145 @@
         height: 100%;
         background: var(--bg);
         overflow: hidden;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        color: var(--ink);
+        font-family: var(--font-mono);
+        color: var(--accent);
         -webkit-user-select: none;
         user-select: none;
       }
+
       #canvas {
         display: block;
         width: 100vw;
         height: 100vh;
         touch-action: none;
       }
-      #status {
+
+      /* ── Scanline overlay ─────────────────────────── */
+      #scanlines {
         position: fixed;
-        top: 10px;
-        left: 10px;
-        font-size: 11px;
-        letter-spacing: 0.5px;
-        opacity: 0.45;
+        inset: 0;
         pointer-events: none;
+        z-index: 1;
+        background: repeating-linear-gradient(
+          to bottom,
+          transparent 0px,
+          transparent 2px,
+          rgba(0, 0, 0, 0.06) 2px,
+          rgba(0, 0, 0, 0.06) 4px
+        );
+      }
+      #scanline-sweep {
+        position: fixed;
+        left: 0; right: 0;
+        height: 80px;
+        background: linear-gradient(to bottom,
+          transparent 0%,
+          rgba(168, 244, 255, 0.025) 50%,
+          transparent 100%);
+        pointer-events: none;
+        z-index: 2;
+        animation: scan 8s linear infinite;
+      }
+      @keyframes scan {
+        0%   { transform: translateY(-80px); }
+        100% { transform: translateY(100vh); }
       }
 
-      /* HUD */
+      /* ── FPS status ───────────────────────────────── */
+      #status {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        font-size: 10px;
+        letter-spacing: 1px;
+        opacity: 0.3;
+        pointer-events: none;
+        z-index: 5;
+      }
+
+      /* ── HUD container ────────────────────────────── */
       #hud {
         position: fixed;
         inset: 0;
         pointer-events: none;
-      }
-      #stats {
-        position: absolute;
-        top: 10px;
-        right: 14px;
-        text-align: right;
-        font-size: 12px;
-        letter-spacing: 1px;
-      }
-      #stats .rank {
-        font-size: 14px;
-        color: var(--ink);
-      }
-      #stats .kills {
-        color: var(--dim);
-        margin-top: 2px;
+        z-index: 5;
       }
 
-      #xp-wrap {
+      /* ── HP + DASH panel (top-left) ───────────────── */
+      #vitals {
         position: absolute;
-        left: 50%;
-        transform: translateX(-50%);
-        bottom: 22px;
-        width: min(640px, 60vw);
+        top: 14px;
+        left: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        width: 148px;
+      }
+      .vitals-row {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .vitals-label {
+        font-size: 8px;
+        letter-spacing: 3px;
+        color: var(--dim);
+        display: flex;
+        justify-content: space-between;
+      }
+      .vitals-bar {
         height: 3px;
         background: var(--faint);
-        border-radius: 2px;
-        overflow: hidden;
-      }
-      #xp-fill {
-        height: 100%;
-        width: 0%;
-        background: linear-gradient(90deg, #7fd3ff, #fff);
-        box-shadow: 0 0 12px #7fd3ff, 0 0 24px rgba(127, 211, 255, 0.5);
-        transition: width 120ms ease-out;
-      }
-
-      /* Shard tray: compact faceted pips, filling with color as their level rises. */
-      #shards-tray {
-        position: absolute;
-        left: 14px;
-        bottom: 32px;
-        display: flex;
-        flex-wrap: wrap;
-        max-width: 160px;
-        gap: 6px;
-      }
-      .shard-pip {
-        width: 12px;
-        height: 12px;
-        border-radius: 1px;
-        clip-path: polygon(50% 0%, 100% 36%, 82% 100%, 18% 100%, 0% 36%);
-        border: 1px solid var(--faint);
-        background: transparent;
         position: relative;
-      }
-      .shard-pip[data-level="0"] { opacity: 0.35; }
-      .shard-pip::after {
-        content: attr(data-level);
-        position: absolute;
-        top: -14px;
-        left: 50%;
-        transform: translateX(-50%);
-        font-size: 8px;
-        color: var(--dim);
-      }
-      .shard-pip[data-level="0"]::after { content: ""; }
-
-      /* Level-up overlay */
-      #levelup {
-        position: fixed;
-        inset: 0;
-        display: none;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
-        gap: 28px;
-        z-index: 10;
-        background: rgba(0, 0, 0, 0.45);
-        backdrop-filter: blur(14px) saturate(140%);
-        -webkit-backdrop-filter: blur(14px) saturate(140%);
-        animation: fade-in 220ms ease-out;
-      }
-      #levelup.shown { display: flex; }
-      @keyframes fade-in {
-        from { opacity: 0; }
-        to { opacity: 1; }
-      }
-      #levelup-title {
-        font-size: 12px;
-        letter-spacing: 8px;
-        color: var(--dim);
-      }
-      #levelup-rank {
-        font-size: 34px;
-        font-weight: 200;
-        letter-spacing: 4px;
-      }
-      #levelup-cards {
-        display: flex;
-        gap: 20px;
-        flex-wrap: wrap;
-        justify-content: center;
-        padding: 0 20px;
-      }
-      .shard-card {
-        width: 220px;
-        min-height: 240px;
-        padding: 22px 20px;
-        border: 1px solid var(--faint);
-        border-radius: 4px;
-        background: rgba(10, 8, 20, 0.55);
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-        cursor: pointer;
-        transition: transform 180ms ease, border-color 180ms ease, box-shadow 220ms ease;
-      }
-      .shard-card:hover, .shard-card:focus {
-        transform: translateY(-4px);
-        outline: none;
-      }
-      .shard-icon {
-        width: 48px;
-        height: 48px;
-        border-radius: 1px;
-        clip-path: polygon(50% 0%, 100% 34%, 78% 100%, 22% 100%, 0% 34%);
-        box-shadow: 0 0 20px currentColor, 0 0 42px currentColor inset;
-        margin-bottom: 4px;
-      }
-      .shard-name {
-        font-size: 13px;
-        letter-spacing: 4px;
-        font-weight: 500;
-      }
-      .shard-level {
-        font-size: 10px;
-        letter-spacing: 2px;
-        color: var(--dim);
-      }
-      .shard-desc {
-        font-size: 11px;
-        line-height: 1.6;
-        color: var(--dim);
-      }
-      .shard-synergy {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        margin-top: 4px;
-        font-size: 10px;
-        color: #dfffb0;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-      }
-      .shard-synergy span {
-        padding-left: 7px;
-        border-left: 2px solid currentColor;
-      }
-      .shard-hotkey {
-        margin-top: auto;
-        font-size: 10px;
-        letter-spacing: 2px;
-        color: var(--faint);
-      }
-      .shard-rarity {
-        font-size: 8px;
-        letter-spacing: 3px;
-        text-transform: uppercase;
-        margin-bottom: 2px;
-      }
-      .shard-rarity.common   { color: rgba(234,234,245,0.35); }
-      .shard-rarity.rare     { color: #7fd3ff; text-shadow: 0 0 6px rgba(127,211,255,0.5); }
-      .shard-rarity.legendary { color: #ffd740; text-shadow: 0 0 8px rgba(255,215,64,0.6); }
-      .shard-rarity.evolution { color: #ffb547; text-shadow: 0 0 10px rgba(255,181,71,0.65); }
-
-      /* Death / game-over overlay */
-      #death-screen {
-        position: fixed;
-        inset: 0;
-        display: none;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
-        gap: 18px;
-        z-index: 20;
-        background: rgba(0, 0, 0, 0.6);
-        backdrop-filter: blur(16px) saturate(120%);
-        -webkit-backdrop-filter: blur(16px) saturate(120%);
-        animation: fade-in 400ms ease-out;
-        box-sizing: border-box;
-        overflow-y: auto;
-        padding: 28px 16px;
-      }
-      #death-screen.shown { display: flex; }
-      #death-title {
-        font-size: 18px;
-        letter-spacing: 10px;
-        color: #ff6e6e;
-      }
-      #death-score {
-        font-size: 36px;
-        font-weight: 200;
-        letter-spacing: 3px;
-      }
-      #death-stats {
-        font-size: 11px;
-        letter-spacing: 2px;
-        color: var(--dim);
-        text-align: center;
-        line-height: 1.8;
-        width: min(720px, calc(100vw - 32px));
-        max-height: min(58vh, 520px);
-        overflow-y: auto;
-      }
-      .best-run-panel {
-        margin: 12px auto 0;
-        padding-top: 10px;
-        border-top: 1px solid var(--faint);
-        color: rgba(234, 234, 245, 0.5);
-        line-height: 1.7;
-      }
-      .best-run-title {
-        color: var(--ink);
-        letter-spacing: 4px;
-        margin-bottom: 4px;
-      }
-      .best-run-line {
-        white-space: normal;
-      }
-      .best-run-line.current-run {
-        color: #ffd740;
-        text-shadow: 0 0 8px rgba(255, 215, 64, 0.45);
-      }
-      #death-restart {
-        margin-top: 12px;
-        padding: 10px 32px;
-        border: 1px solid var(--faint);
-        border-radius: 2px;
-        background: rgba(10, 8, 20, 0.55);
-        color: var(--ink);
-        font-family: inherit;
-        font-size: 12px;
-        letter-spacing: 4px;
-        cursor: pointer;
-        transition: transform 180ms ease, border-color 180ms ease;
-        pointer-events: auto;
-      }
-      #death-restart:hover {
-        transform: translateY(-2px);
-        border-color: var(--dim);
-      }
-      #death-hint {
-        font-size: 9px;
-        letter-spacing: 2px;
-        color: var(--faint);
-      }
-
-      /* HP bar */
-      #hp-wrap {
-        position: absolute;
-        left: 14px;
-        top: 10px;
-        width: 120px;
-        height: 4px;
-        background: var(--faint);
-        border-radius: 2px;
         overflow: hidden;
       }
       #hp-fill {
-        height: 100%;
+        position: absolute;
+        inset: 0;
         width: 100%;
         background: linear-gradient(90deg, #ff4444, #ff9966, #66ff88);
         transition: width 120ms ease-out;
       }
+      #dash-fill {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        background: linear-gradient(90deg, var(--accent2), var(--accent));
+        box-shadow: 0 0 8px rgba(168, 244, 255, 0.5);
+        transition: width 80ms linear;
+      }
 
-      /* Timer + wave */
+      /* ── Timer + Wave (top-center) ────────────────── */
       #timer-wrap {
         position: absolute;
-        top: 10px;
+        top: 14px;
         left: 50%;
         transform: translateX(-50%);
         text-align: center;
         pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
       }
       #timer {
-        font-size: 16px;
-        letter-spacing: 3px;
-        font-weight: 200;
-        opacity: 0.7;
+        font-size: 22px;
+        font-weight: 300;
+        letter-spacing: 4px;
+        color: var(--accent);
+        text-shadow: var(--glow-sm);
+        font-variant-numeric: tabular-nums;
       }
       #wave-label {
-        font-size: 9px;
-        letter-spacing: 2px;
+        font-size: 8px;
+        letter-spacing: 4px;
         color: var(--dim);
-        margin-top: 2px;
       }
+
+      /* ── Boss HP bar ──────────────────────────────── */
       #boss-hud {
         position: absolute;
-        top: 52px;
+        top: 60px;
         left: 50%;
         transform: translateX(-50%);
         width: min(360px, 58vw);
@@ -352,81 +180,54 @@
         text-align: center;
         pointer-events: none;
       }
-      #boss-hud.shown {
-        display: block;
-      }
+      #boss-hud.shown { display: block; }
       #boss-name {
-        font-size: 10px;
-        letter-spacing: 3px;
-        color: rgba(255, 238, 210, 0.8);
-        text-shadow: 0 0 16px rgba(255, 180, 120, 0.35);
+        font-size: 9px;
+        letter-spacing: 4px;
+        color: rgba(255, 220, 170, 0.85);
+        text-shadow: 0 0 12px rgba(255, 180, 100, 0.4);
+        margin-bottom: 5px;
       }
       #boss-bar {
-        height: 3px;
-        margin-top: 7px;
-        background: rgba(255, 238, 210, 0.14);
+        height: 2px;
+        background: rgba(255, 220, 170, 0.12);
         overflow: hidden;
       }
       #boss-fill {
         height: 100%;
         width: 0%;
         background: linear-gradient(90deg, #ff4f4f, #ffb36c, #fff4c7);
-        box-shadow: 0 0 16px rgba(255, 160, 100, 0.7);
+        box-shadow: 0 0 12px rgba(255, 160, 100, 0.7);
         transition: width 100ms linear;
       }
 
-      /* Dash cooldown indicator */
-      #dash-wrap {
+      /* ── Rank + Kills (top-right) ─────────────────── */
+      #stats {
         position: absolute;
-        left: 14px;
-        top: 20px;
-        width: 120px;
-        height: 3px;
-        background: var(--faint);
-        border-radius: 2px;
-        overflow: hidden;
+        top: 14px;
+        right: 14px;
+        text-align: right;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
       }
-      #dash-fill {
-        height: 100%;
-        width: 100%;
-        background: linear-gradient(90deg, #9a9dff, #c9a3ff);
-        transition: width 80ms linear;
-      }
-      #dash-label {
-        position: absolute;
-        left: 14px;
-        top: 26px;
-        font-size: 8px;
+      #rank {
+        font-size: 13px;
+        font-weight: 500;
         letter-spacing: 2px;
-        color: var(--faint);
+        color: var(--accent);
+        text-shadow: var(--glow-sm);
+      }
+      #kills {
+        font-size: 9px;
+        letter-spacing: 2px;
+        color: var(--dim);
       }
 
-      /* Wave clear banner */
-      #wave-clear {
-        position: fixed;
-        top: 40%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        font-size: 22px;
-        letter-spacing: 8px;
-        font-weight: 200;
-        color: var(--ink);
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 300ms ease-out;
-        text-shadow: 0 0 20px rgba(127, 211, 255, 0.5);
-      }
-      #wave-clear.shown { opacity: 0.85; }
-
-      /* Victory title override */
-      .victory-title {
-        color: #66ff88 !important;
-      }
-
-      /* Active synergy list — top-right, below rank/kills */
+      /* ── Synergy tags (below rank) ────────────────── */
       #synergies-hud {
         position: absolute;
-        top: 48px;
+        top: 52px;
         right: 14px;
         text-align: right;
         display: flex;
@@ -435,114 +236,446 @@
         pointer-events: none;
       }
       .synergy-tag {
-        font-size: 9px;
+        font-size: 8px;
         letter-spacing: 2px;
-        padding: 2px 5px;
-        border-radius: 2px;
+        padding: 2px 6px;
+        border-radius: 1px;
         transition: opacity 200ms ease, color 200ms ease;
       }
       .synergy-tag.active {
-        color: #ffd740;
+        color: var(--gold);
         text-shadow: 0 0 8px rgba(255, 215, 64, 0.7);
+        border: 1px solid rgba(255, 215, 64, 0.2);
+        background: rgba(255, 215, 64, 0.06);
       }
       .synergy-tag.near {
         color: rgba(255, 215, 64, 0.35);
       }
 
-      /* Level-up action buttons (skip / reroll) */
-      .levelup-action {
-        margin-top: 4px;
-        padding: 8px 24px;
-        border: 1px solid var(--faint);
-        border-radius: 2px;
-        background: transparent;
-        color: var(--dim);
-        font-family: inherit;
-        font-size: 10px;
-        letter-spacing: 3px;
-        cursor: pointer;
-        transition: color 180ms ease, border-color 180ms ease;
+      /* ── XP bar (bottom-center) ───────────────────── */
+      #xp-wrap {
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: 22px;
+        width: min(640px, 60vw);
+        height: 2px;
+        background: var(--faint);
+        overflow: hidden;
       }
-      .levelup-action:hover:not(:disabled) {
-        color: var(--ink);
-        border-color: var(--dim);
-      }
-      .levelup-action:disabled {
-        opacity: 0.25;
-        cursor: default;
+      #xp-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, var(--accent2), var(--accent));
+        box-shadow: 0 0 12px var(--accent), 0 0 24px rgba(168, 244, 255, 0.35);
+        transition: width 120ms ease-out;
       }
 
-      /* Pause Menu */
-      #pause-menu {
+      /* ── Shard tray (bottom-left) ─────────────────── */
+      #shards-tray {
+        position: absolute;
+        left: 14px;
+        bottom: 16px;
+        display: flex;
+        flex-wrap: wrap;
+        max-width: 180px;
+        gap: 5px;
+      }
+      .shard-pip {
+        width: 11px;
+        height: 11px;
+        clip-path: polygon(50% 0%, 100% 36%, 82% 100%, 18% 100%, 0% 36%);
+        border: 1px solid var(--faint);
+        background: transparent;
+        position: relative;
+        transition: box-shadow 200ms ease;
+      }
+      .shard-pip[data-level="0"] { opacity: 0.25; }
+
+      /* ── Wave clear banner ────────────────────────── */
+      #wave-clear {
+        position: fixed;
+        top: 40%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 18px;
+        letter-spacing: 10px;
+        font-weight: 300;
+        color: var(--accent);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 300ms ease-out;
+        text-shadow: var(--glow-md);
+      }
+      #wave-clear.shown { opacity: 0.9; }
+
+      /* ── Corner decorations ───────────────────────── */
+      .corner {
+        position: fixed;
+        width: 24px;
+        height: 24px;
+        pointer-events: none;
+        z-index: 4;
+        opacity: 0.35;
+      }
+      .corner::before, .corner::after {
+        content: '';
+        position: absolute;
+        background: var(--accent);
+      }
+      .corner::before { width: 100%; height: 1px; top: 0; left: 0; }
+      .corner::after  { width: 1px; height: 100%; top: 0; left: 0; }
+      .corner-tl { top: 0; left: 0; }
+      .corner-tr { top: 0; right: 0; transform: scaleX(-1); }
+      .corner-bl { bottom: 0; left: 0; transform: scaleY(-1); }
+      .corner-br { bottom: 0; right: 0; transform: scale(-1); }
+
+      /* ── Shared overlay base ──────────────────────── */
+      .overlay {
         position: fixed;
         inset: 0;
         display: none;
         align-items: center;
         justify-content: center;
         flex-direction: column;
-        gap: 20px;
-        z-index: 40;
-        background: rgba(0, 0, 0, 0.6);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
+        z-index: 30;
+        background: rgba(2, 3, 8, 0.75);
+        backdrop-filter: blur(18px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        animation: fade-in 220ms ease-out;
       }
-      #pause-menu.shown { display: flex; }
+      .overlay.shown { display: flex; }
+      @keyframes fade-in {
+        from { opacity: 0; transform: translateY(-6px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+
+      /* ── Level-up overlay ─────────────────────────── */
+      #levelup {
+        gap: 24px;
+        padding: 24px 20px;
+        overflow-y: auto;
+      }
+      #levelup-title {
+        font-size: 9px;
+        letter-spacing: 6px;
+        color: var(--dim);
+      }
+      #levelup-rank {
+        font-family: var(--font-display);
+        font-size: 32px;
+        font-weight: 300;
+        letter-spacing: 3px;
+        color: var(--accent);
+        text-shadow: var(--glow-md);
+      }
+      #levelup-cards {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        justify-content: center;
+        padding: 0 16px;
+      }
+
+      /* ── Shard card ───────────────────────────────── */
+      .shard-card {
+        width: 210px;
+        min-height: 240px;
+        padding: 20px 18px;
+        border: 1px solid var(--border);
+        border-radius: 2px;
+        background: var(--surface);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        cursor: pointer;
+        transition: transform 180ms ease, border-color 200ms ease, box-shadow 220ms ease, background 200ms ease;
+        font-family: var(--font-mono);
+        text-align: left;
+        color: var(--accent);
+        position: relative;
+        overflow: hidden;
+      }
+      .shard-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, var(--accent), transparent);
+        opacity: 0;
+        transition: opacity 200ms ease;
+      }
+      .shard-card:hover, .shard-card:focus {
+        transform: translateY(-4px);
+        outline: none;
+        border-color: rgba(168, 244, 255, 0.4);
+        background: rgba(168, 244, 255, 0.08);
+        box-shadow: 0 0 28px rgba(168, 244, 255, 0.15), inset 0 0 20px rgba(168, 244, 255, 0.04);
+      }
+      .shard-card:hover::before { opacity: 1; }
+
+      .shard-icon {
+        width: 44px;
+        height: 50px;
+        clip-path: polygon(50% 0%, 100% 27%, 100% 73%, 50% 100%, 0% 73%, 0% 27%);
+        box-shadow: 0 0 18px currentColor, inset 0 0 12px rgba(0,0,0,0.4);
+        flex-shrink: 0;
+      }
+      .shard-rarity {
+        font-size: 7px;
+        letter-spacing: 4px;
+        text-transform: uppercase;
+        margin-bottom: 2px;
+      }
+      .shard-rarity.common    { color: rgba(168,244,255,0.35); }
+      .shard-rarity.rare      { color: #7fd3ff; text-shadow: 0 0 6px rgba(127,211,255,0.5); }
+      .shard-rarity.legendary { color: var(--gold); text-shadow: 0 0 8px rgba(255,215,64,0.6); }
+      .shard-rarity.evolution { color: #ffb547; text-shadow: 0 0 12px rgba(255,181,71,0.7); }
+
+      .shard-name {
+        font-size: 12px;
+        letter-spacing: 4px;
+        font-weight: 500;
+        color: var(--accent);
+      }
+      .shard-level {
+        font-size: 9px;
+        letter-spacing: 2px;
+        color: var(--dim);
+      }
+      .shard-desc {
+        font-size: 10px;
+        line-height: 1.65;
+        color: var(--dim);
+        flex: 1;
+      }
+      .shard-synergy {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 9px;
+        color: #c9ffa3;
+        letter-spacing: 0.5px;
+      }
+      .shard-synergy span {
+        padding-left: 8px;
+        border-left: 2px solid currentColor;
+        opacity: 0.8;
+      }
+      .shard-hotkey {
+        margin-top: auto;
+        font-size: 9px;
+        letter-spacing: 3px;
+        color: var(--faint);
+      }
+
+      /* ── Level-up action buttons ──────────────────── */
+      .levelup-action {
+        margin-top: 6px;
+        padding: 9px 28px;
+        border: 1px solid var(--border);
+        border-radius: 1px;
+        background: transparent;
+        color: var(--dim);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        letter-spacing: 3px;
+        cursor: pointer;
+        transition: color 180ms ease, border-color 180ms ease, background 180ms ease;
+      }
+      .levelup-action:hover:not(:disabled) {
+        color: var(--accent);
+        border-color: rgba(168, 244, 255, 0.4);
+        background: rgba(168, 244, 255, 0.06);
+      }
+      .levelup-action:disabled {
+        opacity: 0.2;
+        cursor: default;
+      }
+
+      /* ── Death / victory overlay ──────────────────── */
+      #death-screen {
+        gap: 16px;
+        padding: 32px 16px;
+        overflow-y: auto;
+        z-index: 40;
+      }
+      #death-title {
+        font-family: var(--font-display);
+        font-size: 16px;
+        letter-spacing: 12px;
+        color: var(--red);
+        text-shadow: 0 0 24px rgba(255, 110, 110, 0.5);
+      }
+      .victory-title {
+        color: var(--green) !important;
+        text-shadow: 0 0 24px rgba(102, 255, 136, 0.5) !important;
+      }
+      #death-score {
+        font-family: var(--font-display);
+        font-size: 52px;
+        font-weight: 300;
+        letter-spacing: 2px;
+        color: var(--accent);
+        text-shadow: var(--glow-md);
+        line-height: 1;
+      }
+      #death-stats {
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: var(--dim);
+        text-align: center;
+        line-height: 2;
+        width: min(680px, calc(100vw - 32px));
+        max-height: min(55vh, 480px);
+        overflow-y: auto;
+      }
+      .best-run-panel {
+        margin: 14px auto 0;
+        padding-top: 12px;
+        border-top: 1px solid var(--border);
+        color: rgba(168, 244, 255, 0.4);
+        line-height: 1.8;
+      }
+      .best-run-title {
+        color: var(--accent);
+        letter-spacing: 5px;
+        font-size: 9px;
+        margin-bottom: 6px;
+      }
+      .best-run-line { white-space: normal; }
+      .best-run-line.current-run {
+        color: var(--gold);
+        text-shadow: 0 0 8px rgba(255, 215, 64, 0.4);
+      }
+      #death-restart {
+        margin-top: 8px;
+        padding: 12px 40px;
+        border: 1px solid var(--border);
+        border-radius: 1px;
+        background: var(--surface);
+        color: var(--accent);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: 5px;
+        cursor: pointer;
+        transition: all 180ms ease;
+        pointer-events: auto;
+        text-shadow: var(--glow-sm);
+      }
+      #death-restart:hover {
+        border-color: rgba(168, 244, 255, 0.5);
+        background: rgba(168, 244, 255, 0.1);
+        box-shadow: var(--glow-md);
+      }
+      #death-hint {
+        font-size: 8px;
+        letter-spacing: 3px;
+        color: var(--faint);
+      }
+
+      /* ── Pause menu ───────────────────────────────── */
+      #pause-menu {
+        gap: 20px;
+        z-index: 50;
+      }
       #pause-title {
-        font-size: 24px;
-        letter-spacing: 8px;
-        color: var(--ink);
+        font-family: var(--font-display);
+        font-size: 20px;
+        letter-spacing: 10px;
+        color: var(--accent);
+        text-shadow: var(--glow-md);
       }
       .pause-btn {
-        padding: 12px 32px;
-        border: 1px solid var(--faint);
-        background: rgba(10, 8, 20, 0.55);
-        color: var(--ink);
-        font-family: inherit;
-        font-size: 14px;
+        padding: 12px 40px;
+        border: 1px solid var(--border);
+        border-radius: 1px;
+        background: var(--surface);
+        color: var(--accent);
+        font-family: var(--font-mono);
+        font-size: 11px;
         letter-spacing: 4px;
         cursor: pointer;
         transition: all 150ms ease;
+        pointer-events: auto;
       }
       .pause-btn:hover {
-        border-color: var(--ink);
-        background: rgba(255, 255, 255, 0.1);
+        border-color: rgba(168, 244, 255, 0.5);
+        background: rgba(168, 244, 255, 0.1);
+        box-shadow: var(--glow-sm);
       }
+
+      /* ── Scrollbar ────────────────────────────────── */
+      ::-webkit-scrollbar { width: 4px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
+
+    <!-- Visual overlays -->
+    <div id="scanlines" aria-hidden="true"></div>
+    <div id="scanline-sweep" aria-hidden="true"></div>
+    <div class="corner corner-tl" aria-hidden="true"></div>
+    <div class="corner corner-tr" aria-hidden="true"></div>
+    <div class="corner corner-bl" aria-hidden="true"></div>
+    <div class="corner corner-br" aria-hidden="true"></div>
+
     <div id="status">loading…</div>
 
+    <!-- HUD -->
     <div id="hud">
-      <div id="hp-wrap"><div id="hp-fill"></div></div>
-      <div id="dash-wrap"><div id="dash-fill"></div></div>
-      <div id="dash-label">DASH + JUMP [SPACE / 2×TAP]</div>
+      <!-- Top-left: HP + Dash -->
+      <div id="vitals">
+        <div class="vitals-row">
+          <div class="vitals-label"><span>HP</span><span id="hp-val">100</span></div>
+          <div class="vitals-bar"><div id="hp-fill"></div></div>
+        </div>
+        <div class="vitals-row">
+          <div class="vitals-label"><span>DASH + JUMP</span></div>
+          <div class="vitals-bar"><div id="dash-fill"></div></div>
+        </div>
+      </div>
+
+      <!-- Top-center: Timer + Wave -->
       <div id="timer-wrap">
         <div id="timer">0:00</div>
         <div id="wave-label">WAVE 1</div>
       </div>
+
+      <!-- Boss HP -->
       <div id="boss-hud">
         <div id="boss-name">PRISM SENTINEL</div>
         <div id="boss-bar"><div id="boss-fill"></div></div>
       </div>
+
+      <!-- Top-right: Rank + Kills -->
       <div id="stats">
-        <div class="rank" id="rank">rank 0</div>
-        <div class="kills" id="kills">0 kills</div>
+        <div id="rank">RANK 0</div>
+        <div id="kills">0 KILLS</div>
       </div>
       <div id="synergies-hud"></div>
+
+      <!-- Bottom-center: XP bar -->
       <div id="xp-wrap"><div id="xp-fill"></div></div>
+
+      <!-- Bottom-left: Shard tray -->
       <div id="shards-tray"></div>
     </div>
 
-    <div id="wave-clear">WAVE CLEAR</div>
+    <!-- Wave clear -->
+    <div id="wave-clear">// WAVE CLEAR</div>
 
-    <div id="levelup">
-      <div id="levelup-title">RANK UP</div>
+    <!-- Level-up overlay -->
+    <div id="levelup" class="overlay">
+      <div id="levelup-title">// FREQUENCY UPGRADE</div>
       <div id="levelup-rank">—</div>
       <div id="levelup-cards"></div>
     </div>
 
-    <div id="death-screen">
+    <!-- Death / Victory overlay -->
+    <div id="death-screen" class="overlay">
       <div id="death-title">SHATTERED</div>
       <div id="death-score">0</div>
       <div id="death-stats"></div>
@@ -550,7 +683,8 @@
       <div id="death-hint">SPACE / TAP</div>
     </div>
 
-    <div id="pause-menu">
+    <!-- Pause overlay -->
+    <div id="pause-menu" class="overlay">
       <div id="pause-title">PAUSED</div>
       <button id="btn-resume" class="pause-btn">RESUME</button>
       <button id="btn-toggle-sound" class="pause-btn">SOUND: ON</button>
