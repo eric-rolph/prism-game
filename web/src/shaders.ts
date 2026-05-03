@@ -195,19 +195,18 @@ void main() {
   // Formation animation: beam grows from p0 (t=0) toward p1 (t=1) over form_progress.
   float progress = v_form_progress;
 
-  // Discard pixels beyond the current formation front.
-  float frontFade = 1.0 - smoothstep(progress - 0.06, progress + 0.015, t);
-  if (frontFade <= 0.001) discard;
+  // Clip everything beyond the formation front. Tight transition to avoid halo bleed.
+  float frontFade = 1.0 - smoothstep(progress - 0.04, progress + 0.006, t);
+  if (frontFade <= 0.003) discard;
 
-  // Arc-tip flash: bright spark at the leading edge, strongest when newly forming.
-  float tipDist = abs(t - progress);
-  float tipFlash = exp(-tipDist * 35.0) * (1.0 - progress * 0.8) * 3.5;
+  // Tip spark: bright dot that travels with the formation front. Confined to the beam
+  // cross-section (dies at dist > r + 4px) so it never lights up the quad's empty corners.
+  float tipT    = exp(-abs(t - progress) * 32.0);
+  float tipCross = 1.0 - smoothstep(0.0, r + 4.0, dist);
+  float tipFlash = tipT * tipCross * (1.0 - progress * 0.75) * 1.8;
 
-  // Jagged-tip: very small fixed-pixel width variation near the formation front.
-  // Capped at 1.5px so it never flips SDF zones on thick beams.
-  float jitterAmt = noise1d(t * 22.0 + v_time * 28.0 + progress * 5.0)
-                  * smoothstep(progress - 0.10, progress, t) * min(r * 0.25, 1.5);
-  float effectiveDist = max(0.0, dist - jitterAmt);
+  // Use plain dist everywhere — no jitter (it was the source of the square-block artifact).
+  float effectiveDist = dist;
 
   // Per-beam phase seed derived from color (each beam type desyncs independently).
   float beam_phase = fract(dot(v_color.rgb, vec3(1.0, 2.0, 3.0))) * 6.28318;
