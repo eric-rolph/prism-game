@@ -319,11 +319,18 @@ async function main(): Promise<void> {
   // Timer + wave elements.
   const timerRaw = document.getElementById('timer');
   const waveLabelRaw = document.getElementById('wave-label');
+  const xpRankLabelRaw = document.getElementById('xp-rank-label');
+  const xpValRaw = document.getElementById('xp-val');
+  const dashStatusRaw = document.getElementById('dash-status');
+  const hpValEl = document.getElementById('hp-val') as HTMLElement | null;
   if (!timerRaw || !waveLabelRaw) {
     throw new Error('Timer elements missing from index.html');
   }
   const timerEl: HTMLElement = timerRaw;
   const waveLabelEl: HTMLElement = waveLabelRaw;
+  const xpRankLabelEl: HTMLElement | null = xpRankLabelRaw as HTMLElement | null;
+  const xpValEl: HTMLElement | null = xpValRaw as HTMLElement | null;
+  const dashStatusEl: HTMLElement | null = dashStatusRaw as HTMLElement | null;
 
   // Death screen elements.
   const deathScreenRaw = document.getElementById('death-screen');
@@ -380,16 +387,26 @@ async function main(): Promise<void> {
     synergyTags.push(tag);
   }
 
-  // Build the shard tray — one pip per shard. Filled in as levels rise.
+  // Build the shard tray — one pip-wrap per shard. Hidden until level > 0.
   trayEl.innerHTML = '';
   const pips: HTMLElement[] = [];
   for (let i = 0; i < SHARDS.length; i++) {
-    const pip = document.createElement('div');
-    pip.className = 'shard-pip';
-    pip.dataset['level'] = '0';
-    pip.title = SHARDS[i]!.name;
-    trayEl.appendChild(pip);
-    pips.push(pip);
+    const wrap = document.createElement('div');
+    wrap.className = 'shard-pip-wrap';
+    wrap.style.display = 'none';
+    wrap.title = SHARDS[i]!.name;
+
+    const hex = document.createElement('div');
+    hex.className = 'shard-pip';
+    wrap.appendChild(hex);
+
+    const lvlLabel = document.createElement('div');
+    lvlLabel.className = 'shard-pip-label';
+    lvlLabel.textContent = 'L0';
+    wrap.appendChild(lvlLabel);
+
+    trayEl.appendChild(wrap);
+    pips.push(wrap);
   }
 
   const renderer = new Renderer(canvas);
@@ -514,8 +531,14 @@ async function main(): Promise<void> {
   // HUD change-detection — avoids layout thrash when values are unchanged.
   let lastRank = -1;
   let lastKills = -1;
+  let lastScore = -1;
   let lastXpPct = -1;
+  let lastXp = -1;
+  let lastXpNeeded = -1;
+  let lastHp = -1;
+  let lastMaxHp = -1;
   let lastHpPct = -1;
+  let lastDashReady = false;
   let lastTimerStr = '';
   let lastWave = -1;
   let lastBossActive = false;
@@ -560,6 +583,22 @@ async function main(): Promise<void> {
         if (meta.rarity === 'rare') card.style.borderColor = 'rgba(127,211,255,0.3)';
         if (meta.rarity === 'legendary') card.style.borderColor = 'rgba(255,215,64,0.4)';
 
+        const pipLadder = Array.from({ length: 6 }, (_, n) => {
+          const lvl = n + 1;
+          let bg: string, shadow = 'none', border = '1px solid transparent', opacity = '1';
+          if (lvl <= currentLevel) {
+            bg = meta.color;
+          } else if (lvl === nextLevel) {
+            bg = 'rgba(255,255,255,0.9)';
+            shadow = '0 0 6px rgba(255,255,255,0.8)';
+            border = '1px solid rgba(255,255,255,0.6)';
+          } else {
+            bg = 'transparent';
+            opacity = '0.2';
+          }
+          return `<div style="flex:1;height:4px;background:${bg};box-shadow:${shadow};border:${border};opacity:${opacity}"></div>`;
+        }).join('');
+
         let synergyHtml = '';
         if (meta.synergies.length > 0) {
           synergyHtml = `<div class="shard-synergy">${meta.synergies.map(s => `<span>${s}</span>`).join('')}</div>`;
@@ -569,7 +608,8 @@ async function main(): Promise<void> {
           `<div class="shard-rarity ${meta.rarity}">${meta.rarity}</div>` +
           `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
           `<div class="shard-name">${meta.name}</div>` +
-          `<div class="shard-level">LVL ${currentLevel} → ${nextLevel}</div>` +
+          `<div style="display:flex;gap:3px;margin:6px 0 2px">${pipLadder}</div>` +
+          `<div class="shard-level">LV ${currentLevel} → ${nextLevel}</div>` +
           `<div class="shard-desc">${meta.desc}</div>` +
           synergyHtml +
           `<div class="shard-hotkey">${slot + 1}</div>`;
@@ -759,8 +799,14 @@ async function main(): Promise<void> {
     // Reset HUD change-detection so everything redraws.
     lastRank = -1;
     lastKills = -1;
+    lastScore = -1;
     lastXpPct = -1;
+    lastXp = -1;
+    lastXpNeeded = -1;
+    lastHp = -1;
+    lastMaxHp = -1;
     lastHpPct = -1;
+    lastDashReady = false;
     lastTimerStr = '';
     lastWave = -1;
     lastBossActive = false;
@@ -847,13 +893,15 @@ async function main(): Promise<void> {
     // HUD updates only on change.
     const rank = game.rank();
     if (rank !== lastRank) {
-      rankEl.textContent = 'rank ' + rank;
+      rankEl.textContent = String(rank);
       lastRank = rank;
     }
     const kills = game.kills_total();
-    if (kills !== lastKills) {
-      killsEl.textContent = kills + ' kills';
+    const score = game.score();
+    if (kills !== lastKills || score !== lastScore) {
+      killsEl.textContent = kills + ' KILLS · ' + score + ' PTS';
       lastKills = kills;
+      lastScore = score;
     }
     const xp = game.xp();
     const xpNeeded = game.xp_needed();
@@ -867,13 +915,30 @@ async function main(): Promise<void> {
       xpFillEl.style.width = xpPct + '%';
       lastXpPct = xpPct;
     }
-    // HP bar.
+    if (xp !== lastXp || xpNeeded !== lastXpNeeded) {
+      if (xpRankLabelEl) xpRankLabelEl.textContent = `RADIANCE TO RANK ${rank + 1}`;
+      if (xpValEl) xpValEl.textContent = `${xp} / ${xpNeeded}`;
+      lastXp = xp;
+      lastXpNeeded = xpNeeded;
+    }
+    // HP bar + HULL value.
     const hp = game.hp();
     const maxHp = game.max_hp();
     const hpPct = maxHp > 0 ? Math.round((hp / maxHp) * 100) : 100;
+    if (hp !== lastHp || maxHp !== lastMaxHp) {
+      if (hpValEl) hpValEl.textContent = `${Math.ceil(hp)} / ${maxHp}`;
+      lastHp = hp;
+      lastMaxHp = maxHp;
+    }
     if (hpPct !== lastHpPct) {
       hpFillEl.style.width = hpPct + '%';
       lastHpPct = hpPct;
+    }
+    // Dash status text.
+    const dashReady = game.dash_cooldown_pct() === 0;
+    if (dashReady !== lastDashReady) {
+      if (dashStatusEl) dashStatusEl.textContent = dashReady ? 'READY' : '—';
+      lastDashReady = dashReady;
     }
     // Timer.
     const t = game.timer();
@@ -912,12 +977,20 @@ async function main(): Promise<void> {
     for (let i = 0; i < SHARDS.length; i++) {
       const lvl = game.inventory_level(i);
       if (lvl !== lastPipLevels[i]) {
-        const pip = pips[i]!;
+        const wrap = pips[i]!;
+        const hex = wrap.firstElementChild as HTMLElement;
+        const lvlLabel = wrap.lastElementChild as HTMLElement;
         const color = SHARDS[i]!.color;
-        pip.dataset['level'] = String(lvl);
-        pip.style.background = lvl > 0 ? color : 'transparent';
-        pip.style.boxShadow = lvl > 0 ? `0 0 ${4 + lvl * 2}px ${color}` : 'none';
-        pip.style.borderColor = lvl > 0 ? color : '';
+        if (lvl > 0) {
+          wrap.style.display = '';
+          hex.style.background = `linear-gradient(160deg, ${color}, ${color}88)`;
+          hex.style.boxShadow = `0 0 ${8 + lvl * 2}px ${color}`;
+          hex.style.borderColor = color;
+          lvlLabel.textContent = `L${lvl}`;
+          lvlLabel.style.color = color;
+        } else {
+          wrap.style.display = 'none';
+        }
         lastPipLevels[i] = lvl;
       }
     }

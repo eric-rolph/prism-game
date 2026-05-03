@@ -120,8 +120,20 @@
         display: flex;
         justify-content: space-between;
       }
-      .vitals-bar {
+      #hp-bar {
+        height: 6px;
+        background: var(--faint);
+        position: relative;
+        overflow: hidden;
+      }
+      #dash-bar {
         height: 3px;
+        background: var(--faint);
+        position: relative;
+        overflow: hidden;
+      }
+      .vitals-bar {
+        height: 4px;
         background: var(--faint);
         position: relative;
         overflow: hidden;
@@ -131,6 +143,7 @@
         inset: 0;
         width: 100%;
         background: linear-gradient(90deg, #ff4444, #ff9966, #66ff88);
+        box-shadow: 0 0 10px rgba(102, 255, 136, 0.4);
         transition: width 120ms ease-out;
       }
       #dash-fill {
@@ -140,6 +153,12 @@
         background: linear-gradient(90deg, var(--accent2), var(--accent));
         box-shadow: 0 0 8px rgba(168, 244, 255, 0.5);
         transition: width 80ms linear;
+      }
+      #dash-hint {
+        font-size: 8px;
+        letter-spacing: 1px;
+        color: var(--faint);
+        margin-top: 2px;
       }
 
       /* ── Timer + Wave (top-center) ────────────────── */
@@ -156,17 +175,20 @@
         gap: 2px;
       }
       #timer {
-        font-size: 22px;
+        font-size: 28px;
         font-weight: 300;
-        letter-spacing: 4px;
-        color: var(--accent);
-        text-shadow: var(--glow-sm);
+        letter-spacing: 6px;
+        color: rgba(255, 255, 255, 0.95);
+        text-shadow: 0 0 20px rgba(168, 244, 255, 0.6), 0 0 40px rgba(168, 244, 255, 0.3);
         font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum";
       }
       #wave-label {
-        font-size: 8px;
-        letter-spacing: 4px;
-        color: var(--dim);
+        font-size: 9px;
+        letter-spacing: 3px;
+        color: rgba(255, 174, 108, 0.85);
+        text-shadow: 0 0 8px rgba(255, 174, 108, 0.4);
+        margin-bottom: 4px;
       }
 
       /* ── Boss HP bar ──────────────────────────────── */
@@ -189,15 +211,16 @@
         margin-bottom: 5px;
       }
       #boss-bar {
-        height: 2px;
+        height: 6px;
         background: rgba(255, 220, 170, 0.12);
         overflow: hidden;
+        clip-path: polygon(0 0, 100% 0, calc(100% - 6px) 100%, 6px 100%);
       }
       #boss-fill {
         height: 100%;
         width: 0%;
         background: linear-gradient(90deg, #ff4f4f, #ffb36c, #fff4c7);
-        box-shadow: 0 0 12px rgba(255, 160, 100, 0.7);
+        box-shadow: 0 0 18px rgba(255, 100, 80, 0.8);
         transition: width 100ms linear;
       }
 
@@ -210,13 +233,22 @@
         display: flex;
         flex-direction: column;
         gap: 2px;
+        min-width: 120px;
+      }
+      #rank-label {
+        font-size: 9px;
+        letter-spacing: 3px;
+        color: var(--dim);
       }
       #rank {
-        font-size: 13px;
-        font-weight: 500;
-        letter-spacing: 2px;
-        color: var(--accent);
+        font-family: var(--font-display);
+        font-size: 36px;
+        font-weight: 300;
+        letter-spacing: 3px;
+        color: rgba(255, 255, 255, 0.95);
         text-shadow: var(--glow-sm);
+        line-height: 1;
+        margin-bottom: 2px;
       }
       #kills {
         font-size: 9px;
@@ -245,29 +277,43 @@
       .synergy-tag.active {
         color: var(--gold);
         text-shadow: 0 0 8px rgba(255, 215, 64, 0.7);
-        border: 1px solid rgba(255, 215, 64, 0.2);
-        background: rgba(255, 215, 64, 0.06);
+        border: 1px solid rgba(255, 215, 64, 0.45);
+        background: rgba(255, 215, 64, 0.08);
+        box-shadow: 0 0 10px rgba(255, 215, 64, 0.15);
+        padding: 3px 8px;
       }
       .synergy-tag.near {
-        color: rgba(255, 215, 64, 0.35);
+        color: rgba(255, 215, 64, 0.4);
+        padding: 2px 6px;
       }
 
       /* ── XP bar (bottom-center) ───────────────────── */
-      #xp-wrap {
+      #xp-outer {
         position: absolute;
         left: 50%;
         transform: translateX(-50%);
-        bottom: 22px;
+        bottom: 18px;
         width: min(640px, 60vw);
-        height: 2px;
+      }
+      #xp-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 8px;
+        letter-spacing: 2px;
+        color: var(--dim);
+        margin-bottom: 4px;
+      }
+      #xp-wrap {
+        height: 4px;
         background: var(--faint);
         overflow: hidden;
+        width: 100%;
       }
       #xp-fill {
         height: 100%;
         width: 0%;
-        background: linear-gradient(90deg, var(--accent2), var(--accent));
-        box-shadow: 0 0 12px var(--accent), 0 0 24px rgba(168, 244, 255, 0.35);
+        background: linear-gradient(90deg, #7fd3ff, rgba(255,255,255,0.9));
+        box-shadow: 0 0 16px #7fd3ff;
         transition: width 120ms ease-out;
       }
 
@@ -275,22 +321,33 @@
       #shards-tray {
         position: absolute;
         left: 14px;
-        bottom: 16px;
+        bottom: 14px;
         display: flex;
         flex-wrap: wrap;
-        max-width: 180px;
-        gap: 5px;
+        max-width: 230px;
+        gap: 6px;
+        align-items: flex-end;
+      }
+      .shard-pip-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
       }
       .shard-pip {
-        width: 11px;
-        height: 11px;
-        clip-path: polygon(50% 0%, 100% 36%, 82% 100%, 18% 100%, 0% 36%);
-        border: 1px solid var(--faint);
+        width: 26px;
+        height: 30px;
+        clip-path: polygon(50% 0%, 95% 25%, 95% 75%, 50% 100%, 5% 75%, 5% 25%);
         background: transparent;
-        position: relative;
-        transition: box-shadow 200ms ease;
+        border: 1px solid var(--faint);
+        transition: box-shadow 200ms ease, background 200ms ease;
       }
-      .shard-pip[data-level="0"] { opacity: 0.25; }
+      .shard-pip-label {
+        font-size: 8px;
+        letter-spacing: 1px;
+        font-weight: 600;
+        line-height: 1;
+      }
 
       /* ── Wave clear banner ────────────────────────── */
       #wave-clear {
@@ -363,11 +420,11 @@
       }
       #levelup-rank {
         font-family: var(--font-display);
-        font-size: 32px;
+        font-size: 42px;
         font-weight: 300;
-        letter-spacing: 3px;
-        color: var(--accent);
-        text-shadow: var(--glow-md);
+        letter-spacing: 4px;
+        color: rgba(255, 255, 255, 0.95);
+        text-shadow: 0 0 32px rgba(168, 244, 255, 0.5);
       }
       #levelup-cards {
         display: flex;
@@ -502,21 +559,23 @@
       }
       #death-title {
         font-family: var(--font-display);
-        font-size: 16px;
-        letter-spacing: 12px;
+        font-size: 88px;
+        font-weight: 300;
+        letter-spacing: 14px;
         color: var(--red);
-        text-shadow: 0 0 24px rgba(255, 110, 110, 0.5);
+        text-shadow: 0 0 36px rgba(255, 110, 110, 0.5), 0 0 80px rgba(255, 110, 110, 0.25);
+        line-height: 1;
       }
       .victory-title {
         color: var(--green) !important;
-        text-shadow: 0 0 24px rgba(102, 255, 136, 0.5) !important;
+        text-shadow: 0 0 36px rgba(102, 255, 136, 0.5) !important, 0 0 80px rgba(102, 255, 136, 0.25) !important;
       }
       #death-score {
         font-family: var(--font-display);
-        font-size: 52px;
+        font-size: 40px;
         font-weight: 300;
-        letter-spacing: 2px;
-        color: var(--accent);
+        letter-spacing: 3px;
+        color: rgba(255, 255, 255, 0.7);
         text-shadow: var(--glow-md);
         line-height: 1;
       }
@@ -629,19 +688,20 @@
       <!-- Top-left: HP + Dash -->
       <div id="vitals">
         <div class="vitals-row">
-          <div class="vitals-label"><span>HP</span><span id="hp-val">100</span></div>
-          <div class="vitals-bar"><div id="hp-fill"></div></div>
+          <div class="vitals-label"><span>HULL</span><span id="hp-val">— / —</span></div>
+          <div id="hp-bar"><div id="hp-fill"></div></div>
         </div>
         <div class="vitals-row">
-          <div class="vitals-label"><span>DASH + JUMP</span></div>
-          <div class="vitals-bar"><div id="dash-fill"></div></div>
+          <div class="vitals-label"><span>DASH</span><span id="dash-status">READY</span></div>
+          <div id="dash-bar"><div id="dash-fill"></div></div>
+          <div id="dash-hint">[SPACE · 2× TAP]</div>
         </div>
       </div>
 
-      <!-- Top-center: Timer + Wave -->
+      <!-- Top-center: Wave + Timer -->
       <div id="timer-wrap">
-        <div id="timer">0:00</div>
         <div id="wave-label">WAVE 1</div>
+        <div id="timer">0:00</div>
       </div>
 
       <!-- Boss HP -->
@@ -652,13 +712,20 @@
 
       <!-- Top-right: Rank + Kills -->
       <div id="stats">
-        <div id="rank">RANK 0</div>
+        <div id="rank-label">RANK</div>
+        <div id="rank">0</div>
         <div id="kills">0 KILLS</div>
       </div>
       <div id="synergies-hud"></div>
 
       <!-- Bottom-center: XP bar -->
-      <div id="xp-wrap"><div id="xp-fill"></div></div>
+      <div id="xp-outer">
+        <div id="xp-label">
+          <span id="xp-rank-label">RADIANCE</span>
+          <span id="xp-val"></span>
+        </div>
+        <div id="xp-wrap"><div id="xp-fill"></div></div>
+      </div>
 
       <!-- Bottom-left: Shard tray -->
       <div id="shards-tray"></div>
