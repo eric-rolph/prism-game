@@ -203,10 +203,11 @@ void main() {
   float tipDist = abs(t - progress);
   float tipFlash = exp(-tipDist * 35.0) * (1.0 - progress * 0.8) * 3.5;
 
-  // Jagged-tip jitter: extra width near the formation front for a lightning-arc look.
+  // Jagged-tip: very small fixed-pixel width variation near the formation front.
+  // Capped at 1.5px so it never flips SDF zones on thick beams.
   float jitterAmt = noise1d(t * 22.0 + v_time * 28.0 + progress * 5.0)
-                  * smoothstep(progress - 0.12, progress, t) * r * 0.7;
-  float effectiveDist = dist - jitterAmt;
+                  * smoothstep(progress - 0.10, progress, t) * min(r * 0.25, 1.5);
+  float effectiveDist = max(0.0, dist - jitterAmt);
 
   // Per-beam phase seed derived from color (each beam type desyncs independently).
   float beam_phase = fract(dot(v_color.rgb, vec3(1.0, 2.0, 3.0))) * 6.28318;
