@@ -88,6 +88,7 @@ layout(location=2) in vec2 a_p1;
 layout(location=3) in float a_thickness;
 layout(location=4) in vec4 a_color;
 layout(location=5) in float a_glow;
+layout(location=6) in float a_form_progress;
 
 uniform vec2 u_viewport;
 uniform vec2 u_camera;
@@ -102,6 +103,7 @@ out float v_thickness;
 out vec4 v_color;
 out float v_glow;
 out float v_time;
+out float v_form_progress;
 
 vec2 projectGlobe(vec2 local, float radius) {
   float d = length(local);
@@ -132,6 +134,7 @@ void main() {
   v_color = a_color;
   v_glow = a_glow;
   v_time = u_time;
+  v_form_progress = a_form_progress;
 
   vec2 screen = projectGlobe(local, max(u_arena_radius, 1.0)) + u_viewport * 0.5 + u_shake;
   vec2 clip = (screen / u_viewport) * 2.0 - 1.0;
@@ -151,6 +154,7 @@ in float v_thickness;
 in vec4 v_color;
 in float v_glow;
 in float v_time;
+in float v_form_progress;
 
 out vec4 fragColor;
 
@@ -188,6 +192,22 @@ void main() {
   float t = dt.y;
   float r = v_thickness * 0.5;
 
+  // Formation animation: beam grows from p0 (t=0) toward p1 (t=1) over form_progress.
+  float progress = v_form_progress;
+
+  // Discard pixels beyond the current formation front.
+  float frontFade = 1.0 - smoothstep(progress - 0.06, progress + 0.015, t);
+  if (frontFade <= 0.001) discard;
+
+  // Arc-tip flash: bright spark at the leading edge, strongest when newly forming.
+  float tipDist = abs(t - progress);
+  float tipFlash = exp(-tipDist * 35.0) * (1.0 - progress * 0.8) * 3.5;
+
+  // Jagged-tip jitter: extra width near the formation front for a lightning-arc look.
+  float jitterAmt = noise1d(t * 22.0 + v_time * 28.0 + progress * 5.0)
+                  * smoothstep(progress - 0.12, progress, t) * r * 0.7;
+  float effectiveDist = dist - jitterAmt;
+
   // Per-beam phase seed derived from color (each beam type desyncs independently).
   float beam_phase = fract(dot(v_color.rgb, vec3(1.0, 2.0, 3.0))) * 6.28318;
   // Hue proxy — shifts spectral fringe to be centered on beam's own color family.
@@ -208,17 +228,17 @@ void main() {
   float colorEdge = r * 0.85;
   float fringeEdge = r * 1.15;
 
-  // White-hot inner core — saturated center.
-  float innerCore = 1.0 - smoothstep(innerEdge - 0.5, innerEdge + 0.5, dist);
+  // White-hot inner core — use effectiveDist so the tip widens with jitter.
+  float innerCore = 1.0 - smoothstep(innerEdge - 0.5, innerEdge + 0.5, effectiveDist);
   vec3 hotWhite = vec3(1.0, 0.98, 0.95);
 
   // Main color body.
-  float colorBody = (1.0 - smoothstep(colorEdge - 1.0, colorEdge + 1.0, dist));
+  float colorBody = (1.0 - smoothstep(colorEdge - 1.0, colorEdge + 1.0, effectiveDist));
   vec3 beamColor = v_color.rgb;
 
   // Spectral fringe — rainbow dispersion at beam edges.
-  float fringeZone = smoothstep(colorEdge - 1.0, colorEdge + 0.5, dist)
-                   * (1.0 - smoothstep(fringeEdge - 0.5, fringeEdge + 2.0, dist));
+  float fringeZone = smoothstep(colorEdge - 1.0, colorEdge + 0.5, effectiveDist)
+                   * (1.0 - smoothstep(fringeEdge - 0.5, fringeEdge + 2.0, effectiveDist));
   // Shift spectrum by beam hue so each beam type has its own color family at edges.
   float specPhase = dist / max(r, 1.0) + t * 0.5 + v_time * 0.25 + beam_hue;
   vec3 rainbow = spectral(specPhase) * 1.3;
@@ -247,14 +267,19 @@ void main() {
            + beamColor * colorBody * energy * 1.0
            + rainbow * fringeZone * energy * 0.5
            + beamColor * glow * 0.3
-           + prismCore * photonRipple;
+           + prismCore * photonRipple
+           + hotWhite * tipFlash;  // arc tip spark at formation front
 
   col *= photonRipple;
+
+  // Apply formation clipping to everything.
+  col *= frontFade;
 
   float alpha = max(colorBody * v_color.a * energy,
                 max(innerCore * energy,
                 max(fringeZone * 0.6 * energy,
-                    glow * 0.2)));
+                max(glow * 0.2,
+                    tipFlash * 0.9)))) * frontFade;
 
   fragColor = vec4(col * alpha, alpha);
 }

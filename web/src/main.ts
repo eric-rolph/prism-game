@@ -10,7 +10,8 @@ import { Input } from './input.js';
 import { AudioManager } from './audio.js';
 
 const CIRCLE_STRIDE_FLOATS = 8;
-const BEAM_STRIDE_FLOATS = 10;
+const BEAM_STRIDE_FLOATS = 10;       // layout from WASM (read only)
+const BEAM_AUGMENTED_STRIDE = 11;    // +1 form_progress float injected before upload
 
 // Must stay in index-lock with Rust's SYNERGIES const (src/shards.rs).
 // Order determines bit positions in active_synergy_bits() / near_synergy_bits().
@@ -504,6 +505,11 @@ async function main(): Promise<void> {
   let beamsPtr = -1;
   let beamsLen = 0;
   let beamsView: Float32Array = new Float32Array(0);
+
+  // Beam formation animation — tracks birth time per beam so each grows from p0→p1.
+  interface BeamEntry { birth: number; duration: number }
+  const beamBirthTimes = new Map<string, BeamEntry>();
+  let augBeamBuf = new Float32Array(0);
 
   const refreshCircles = (): void => {
     const ptr = game.circles_ptr();
@@ -1028,12 +1034,50 @@ async function main(): Promise<void> {
     }
     const intensity = Math.min(1.0, totalShardLevels / 40.0);
 
+    // Build augmented beam buffer: inject form_progress (11th float) per beam.
+    const beamCount = beamsLen;
+    let renderBeams: Float32Array;
+    if (beamCount > 0) {
+      const needed = beamCount * BEAM_AUGMENTED_STRIDE;
+      if (augBeamBuf.length < needed) augBeamBuf = new Float32Array(needed);
+
+      const keysThisFrame = new Set<string>();
+      for (let i = 0; i < beamCount; i++) {
+        const src = i * BEAM_STRIDE_FLOATS;
+        const dst = i * BEAM_AUGMENTED_STRIDE;
+        for (let j = 0; j < BEAM_STRIDE_FLOATS; j++) augBeamBuf[dst + j] = beamsView[src + j]!;
+
+        // Key: rounded p1 position + color channel to distinguish multi-beam targets.
+        const p1x = beamsView[src + 2]!;
+        const p1y = beamsView[src + 3]!;
+        const cr  = beamsView[src + 5]!;
+        const key = `${Math.round(p1x * 0.25)},${Math.round(p1y * 0.25)},${Math.round(cr * 8)}`;
+        keysThisFrame.add(key);
+
+        let entry = beamBirthTimes.get(key);
+        if (!entry) {
+          entry = { birth: now, duration: 10 + Math.random() * 1490 };
+          beamBirthTimes.set(key, entry);
+        }
+        augBeamBuf[dst + 10] = Math.min(1.0, (now - entry.birth) / entry.duration);
+      }
+
+      // Prune entries for beams that are no longer present.
+      for (const key of beamBirthTimes.keys()) {
+        if (!keysThisFrame.has(key)) beamBirthTimes.delete(key);
+      }
+
+      renderBeams = augBeamBuf.subarray(0, needed);
+    } else {
+      renderBeams = beamsView;
+    }
+
     renderer.render(
       pixelW, pixelH,
       viewW, viewH,
       [game.camera_x(), game.camera_y()],
       circlesView, circlesLen,
-      beamsView, beamsLen,
+      renderBeams, beamCount,
       [game.shake_x(), game.shake_y()],
       now / 1000,
       game.arena_radius(),

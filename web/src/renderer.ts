@@ -20,7 +20,7 @@ import {
 } from './shaders.js';
 
 const CIRCLE_STRIDE_FLOATS = 8;
-const BEAM_STRIDE_FLOATS = 10;
+const BEAM_STRIDE_FLOATS = 11; // 10 from WASM + 1 form_progress injected by main.ts
 
 // Bytes per instance.
 const CIRCLE_STRIDE = CIRCLE_STRIDE_FLOATS * 4;
@@ -198,7 +198,7 @@ export class Renderer {
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.beamInstanceBuf);
-    // Layout: p0(2) p1(2) thickness(1) color(4) glow(1)
+    // Layout: p0(2) p1(2) thickness(1) color(4) glow(1) form_progress(1)
     gl.enableVertexAttribArray(1);
     gl.vertexAttribPointer(1, 2, gl.FLOAT, false, BEAM_STRIDE, 0);
     gl.vertexAttribDivisor(1, 1);
@@ -214,6 +214,9 @@ export class Renderer {
     gl.enableVertexAttribArray(5);
     gl.vertexAttribPointer(5, 1, gl.FLOAT, false, BEAM_STRIDE, 36);
     gl.vertexAttribDivisor(5, 1);
+    gl.enableVertexAttribArray(6);
+    gl.vertexAttribPointer(6, 1, gl.FLOAT, false, BEAM_STRIDE, 40);
+    gl.vertexAttribDivisor(6, 1);
 
     gl.bindVertexArray(null);
 
