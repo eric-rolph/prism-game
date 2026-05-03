@@ -81,13 +81,43 @@
       /* ── FPS status ───────────────────────────────── */
       #status {
         position: fixed;
-        top: 8px;
-        left: 8px;
-        font-size: 10px;
+        bottom: 4px;
+        right: 8px;
+        font-size: 9px;
         letter-spacing: 1px;
-        opacity: 0.3;
+        opacity: 0.2;
         pointer-events: none;
         z-index: 5;
+      }
+
+      /* ── Top system status bar ────────────────────── */
+      #sys-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 16px;
+        font-size: 9px;
+        letter-spacing: 2px;
+        color: rgba(168, 244, 255, 0.45);
+        background: rgba(2, 3, 8, 0.6);
+        border-bottom: 1px solid rgba(168, 244, 255, 0.07);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        pointer-events: none;
+        z-index: 6;
+      }
+      #sys-bar-left  { flex: 1; }
+      #sys-bar-mid   { flex: 1; text-align: center; color: rgba(168, 244, 255, 0.30); }
+      #sys-bar-right { flex: 1; text-align: right; pointer-events: auto; cursor: pointer; }
+      #sys-uplink    { color: #7dffb0; animation: blink 1.6s infinite; }
+      @keyframes blink {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.35; }
       }
 
       /* ── HUD container ────────────────────────────── */
@@ -109,7 +139,7 @@
       /* ── HP + DASH panel (top-left) ───────────────── */
       #vitals {
         position: absolute;
-        top: 14px;
+        top: 38px;
         left: 14px;
         display: flex;
         flex-direction: column;
@@ -173,7 +203,7 @@
       /* ── Timer + Wave (top-center) ────────────────── */
       #timer-wrap {
         position: absolute;
-        top: 14px;
+        top: 36px;
         left: 50%;
         transform: translateX(-50%);
         text-align: center;
@@ -204,7 +234,7 @@
       /* ── Boss HP bar ──────────────────────────────── */
       #boss-hud {
         position: absolute;
-        top: 60px;
+        top: 80px;
         left: 50%;
         transform: translateX(-50%);
         width: min(360px, 58vw);
@@ -234,16 +264,17 @@
         transition: width 100ms linear;
       }
 
-      /* ── Rank + Kills (top-right) ─────────────────── */
+      /* ── Rank + Kills + Synergies (top-right) ────────── */
       #stats {
         position: absolute;
-        top: 14px;
+        top: 38px;
         right: 14px;
         text-align: right;
         display: flex;
         flex-direction: column;
         gap: 2px;
-        min-width: 120px;
+        min-width: 160px;
+        max-width: 220px;
         padding: 10px 12px;
       }
       #rank-label {
@@ -253,7 +284,7 @@
       }
       #rank {
         font-family: var(--font-display);
-        font-size: 36px;
+        font-size: 32px;
         font-weight: 300;
         letter-spacing: 3px;
         color: rgba(255, 255, 255, 0.95);
@@ -266,36 +297,42 @@
         letter-spacing: 2px;
         color: var(--dim);
       }
-
-      /* ── Synergy tags (below rank) ────────────────── */
-      #synergies-hud {
-        position: absolute;
-        top: 52px;
-        right: 14px;
-        text-align: right;
+      #synergies-section {
+        margin-top: 10px;
         display: flex;
         flex-direction: column;
         gap: 3px;
-        pointer-events: none;
+        align-items: flex-end;
+      }
+      #synergies-label {
+        font-size: 8px;
+        letter-spacing: 3px;
+        color: rgba(168, 244, 255, 0.30);
+        margin-bottom: 3px;
+      }
+
+      /* ── Synergy tags ─────────────────────────────── */
+      #synergies-hud {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 3px;
       }
       .synergy-tag {
         font-size: 8px;
         letter-spacing: 2px;
-        padding: 2px 6px;
-        border-radius: 1px;
+        padding: 2px 7px;
         transition: opacity 200ms ease, color 200ms ease;
       }
       .synergy-tag.active {
         color: var(--gold);
-        text-shadow: 0 0 8px rgba(255, 215, 64, 0.7);
-        border: 1px solid rgba(255, 215, 64, 0.45);
-        background: rgba(255, 215, 64, 0.08);
-        box-shadow: 0 0 10px rgba(255, 215, 64, 0.15);
-        padding: 3px 8px;
+        text-shadow: 0 0 8px rgba(255, 215, 64, 0.6);
+        border: 1px solid rgba(255, 215, 64, 0.40);
+        background: rgba(255, 215, 64, 0.07);
       }
       .synergy-tag.near {
-        color: rgba(255, 215, 64, 0.4);
-        padding: 2px 6px;
+        color: rgba(168, 244, 255, 0.30);
+        border: 1px solid rgba(168, 244, 255, 0.12);
       }
 
       /* ── XP bar (bottom-center) ───────────────────── */
@@ -695,6 +732,13 @@
     <div class="corner corner-bl" aria-hidden="true"></div>
     <div class="corner corner-br" aria-hidden="true"></div>
 
+    <!-- Top system bar -->
+    <div id="sys-bar" aria-hidden="true">
+      <span id="sys-bar-left">PRISM-OS v0.9.4 · NODE-7F2</span>
+      <span id="sys-bar-mid">SECTOR 04 / GLOBE 11</span>
+      <span id="sys-bar-right"><span id="sys-uplink">● UPLINK STABLE</span></span>
+    </div>
+
     <div id="status">loading…</div>
 
     <!-- HUD -->
@@ -724,13 +768,16 @@
         <div id="boss-bar"><div id="boss-fill"></div></div>
       </div>
 
-      <!-- Top-right: Rank + Kills -->
+      <!-- Top-right: Rank + Kills + Synergies -->
       <div id="stats" class="hud-panel">
         <div id="rank-label">RANK</div>
         <div id="rank">0</div>
         <div id="kills">0 KILLS</div>
+        <div id="synergies-section">
+          <div id="synergies-label">// SYNERGIES</div>
+          <div id="synergies-hud"></div>
+        </div>
       </div>
-      <div id="synergies-hud"></div>
 
       <!-- Bottom-center: XP bar -->
       <div id="xp-outer" class="hud-panel">

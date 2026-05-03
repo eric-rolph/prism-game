@@ -223,9 +223,9 @@ void main() {
   float specPhase = dist / max(r, 1.0) + t * 0.5 + v_time * 0.25 + beam_hue;
   vec3 rainbow = spectral(specPhase) * 1.3;
 
-  // Outer glow falloff.
+  // Outer glow falloff — tight so beams stay crisp, no wide halos.
   float glowDist = max(dist - r, 0.0);
-  float glow = exp(-glowDist * 0.12) * v_glow;
+  float glow = exp(-glowDist * 0.40) * v_glow;
 
   // Photon ripple — slowed and phase-offset per beam to prevent synchronized flash.
   float photonRipple = sin(t * 5.0 + v_time * 4.5 + beam_phase) * 0.06 + 1.0;
@@ -242,19 +242,19 @@ void main() {
     prismCore = tintedBands * coreMask * 0.42;
   }
 
-  // Compose layers.
-  vec3 col = hotWhite * innerCore * energy * 3.0
-           + beamColor * colorBody * energy * 1.5
-           + rainbow * fringeZone * energy * 0.9
-           + beamColor * glow * 0.6
+  // Compose layers — reduced brightness to keep beams crisp and distinct.
+  vec3 col = hotWhite * innerCore * energy * 1.6
+           + beamColor * colorBody * energy * 1.0
+           + rainbow * fringeZone * energy * 0.5
+           + beamColor * glow * 0.3
            + prismCore * photonRipple;
 
   col *= photonRipple;
 
   float alpha = max(colorBody * v_color.a * energy,
                 max(innerCore * energy,
-                max(fringeZone * 0.8 * energy,
-                    glow * 0.45)));
+                max(fringeZone * 0.6 * energy,
+                    glow * 0.2)));
 
   fragColor = vec4(col * alpha, alpha);
 }
@@ -508,26 +508,26 @@ out vec4 fragColor;
 void main() {
   vec2 dir = v_uv - 0.5;
 
-  // Radial chromatic aberration — kept subtle so it adds edge character without spreading bright areas.
-  float aberr = (0.0012 + length(dir) * 0.002) * (1.0 + u_intensity * 0.35);
+  // Minimal chromatic aberration — barely perceptible fringe at screen edges only.
+  float aberr = (0.0002 + length(dir) * 0.0004) * (1.0 + u_intensity * 0.08);
 
   vec3 base;
   base.r = texture(u_scene, v_uv + dir * aberr).r;
   base.g = texture(u_scene, v_uv).g;
   base.b = texture(u_scene, v_uv - dir * aberr).b;
 
-  // Temporal persistence — light trails that decay in ~4 frames so dense scenes stay readable.
+  // Temporal persistence — disabled by default (u_persistence = 0 from renderer).
   vec3 prev = texture(u_prev, v_uv).rgb;
   base = max(base, prev * u_persistence);
 
-  // Bloom — logarithmic scale kept modest so individual beams remain distinct.
+  // Bloom — near-zero: preserves crisp edges, adds only the faintest halo at high intensity.
   vec3 bloom = texture(u_bloom, v_uv).rgb;
-  float bloomScale = 0.7 + log(1.0 + u_intensity * 4.0) * 0.6;
+  float bloomScale = u_intensity * 0.04;
 
   vec3 col = base + bloom * bloomScale;
 
   // Soft radial pulse keyed to time.
-  col += col * 0.025 * sin(u_time * 2.0 + length(dir) * 8.0);
+  col += col * 0.012 * sin(u_time * 2.0 + length(dir) * 8.0);
 
   // Vignette — subtle darkening at edges.
   col *= 1.0 - length(dir) * 0.5;
