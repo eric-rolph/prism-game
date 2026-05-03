@@ -508,26 +508,26 @@ out vec4 fragColor;
 void main() {
   vec2 dir = v_uv - 0.5;
 
-  // Radial chromatic aberration — stronger toward edges, scales with intensity.
-  float aberr = (0.002 + length(dir) * 0.005) * (1.0 + u_intensity * 1.5);
+  // Radial chromatic aberration — kept subtle so it adds edge character without spreading bright areas.
+  float aberr = (0.0012 + length(dir) * 0.002) * (1.0 + u_intensity * 0.35);
 
   vec3 base;
   base.r = texture(u_scene, v_uv + dir * aberr).r;
   base.g = texture(u_scene, v_uv).g;
   base.b = texture(u_scene, v_uv - dir * aberr).b;
 
-  // Temporal persistence — blend previous frame for light trails.
+  // Temporal persistence — light trails that decay in ~4 frames so dense scenes stay readable.
   vec3 prev = texture(u_prev, v_uv).rgb;
   base = max(base, prev * u_persistence);
 
-  // Bloom from separable Gaussian chain, scaled logarithmically with intensity.
+  // Bloom — logarithmic scale kept modest so individual beams remain distinct.
   vec3 bloom = texture(u_bloom, v_uv).rgb;
-  float bloomScale = 1.5 + log(1.0 + u_intensity * 9.0) * 1.2;
+  float bloomScale = 0.7 + log(1.0 + u_intensity * 4.0) * 0.6;
 
   vec3 col = base + bloom * bloomScale;
 
   // Soft radial pulse keyed to time.
-  col += col * 0.04 * sin(u_time * 2.0 + length(dir) * 8.0);
+  col += col * 0.025 * sin(u_time * 2.0 + length(dir) * 8.0);
 
   // Vignette — subtle darkening at edges.
   col *= 1.0 - length(dir) * 0.5;

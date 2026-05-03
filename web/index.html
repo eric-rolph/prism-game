@@ -98,6 +98,14 @@
         z-index: 5;
       }
 
+      /* ── Frosted glass panel (used on all HUD blocks) ── */
+      .hud-panel {
+        background: rgba(2, 3, 8, 0.72);
+        border: 1px solid rgba(168, 244, 255, 0.10);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+      }
+
       /* ── HP + DASH panel (top-left) ───────────────── */
       #vitals {
         position: absolute;
@@ -106,7 +114,8 @@
         display: flex;
         flex-direction: column;
         gap: 6px;
-        width: 148px;
+        width: 160px;
+        padding: 10px 12px;
       }
       .vitals-row {
         display: flex;
@@ -173,6 +182,7 @@
         flex-direction: column;
         align-items: center;
         gap: 2px;
+        padding: 8px 20px 10px;
       }
       #timer {
         font-size: 28px;
@@ -234,6 +244,7 @@
         flex-direction: column;
         gap: 2px;
         min-width: 120px;
+        padding: 10px 12px;
       }
       #rank-label {
         font-size: 9px;
@@ -294,6 +305,7 @@
         transform: translateX(-50%);
         bottom: 18px;
         width: min(640px, 60vw);
+        padding: 8px 12px;
       }
       #xp-label {
         display: flex;
@@ -327,6 +339,8 @@
         max-width: 230px;
         gap: 6px;
         align-items: flex-end;
+        padding: 8px 10px;
+        min-height: 20px;
       }
       .shard-pip-wrap {
         display: flex;
@@ -686,7 +700,7 @@
     <!-- HUD -->
     <div id="hud">
       <!-- Top-left: HP + Dash -->
-      <div id="vitals">
+      <div id="vitals" class="hud-panel">
         <div class="vitals-row">
           <div class="vitals-label"><span>HULL</span><span id="hp-val">— / —</span></div>
           <div id="hp-bar"><div id="hp-fill"></div></div>
@@ -699,7 +713,7 @@
       </div>
 
       <!-- Top-center: Wave + Timer -->
-      <div id="timer-wrap">
+      <div id="timer-wrap" class="hud-panel">
         <div id="wave-label">WAVE 1</div>
         <div id="timer">0:00</div>
       </div>
@@ -711,7 +725,7 @@
       </div>
 
       <!-- Top-right: Rank + Kills -->
-      <div id="stats">
+      <div id="stats" class="hud-panel">
         <div id="rank-label">RANK</div>
         <div id="rank">0</div>
         <div id="kills">0 KILLS</div>
@@ -719,7 +733,7 @@
       <div id="synergies-hud"></div>
 
       <!-- Bottom-center: XP bar -->
-      <div id="xp-outer">
+      <div id="xp-outer" class="hud-panel">
         <div id="xp-label">
           <span id="xp-rank-label">RADIANCE</span>
           <span id="xp-val"></span>
@@ -728,7 +742,7 @@
       </div>
 
       <!-- Bottom-left: Shard tray -->
-      <div id="shards-tray"></div>
+      <div id="shards-tray" class="hud-panel"></div>
     </div>
 
     <!-- Wave clear -->

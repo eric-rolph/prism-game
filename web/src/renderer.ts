@@ -464,7 +464,7 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.prevTex);
     gl.uniform1i(this.compositeProg.uniforms['u_prev']!, 2);
-    gl.uniform1f(this.compositeProg.uniforms['u_persistence']!, 0.82);
+    gl.uniform1f(this.compositeProg.uniforms['u_persistence']!, 0.55);
     gl.uniform1f(this.compositeProg.uniforms['u_intensity']!, Math.min(1.0, Math.max(0.0, intensity)));
     gl.uniform1f(this.compositeProg.uniforms['u_time']!, time);
     gl.bindVertexArray(this.fullscreenVao);
