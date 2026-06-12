@@ -68,10 +68,6 @@ impl Game {
         self.inner.set_dash_input(pressed);
     }
 
-    pub fn globe_luminosity(&self) -> f32 {
-        self.inner.globe_luminosity()
-    }
-
     pub fn player_altitude(&self) -> f32 {
         self.inner.player_altitude()
     }
