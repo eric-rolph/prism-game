@@ -214,6 +214,7 @@ Status: opportunistic, but do before public sharing.
 
 ## Done / Completed
 
+- Deterministic smoke tests + boss TTK harness (June 2026): `cargo test` covers determinism, on-ramp invariants, level-up flow, death/victory paths, boss milestones, Void Prism kill-to-win, and VoidShell landings; `cargo test --release boss_ttk_report -- --ignored --nocapture` prints boss kill times for reference builds. CI workflow runs the suite on every PR. First evidence pass: Sentinel takes ~171 s on an on-curve balanced build (target 20-45 s), beam builds kill the Void Prism in ~16 s, and aura-only builds cannot kill Hydra or Void Prism at all — boss HP/aura-damage tuning is the next balance task.
 - Opening on-ramp (June 2026): spawn interval eases from 2.2× to steady state over the first 100 s, enemy cap is 80/155/230 for waves 0-2, and the first five waves are Steady so the Surge/Swarm/Elite/Crescendo rotation starts at wave 5 (2:30). The "increase difficulty" pass had applied its 300-enemy base cap from wave 0, flooding the tutorial minute (bot A/B: median time-to-death 33 s → 66 s; everything past wave 3 / 100 s is formula-identical).
 - Radiance gems rendered as distinct pickup crystals/sparkles instead of enemy-like round dots.
 - 15-minute session length.
