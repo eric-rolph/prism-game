@@ -244,7 +244,18 @@ const CRYSTAL_SPAWN_INTERVAL: f32 = 45.0;
 const BOSS_PROJ_SPEED: f32 = 210.0;
 const BOSS_PROJ_DAMAGE: f32 = 28.0;
 const BOSS_SHIELD_BURST_COUNT: u32 = 5;
-const BOSS_HP_MULTIPLIER: f32 = 4.0;
+// Boss HP is tuned per boss against the TTK evidence harness
+// (src/game_tests.rs::boss_ttk_report; design band 20-45 s for an on-curve
+// build at each milestone). The old blanket BOSS_HP_MULTIPLIER = 4.0 put the
+// 5:00 Sentinel at ~171 s for a balanced 12-level build.
+//
+// Aura sources (Halo contact, Barrier contact, Interference pulses) deal
+// AURA_BOSS_DAMAGE_MULT times their listed DPS to bosses only. Their flat
+// contact numbers are tuned for crowds and amount to ~100-130 DPS combined,
+// which can never finish a five-to-six-figure boss HP pool; the multiplier
+// makes close-range builds a real boss archetype without touching how they
+// clear regular enemies.
+const AURA_BOSS_DAMAGE_MULT: f32 = 25.0;
 const BOSS_REWARD_MULTIPLIER: u32 = 4;
 const BOSS_REWARD_GEM_BASE_COUNT: u32 = 18;
 const BOSS_ESCALATION_INTERVAL: f32 = 6.0;
@@ -264,7 +275,7 @@ pub const AUDIO_MINE_BURST: u32 = 1 << 6;
 // Boss milestones.
 const SENTINEL_SPAWN_TIME: f32 = 300.0;
 const HYDRA_SPAWN_TIME: f32 = 600.0;
-const HYDRA_HP_PER_LOBE: f32 = 38000.0 * BOSS_HP_MULTIPLIER;
+const HYDRA_HP_PER_LOBE: f32 = 100_000.0;
 const HYDRA_ORBIT_RADIUS: f32 = 58.0;
 const HYDRA_ORBIT_SPEED: f32 = 0.55;
 const HYDRA_LOBE_RADIUS: f32 = 20.0;
@@ -277,15 +288,15 @@ const BOSS_TELEGRAPH_TIME: f32 = 2.0;
 const BOSS_DEATH_TIME: f32 = 1.0;
 const BOSS_POST_BREATHER: f32 = 3.0;
 const BOSS_SPAWN_SOFT_CAP: usize = 45;
-const SENTINEL_HP: f32 = 60000.0 * BOSS_HP_MULTIPLIER;
+const SENTINEL_HP: f32 = 62_000.0;
 const SENTINEL_RADIUS: f32 = 46.0;
 const SENTINEL_BASE_SPEED: f32 = 44.0;
-const SENTINEL_SHIELD_HP: f32 = 4400.0 * BOSS_HP_MULTIPLIER;
+const SENTINEL_SHIELD_HP: f32 = 4_400.0;
 const SENTINEL_SHIELD_RADIUS: f32 = 12.0;
 const SENTINEL_SHIELD_ORBIT: f32 = 72.0;
 const SENTINEL_SHIELD_SPIN: f32 = 1.35;
 const VOID_PRISM_SPAWN_TIME: f32 = 780.0; // 13:00
-const VOID_PRISM_HP: f32 = 120000.0 * BOSS_HP_MULTIPLIER;
+const VOID_PRISM_HP: f32 = 700_000.0;
 const VOID_PRISM_RADIUS: f32 = 50.0;
 const VOID_PRISM_BASE_SPEED: f32 = 34.0;
 const VOID_PRISM_P2_SPEED: f32 = 55.0;
@@ -1811,14 +1822,15 @@ impl Game {
                                 if boss.lobe_hp[i] > 0.0 {
                                     let lp = Game::hydra_lobe_pos(boss, i);
                                     if globe_distance(lp, *hpos) < HYDRA_LOBE_RADIUS + hsize {
-                                        boss.lobe_hp[i] -= HALO_DPS * dt;
+                                        boss.lobe_hp[i] -=
+                                            HALO_DPS * AURA_BOSS_DAMAGE_MULT * dt;
                                     }
                                 }
                             }
                         }
                         _ => {
                             if globe_distance(boss.pos, *hpos) < boss.radius + hsize {
-                                boss.hp -= HALO_DPS * dt;
+                                boss.hp -= HALO_DPS * AURA_BOSS_DAMAGE_MULT * dt;
                             }
                         }
                     }
@@ -1865,7 +1877,7 @@ impl Game {
                             if globe_distance(boss.pos, self.player.pos)
                                 < BARRIER_RADIUS + boss.radius
                             {
-                                boss.hp -= BARRIER_CONTACT_DPS * dt;
+                                boss.hp -= BARRIER_CONTACT_DPS * AURA_BOSS_DAMAGE_MULT * dt;
                             }
                         }
                         BossKind::Hydra => {
@@ -1875,7 +1887,8 @@ impl Game {
                                     if globe_distance(lp, self.player.pos)
                                         < BARRIER_RADIUS + HYDRA_LOBE_RADIUS
                                     {
-                                        boss.lobe_hp[i] -= BARRIER_CONTACT_DPS * dt;
+                                        boss.lobe_hp[i] -=
+                                            BARRIER_CONTACT_DPS * AURA_BOSS_DAMAGE_MULT * dt;
                                     }
                                 }
                             }
@@ -1884,7 +1897,7 @@ impl Game {
                             if globe_distance(boss.pos, self.player.pos)
                                 < BARRIER_RADIUS + boss.radius
                             {
-                                boss.hp -= BARRIER_CONTACT_DPS * dt;
+                                boss.hp -= BARRIER_CONTACT_DPS * AURA_BOSS_DAMAGE_MULT * dt;
                             }
                         }
                     }
@@ -1995,7 +2008,8 @@ impl Game {
                                     let lp = Game::hydra_lobe_pos(boss, i);
                                     let d = globe_distance(lp, *ppos);
                                     if (d - *pradius).abs() < ring_thickness + HYDRA_LOBE_RADIUS {
-                                        boss.lobe_hp[i] -= pulse_damage * dt;
+                                        boss.lobe_hp[i] -=
+                                            pulse_damage * AURA_BOSS_DAMAGE_MULT * dt;
                                     }
                                 }
                             }
@@ -2003,7 +2017,7 @@ impl Game {
                         _ => {
                             let d = globe_distance(boss.pos, *ppos);
                             if (d - *pradius).abs() < ring_thickness + boss.radius {
-                                boss.hp -= pulse_damage * dt;
+                                boss.hp -= pulse_damage * AURA_BOSS_DAMAGE_MULT * dt;
                             }
                         }
                     }

@@ -458,8 +458,9 @@ fn measure_boss_ttk(kind: BossKind, build: &[(ShardKind, u8)], seed: u32) -> Opt
 #[ignore = "balance evidence harness — run with --ignored --nocapture"]
 fn boss_ttk_report() {
     use ShardKind::*;
-    // Reference builds sized to plausible pick budgets at each milestone
-    // (rank ~12 at 5:00, ~22 at 10:00, ~28 at 13:00).
+    // Reference builds sized to plausible pick budgets at each milestone:
+    // ~12 levels at 5:00 (Sentinel), ~22 at 10:00 (Hydra), ~28 at 13:00
+    // (Void Prism). Three archetypes per milestone.
     let balanced_5 = [
         (Split, 3u8),
         (Lens, 2),
@@ -467,6 +468,18 @@ fn boss_ttk_report() {
         (Refract, 1),
         (Armor, 2),
         (PrismHeart, 2),
+    ];
+    let beam_5 = [(Split, 4u8), (Mirror, 3), (Lens, 3), (Chromatic, 2)];
+    let close_5 = [(Halo, 4u8), (Barrier, 4), (Siphon, 2), (Interference, 2)];
+
+    let balanced_10 = [
+        (Split, 4u8),
+        (Lens, 4),
+        (Mirror, 3),
+        (Refract, 2),
+        (Halo, 3),
+        (Armor, 3),
+        (PrismHeart, 3),
     ];
     let beam_10 = [
         (Split, 6u8),
@@ -482,21 +495,44 @@ fn boss_ttk_report() {
         (Interference, 4),
         (Thorns, 2),
     ];
-    let late_13 = [
+
+    let beam_13 = [
         (Split, 6u8),
         (Mirror, 6),
         (Cascade, 6),
         (Lens, 6),
         (Chromatic, 4),
     ];
+    let close_13 = [
+        (Halo, 6u8),
+        (Barrier, 6),
+        (Interference, 6),
+        (Siphon, 4),
+        (Thorns, 4),
+        (Armor, 2),
+    ];
+    let balanced_13 = [
+        (Split, 4u8),
+        (Lens, 4),
+        (Mirror, 3),
+        (Refract, 2),
+        (Halo, 3),
+        (Cascade, 3),
+        (Frost, 3),
+        (Armor, 3),
+        (PrismHeart, 3),
+    ];
 
-    let cases: [(&str, BossKind, &[(ShardKind, u8)]); 6] = [
+    let cases: [(&str, BossKind, &[(ShardKind, u8)]); 9] = [
         ("Sentinel / balanced@5:00", BossKind::Sentinel, &balanced_5),
-        ("Sentinel / beam@10:00", BossKind::Sentinel, &beam_10),
+        ("Sentinel / beam@5:00", BossKind::Sentinel, &beam_5),
+        ("Sentinel / close@5:00", BossKind::Sentinel, &close_5),
+        ("Hydra    / balanced@10:00", BossKind::Hydra, &balanced_10),
         ("Hydra    / beam@10:00", BossKind::Hydra, &beam_10),
         ("Hydra    / close@10:00", BossKind::Hydra, &close_10),
-        ("VoidPrism/ beam@13:00 (late)", BossKind::VoidPrism, &late_13),
-        ("VoidPrism/ close@10:00 build", BossKind::VoidPrism, &close_10),
+        ("VoidPrism/ beam@13:00", BossKind::VoidPrism, &beam_13),
+        ("VoidPrism/ close@13:00", BossKind::VoidPrism, &close_13),
+        ("VoidPrism/ balanced@13:00", BossKind::VoidPrism, &balanced_13),
     ];
 
     println!();
