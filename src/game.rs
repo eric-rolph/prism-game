@@ -200,7 +200,10 @@ const GEM_MAGNET_RADIUS: f32 = 100.0;
 const GEM_COLLECT_RADIUS: f32 = 16.0;
 const GEM_MAGNET_SPEED: f32 = 400.0;
 const GEM_LIFETIME: f32 = 20.0;
-const GEM_VISUAL_RADIUS: f32 = 4.5; // Half the starter Drone radius.
+const GEM_VISUAL_RADIUS: f32 = 7.0; // Pickup readability is sacred — gems must pop.
+// Player body renders larger than its hitbox: the hero of "you are light"
+// needs presence, but the dodge hitbox stays forgiving.
+const PLAYER_VISUAL_SCALE: f32 = 1.5;
 
 // Player health.
 const PLAYER_MAX_HP: f32 = 100.0;
@@ -4844,7 +4847,8 @@ impl Game {
             self.player.iframe_timer <= 0.0 || ((self.player.iframe_timer * 16.0) as u32 % 2 == 0);
         if visible {
             let pos = nearest_globe_pos(camera, self.player.pos);
-            let visual_r = self.player.radius * (1.0 + self.player.altitude * 0.45);
+            let visual_r =
+                self.player.radius * PLAYER_VISUAL_SCALE * (1.0 + self.player.altitude * 0.45);
 
             // ── Inventory-driven body evolution visuals ──────────────────
             // Precompute aggregated stats from inventory.
@@ -5012,7 +5016,19 @@ impl Game {
                 }
             }
 
-            // Core player circle — bright cyan-white, base glow 2.4 (as specified).
+            // Soft lantern aura — the player is the brightest ambient light source.
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: visual_r * 2.3,
+                r: 0.75,
+                g: 0.95,
+                b: 1.0,
+                a: 0.10,
+                glow: 1.3 + intensity * 0.5,
+            });
+
+            // Core player circle — bright cyan-white.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
@@ -5021,7 +5037,7 @@ impl Game {
                 g: 1.0,
                 b: 1.0,
                 a: 1.0,
-                glow: 2.4 + self.player.altitude * 1.5 + intensity * 0.6,
+                glow: 3.0 + self.player.altitude * 1.5 + intensity * 0.6,
             });
 
             // Halo enhancement: if Halo is owned make core even brighter.
@@ -5042,7 +5058,8 @@ impl Game {
         // Altitude ring — subtle horizon line at jump peak.
         if self.player.altitude > 0.05 {
             let pos = nearest_globe_pos(camera, self.player.pos);
-            let ring_r = self.player.radius * (1.0 + self.player.altitude * 0.45) + 7.0;
+            let ring_r =
+                self.player.radius * PLAYER_VISUAL_SCALE * (1.0 + self.player.altitude * 0.45) + 7.0;
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
@@ -5409,13 +5426,14 @@ impl Game {
                     _ => (e.color[0], e.color[1], e.color[2], 1.0_f32, 1.0_f32),
                 };
 
-                // Layer 1: Wide atmospheric glow — sets the colored halo / mood.
+                // Layer 1: Atmospheric glow — restrained. Soft halo belongs to
+                // friendly light; threats read crisp and hot, not pillowy.
                 self.circle_buf.push(CircleInstance {
                     x: pos.x, y: pos.y,
-                    radius: e.radius * 2.4,
+                    radius: e.radius * 2.0,
                     r: er, g: eg, b: eb,
-                    a: base_alpha * 0.16,
-                    glow: glow_mult * 1.1,
+                    a: base_alpha * 0.08,
+                    glow: glow_mult * 0.7,
                 });
 
                 // Layer 2: Crisp solid body — near-zero glow gives hard-edged circle.
@@ -5423,13 +5441,13 @@ impl Game {
                     x: pos.x, y: pos.y,
                     radius: e.radius,
                     r: er, g: eg, b: eb,
-                    a: base_alpha * 0.88,
+                    a: base_alpha * 0.95,
                     glow: 0.06,
                 });
 
                 // Layer 3: White-hot inner core (skipped for stealth Umbra).
                 if e.kind != EnemyKind::Umbra {
-                    let core_alpha = if e.mini_boss.is_some() { 0.80 } else { 0.55 };
+                    let core_alpha = if e.mini_boss.is_some() { 0.85 } else { 0.62 };
                     self.circle_buf.push(CircleInstance {
                         x: pos.x, y: pos.y,
                         radius: e.radius * 0.38,
@@ -5463,16 +5481,16 @@ impl Game {
                 1.0
             };
             let (r, g_col, b, tier_glow) = if g.value >= 5 {
-                (1.0, 0.82, 0.24, 1.1)
+                (1.0, 0.82, 0.24, 2.0)
             } else if g.value >= 3 {
-                (0.28, 0.72, 1.0, 0.9)
+                (0.28, 0.72, 1.0, 1.8)
             } else {
-                (0.20, 1.0, 0.68, 0.75)
+                (0.20, 1.0, 0.68, 1.6)
             };
             let radius = GEM_VISUAL_RADIUS;
             let core_radius = radius * 0.52;
 
-            // Colored pickup shell: outer visible silhouette is half a starter Drone.
+            // Colored pickup shell — bright enough to read peripherally.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
@@ -5480,7 +5498,7 @@ impl Game {
                 r,
                 g: g_col,
                 b,
-                a: 0.36 * fade,
+                a: 0.50 * fade,
                 glow: tier_glow * pulse * fade,
             });
 

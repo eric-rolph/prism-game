@@ -405,11 +405,20 @@ out vec4 fragColor;
 
 void main() {
   // Sample at ±0.5 texel — each bilinear tap averages a 2×2 source block.
-  vec3 a = texture(u_src, v_uv + vec2(-0.5, -0.5) * u_texel).rgb;
-  vec3 b = texture(u_src, v_uv + vec2( 0.5, -0.5) * u_texel).rgb;
-  vec3 c = texture(u_src, v_uv + vec2(-0.5,  0.5) * u_texel).rgb;
-  vec3 d = texture(u_src, v_uv + vec2( 0.5,  0.5) * u_texel).rgb;
-  fragColor = vec4((a + b + c + d) * 0.25, 1.0);
+  vec3 s1 = texture(u_src, v_uv + vec2(-0.5, -0.5) * u_texel).rgb;
+  vec3 s2 = texture(u_src, v_uv + vec2( 0.5, -0.5) * u_texel).rgb;
+  vec3 s3 = texture(u_src, v_uv + vec2(-0.5,  0.5) * u_texel).rgb;
+  vec3 s4 = texture(u_src, v_uv + vec2( 0.5,  0.5) * u_texel).rgb;
+  vec3 c = (s1 + s2 + s3 + s4) * 0.25;
+
+  // Soft-knee highlight extraction: only genuinely bright pixels feed the
+  // bloom chain. The dim globe surface and HUD-adjacent haze stay out, so
+  // light blooms without the whole frame fogging up (the old blowout).
+  // Knee spans below 1.0 so the RGBA8 fallback (values clamp at 1.0) still
+  // passes saturated beam/core pixels.
+  float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float knee = smoothstep(0.60, 1.10, luma);
+  fragColor = vec4(c * knee, 1.0);
 }
 `;
 
@@ -545,9 +554,10 @@ void main() {
   vec3 prev = texture(u_prev, v_uv).rgb;
   base = max(base, prev * u_persistence);
 
-  // Bloom — near-zero: preserves crisp edges, adds only the faintest halo at high intensity.
+  // Bloom — thresholded input (see BLOOM_DOWN_FRAG), so this can carry real
+  // weight: a meaningful floor from the first frame, growing with the build.
   vec3 bloom = texture(u_bloom, v_uv).rgb;
-  float bloomScale = u_intensity * 0.04;
+  float bloomScale = 0.45 + u_intensity * 0.55;
 
   vec3 col = base + bloom * bloomScale;
 

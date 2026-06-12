@@ -938,6 +938,8 @@ async function main(): Promise<void> {
     }
     if (hpPct !== lastHpPct) {
       hpFillEl.style.width = hpPct + '%';
+      hpFillEl.classList.toggle('crit', hpPct <= 25);
+      hpFillEl.classList.toggle('warn', hpPct > 25 && hpPct <= 50);
       lastHpPct = hpPct;
     }
     // Dash status text.

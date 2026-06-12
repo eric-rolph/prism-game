@@ -181,9 +181,19 @@
         position: absolute;
         inset: 0;
         width: 100%;
-        background: linear-gradient(90deg, #ff4444, #ff9966, #66ff88);
-        box-shadow: 0 0 10px rgba(102, 255, 136, 0.4);
-        transition: width 120ms ease-out;
+        background: var(--accent);
+        box-shadow: 0 0 10px rgba(168, 244, 255, 0.45);
+        transition: width 120ms ease-out, background 200ms ease-out;
+      }
+      /* Terminal-language state shifts: cyan → amber under 50% → red under 25%. */
+      #hp-fill.warn {
+        background: #ffae6c;
+        box-shadow: 0 0 10px rgba(255, 174, 108, 0.5);
+      }
+      #hp-fill.crit {
+        background: #ff5b6e;
+        box-shadow: 0 0 12px rgba(255, 91, 110, 0.6);
+        animation: blink 1.1s infinite;
       }
       #dash-fill {
         position: absolute;
