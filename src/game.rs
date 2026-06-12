@@ -9,6 +9,10 @@ use crate::entities::{
     InterferencePulse, MiniBossKind, Particle, Player, Projectile, PulseKind, VoidShell,
     VoidShockwave, XpGem,
 };
+
+#[cfg(test)]
+#[path = "game_tests.rs"]
+mod game_tests;
 use crate::math::Rng;
 use crate::shards::{
     compose_salvo, BeamRequest, EvolutionKind, Inventory, ShardKind, UpgradeOffer, SYNERGY_COUNT,
