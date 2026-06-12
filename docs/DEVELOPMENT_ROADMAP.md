@@ -214,6 +214,7 @@ Status: opportunistic, but do before public sharing.
 
 ## Done / Completed
 
+- Opening on-ramp (June 2026): spawn interval eases from 2.2× to steady state over the first 100 s, enemy cap is 80/155/230 for waves 0-2, and the first five waves are Steady so the Surge/Swarm/Elite/Crescendo rotation starts at wave 5 (2:30). The "increase difficulty" pass had applied its 300-enemy base cap from wave 0, flooding the tutorial minute (bot A/B: median time-to-death 33 s → 66 s; everything past wave 3 / 100 s is formula-identical).
 - Radiance gems rendered as distinct pickup crystals/sparkles instead of enemy-like round dots.
 - 15-minute session length.
 - Max shard level 6.
