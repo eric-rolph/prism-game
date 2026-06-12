@@ -208,6 +208,10 @@ Status: opportunistic, but do before public sharing.
 6. Do technical hardening before public sharing: WebGL context loss/restore, Worker security headers, CI workflow, deterministic smoke tests, Rust/TS constant deduplication, and selective `game.rs` extraction.
 7. Add endless mode only after the 15-minute arc feels stable under telemetry evidence.
 
+## Cut Features
+
+- **Corruption patches (June 2026).** Lingering enemies stained the surface with dark patches that slowed the player, healed the player (contradictory), erupted Void Spawn mini-bosses, and dimmed the globe. Cut entirely: every causal link (3s linger → invisible growth → off-screen eruption) was unreadable, beams silently deleted patches on contact so the system mostly operated off-screen, cleansing had no reward, and 48 dark zero-glow blotches wrecked late-run readability — playtesting feedback was "unclear what the blotches are." The Pulsar's VoidShell survives as pure telegraphed artillery (warning ring now matches the true damage radius), and the VoidSpawn mini-boss was deleted with the system (it was a Brute reskin with no identity beyond corruption). If territory pressure returns, it must obey the readability principles above: visible causality, a reason to engage, and one clear rule.
+
 ## Done / Completed
 
 - Radiance gems rendered as distinct pickup crystals/sparkles instead of enemy-like round dots.

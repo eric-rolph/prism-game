@@ -31,7 +31,6 @@ pub enum EnemyKind {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MiniBossKind {
-    VoidSpawn,
     Bulwark,
     Riftcaller,
     MirrorWraith,
@@ -68,7 +67,6 @@ pub struct Enemy {
     pub slow_timer: f32,
     pub no_xp: bool,
     pub spawn_grace: f32,
-    pub surface_time: f32, // seconds spent drifting on the surface
     pub mini_boss: Option<MiniBossKind>,
 }
 
@@ -207,16 +205,7 @@ pub struct FrostField {
     pub radius: f32,
 }
 
-/// Corruption left on the surface by lingering enemies.
-pub struct CorruptionPatch {
-    pub pos: Vec2,
-    pub radius: f32,
-    pub level: f32,          // 0.0 to 1.0
-    pub age: f32,            // seconds since spawn
-    pub spawn_cooldown: f32, // remaining cooldown before next Void Spawn can emerge
-}
-
-/// Descending void projectile fired by Pulsars. Corrupts and deals area damage on landing.
+/// Descending void projectile fired by Pulsars. Deals area damage on landing.
 #[derive(Clone)]
 pub struct VoidShell {
     pub pos: Vec2,
