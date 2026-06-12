@@ -172,6 +172,15 @@ const BASE_ENEMY_CAP: usize = 300;
 const ENEMY_CAP_PER_WAVE: usize = 35;
 const ENEMY_CAP_MULT_PER_WAVE_AFTER_5: f32 = 0.20;
 const MAX_ENEMIES: usize = 5000;
+
+// Opening on-ramp. A fresh run starts as a trickle and reaches full spawn
+// pressure by ONRAMP_DURATION; the enemy cap stays small for the first three
+// waves. Late-game pacing (the wave-shape rotation, rank pressure, overdrive)
+// is untouched — every on-ramp term is inert past its window.
+const ONRAMP_DURATION: f32 = 100.0; // seconds until spawn interval reaches steady state
+const ONRAMP_INTERVAL_BOOST: f32 = 2.2; // spawn-interval multiplier at t = 0
+const ONRAMP_CAP_BASE: usize = 80; // enemy cap during wave 0
+const ONRAMP_CAP_PER_WAVE: usize = 75; // cap growth for waves 1-2; full cap at wave 3
 const BASE_SPAWNS_PER_FRAME: u32 = 4;
 const MAX_SPAWNS_PER_FRAME: u32 = 14;
 const RANK_PRESSURE_START: u32 = 10;
@@ -4249,15 +4258,26 @@ impl Game {
             + ((MAX_ENEMIES - BASE_ENEMY_CAP) as f32 * self.rank_pressure()) as usize;
         let post_wave5_multiplier =
             1.0 + self.wave.saturating_sub(5) as f32 * ENEMY_CAP_MULT_PER_WAVE_AFTER_5;
-        (((wave_cap.max(rank_cap) as f32) * post_wave5_multiplier).round() as usize)
-            .min(MAX_ENEMIES)
+        let cap = (((wave_cap.max(rank_cap) as f32) * post_wave5_multiplier).round() as usize)
+            .min(MAX_ENEMIES);
+        // Opening on-ramp: small cap for the first waves; no effect from wave 3 on.
+        if self.wave < 3 {
+            cap.min(ONRAMP_CAP_BASE + self.wave as usize * ONRAMP_CAP_PER_WAVE)
+        } else {
+            cap
+        }
     }
 
     fn spawn_rate_for_wave(&self) -> f32 {
         let minute = self.time / 60.0;
         let overdrive_minutes = ((self.time - OVERDRIVE_START) / 60.0).max(0.0);
         let rank_pressure = self.rank_pressure();
-        let base = 0.34 - self.wave as f32 * 0.018 - minute * 0.006;
+        // Opening on-ramp: the first ~100 seconds ease from a trickle to full
+        // pressure so a fresh run teaches movement before it tests it.
+        // Identical to the steady-state formula once time >= ONRAMP_DURATION.
+        let onramp = 1.0 + (ONRAMP_INTERVAL_BOOST - 1.0)
+            * (1.0 - (self.time / ONRAMP_DURATION).clamp(0.0, 1.0));
+        let base = (0.34 - self.wave as f32 * 0.018 - minute * 0.006) * onramp;
         let overdrive_mult = (1.0 - overdrive_minutes * 0.05).max(0.80);
         let rank_mult = 1.0 - rank_pressure * 0.45;
         let min_interval = (0.050 - overdrive_minutes * 0.004 - rank_pressure * 0.024).max(0.018);
@@ -4580,6 +4600,13 @@ impl Game {
     }
 
     fn wave_shape(&self) -> WaveShape {
+        // The first cycle is all Steady: the opening teaches movement before
+        // the Surge/Swarm/Elite/Crescendo rotation begins at wave 5. Wave 5
+        // maps to Steady in the modulo cycle, so shapes for wave >= 5 are
+        // exactly what they were without this gate.
+        if self.wave < 5 {
+            return WaveShape::Steady;
+        }
         match self.wave % 5 {
             0 => WaveShape::Steady,
             1 => WaveShape::Surge,
