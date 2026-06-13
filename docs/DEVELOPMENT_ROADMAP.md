@@ -161,7 +161,7 @@ Goal: make every run leave a footprint.
 
 ## Slice 5: Playtest Telemetry And Balance
 
-Status: in progress; high-granularity run summary telemetry is implemented, and balance playtests are next.
+Status: in progress; high-granularity run summary telemetry is implemented, and the first bot-piloted baseline pass is done (see `baseline_runs_report` findings under Done). Boss-fight crowd dilution and early contact pressure are the next tuning targets.
 
 Goal: tune from run evidence, not vibes.
 
@@ -199,11 +199,21 @@ Status: opportunistic, but do before public sharing.
 
 1. ✅ Fix Hydra aura damage (Halo/Interference wrote boss.hp, overwritten each frame by lobe sum) and auto-targeting (aimed at center with no hitbox; now targets nearest living lobe).
 2. ✅ Add touch dash: short tap on mobile now triggers dash; HUD label updated to DASH [SPACE / TAP].
-3. Play three baseline 15-minute runs using the exported telemetry:
-   - normal input, no forced build
-   - aggressive close-range Halo/Barrier/Siphon path
-   - runaway beam Split/Mirror/Cascade path
-4. Tune boss HP, projectile cadence, and late-wave pressure from those runs.
+3. ✅ Baseline 15-minute runs for all three archetypes via the bot-piloted
+   `baseline_runs_report` harness (5 seeds each; findings under Done).
+4. Tune from the baseline evidence, in priority order:
+   - Boss-fight crowd dilution: the standing crowd absorbs nearly all damage,
+     so in-situ Sentinel kills take 174-286 s vs the 20-45 s isolated band,
+     which defers or cancels Hydra/Void Prism and stalls spawn pressure for
+     minutes. Cull or redirect the crowd at boss spawn (the original "reduce
+     spawns until manageable" intent never engages at 1000+ standing enemies).
+   - Early contact pressure: every archetype's unfocused deaths cluster at
+     3:30-5:15, all to contact damage (~95% of damage taken across runs);
+     projectiles are background noise. First-death timing is at the early edge
+     of the 4-7 minute target, and ranged threats create no decisions.
+   - Beam-path fragility: the runaway-beam archetype dies at median 4:05 with
+     only Split 2/Mirror 1 assembled — the beam-dominance design debt is
+     unreachable in real runs because the build never comes online.
 5. Add structured telemetry export (JSON history, fixed seed, boss TTK, offer sets, death context) before heavy balance tuning.
 6. Do technical hardening before public sharing: WebGL context loss/restore, Worker security headers, CI workflow, deterministic smoke tests, Rust/TS constant deduplication, and selective `game.rs` extraction.
 7. Add endless mode only after the 15-minute arc feels stable under telemetry evidence.
@@ -213,6 +223,8 @@ Status: opportunistic, but do before public sharing.
 - **Corruption patches (June 2026).** Lingering enemies stained the surface with dark patches that slowed the player, healed the player (contradictory), erupted Void Spawn mini-bosses, and dimmed the globe. Cut entirely: every causal link (3s linger → invisible growth → off-screen eruption) was unreadable, beams silently deleted patches on contact so the system mostly operated off-screen, cleansing had no reward, and 48 dark zero-glow blotches wrecked late-run readability — playtesting feedback was "unclear what the blotches are." The Pulsar's VoidShell survives as pure telegraphed artillery (warning ring now matches the true damage radius), and the VoidSpawn mini-boss was deleted with the system (it was a Brute reskin with no identity beyond corruption). If territory pressure returns, it must obey the readability principles above: visible causality, a reason to engage, and one clear rule.
 
 ## Done / Completed
+
+- Baseline full-run harness + first evidence pass (June 2026): `cargo test --release baseline_runs_report -- --ignored --nocapture` plays the whole 15:00 session for all three roadmap archetypes (normal first-offer, committed close-range, committed beam) with a shared deterministic survival pilot — threat avoidance, gem routing, dash i-frames through shockwave fronts, and boss engagement in a build-appropriate orbit band. Findings (5 seeds/archetype): unfocused first death median 4:23 (target band 4-7 min, low edge); close-range survives to median 9:09 with one 15:00 victory while normal/beam die by ~4:20; in-situ Sentinel TTK is 174-286 s vs the 20-45 s isolated-arena band because the standing crowd dilutes all boss damage, which defers/cancels Hydra and Void Prism (boss milestones only fire on an empty boss slot) and collapses late pressure via the 45-enemy boss spawn soft cap (close-range dmg/min: 68 before 10:00 → 12 after); contact damage is ~95% of all damage taken in every archetype; max simultaneous enemies observed 264-1421 (rank cap permits up to 5000 — relevant to the Slice 6 broad-phase concern, which was raised at 420).
 
 - Re-light pass (June 2026, from the art-direction review): bloom input now soft-knee thresholded (luma 0.60-1.10) so only genuinely bright pixels bloom, composite bloom weight raised from intensity×0.04 (effectively off) to 0.45+intensity×0.55; temporal persistence enabled at 0.55 (max-blend light trails, no compounding); player renders 1.5× its hitbox with a lantern aura and brighter core; enemy atmospheric-glow layer halved with crisper bodies and hotter cores; XP gems 4.5→7.0 px with ~2× glow; HP bar is solid terminal cyan with amber (≤50%) and blinking red (≤25%) states replacing the permanent rainbow gradient. Remaining art items: palette governance recolors (Splitter/Pulsar/Dasher), faceted shard hexagons, title/boot screen, globe presence lift.
 

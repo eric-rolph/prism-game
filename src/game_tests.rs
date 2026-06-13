@@ -6,6 +6,7 @@
 //!   cargo test --release boss_ttk_report -- --ignored --nocapture
 
 use super::*;
+use crate::shards::{EVOLUTION_COUNT, SHARD_COUNT};
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -452,6 +453,431 @@ fn measure_boss_ttk(kind: BossKind, build: &[(ShardKind, u8)], seed: u32) -> Opt
         }
     }
     (g.boss.is_none() && started && fight_time < max_fight).then_some(fight_time)
+}
+
+// ---------------------------------------------------------------------------
+// Baseline full-run harness (roadmap Near-Term #3): three archetypes play the
+// whole 15:00 session with a shared survival pilot, so differences between
+// archetypes reflect build power, not pilot skill. Evidence, not a gate.
+// ---------------------------------------------------------------------------
+
+/// How an archetype spends level-ups.
+#[derive(Copy, Clone)]
+enum PickPolicy {
+    /// "Normal input, no forced build": take the first offered slot.
+    FirstOffer,
+    /// Committed path: take the best-ranked matching offer (evolutions always
+    /// count), reroll when nothing matches, skip once rerolls are spent.
+    Prefer(&'static [ShardKind]),
+}
+
+/// Close the level-up modal according to the policy. Loops because a pick can
+/// bank enough XP to reopen the modal immediately, and rerolls re-deal the
+/// same modal; both paths strictly consume a rank or a charge, so this ends.
+fn resolve_level_up(g: &mut Game, policy: PickPolicy) {
+    while g.is_leveling_up() {
+        let choices = g.level_choices;
+        match policy {
+            PickPolicy::FirstOffer => match (0..3).find(|&s| choices[s].is_some()) {
+                Some(s) => g.select_shard(s as u8),
+                None => g.skip_level_up(),
+            },
+            PickPolicy::Prefer(prefs) => {
+                if let Some(s) =
+                    (0..3).find(|&s| matches!(choices[s], Some(UpgradeOffer::Evolution(_))))
+                {
+                    g.select_shard(s as u8);
+                    continue;
+                }
+                let mut best: Option<(usize, usize)> = None; // (pref rank, slot)
+                for (s, choice) in choices.iter().enumerate() {
+                    if let Some(UpgradeOffer::Shard(kind)) = choice {
+                        if let Some(rank) = prefs.iter().position(|p| p == kind) {
+                            if best.is_none_or(|(r, _)| rank < r) {
+                                best = Some((rank, s));
+                            }
+                        }
+                    }
+                }
+                match best {
+                    Some((_, s)) => g.select_shard(s as u8),
+                    None if g.reroll_charges() > 0 => g.reroll_level_up(),
+                    None => g.skip_level_up(),
+                }
+            }
+        }
+    }
+}
+
+/// Deterministic survival pilot shared by every archetype: steer away from
+/// concrete threats, drift toward gems when calm, dash through the worst.
+/// Bosses are engaged in the archetype's orbit band while healthy — a pilot
+/// that only flees can never let a contact-aura build fight a boss — and
+/// fled from below the retreat HP fraction.
+fn survival_input(g: &Game, frame: u32, orbit: (f32, f32)) -> (Vec2, bool) {
+    let p = g.player.pos;
+    let mut steer = Vec2::ZERO;
+    let mut threat = 0.0f32;
+    let mut dash = false;
+
+    for e in &g.enemies {
+        let to_e = nearest_globe_delta(p, e.pos);
+        let danger_r = 150.0 + e.radius;
+        let dist = to_e.length();
+        if dist < danger_r {
+            let kind_weight = match e.kind {
+                EnemyKind::Brute => 1.6,
+                EnemyKind::Dasher if e.state == EnemyState::Charging => 2.2,
+                EnemyKind::Umbra => 1.4,
+                _ => 1.0,
+            };
+            let w = (1.0 - dist / danger_r) * kind_weight;
+            steer -= to_e.normalize_or_zero() * w;
+            threat += w;
+            if e.state == EnemyState::Charging && dist < 90.0 {
+                dash = true;
+            }
+        }
+    }
+
+    for proj in &g.projectiles {
+        // Dodge where the shot will be shortly, not where it is now.
+        let to_p = nearest_globe_delta(p, proj.pos + proj.vel * 0.25);
+        let dist = to_p.length();
+        if dist < 110.0 {
+            let w = (1.0 - dist / 110.0) * 1.4;
+            steer -= to_p.normalize_or_zero() * w;
+            threat += w;
+        }
+    }
+
+    if let Some(b) = &g.boss {
+        let to_b = nearest_globe_delta(p, b.pos);
+        let dist = to_b.length();
+        let healthy = g.player.hp > g.player.max_hp * 0.35;
+        if healthy && b.state != BossState::Telegraphing {
+            // Hold the orbit band (same shape as measure_boss_ttk) so beams
+            // and auras actually fight the boss instead of kiting forever.
+            let (near, far) = orbit;
+            let tangent = Vec2::new(-to_b.y, to_b.x).normalize_or_zero();
+            let radial = to_b.normalize_or_zero();
+            let correction = if dist > far {
+                radial
+            } else if dist < near {
+                -radial
+            } else {
+                Vec2::ZERO
+            };
+            steer += (tangent * 0.8 + correction) * 1.2;
+        } else if dist < 170.0 {
+            let w = (1.0 - dist / 170.0) * 1.8;
+            steer -= to_b.normalize_or_zero() * w;
+            threat += w;
+        }
+    }
+
+    for sw in &g.void_shockwaves {
+        let from_center = nearest_globe_delta(sw.pos, p);
+        let dist = from_center.length();
+        let ring = sw.current_radius();
+        // The front hits once when it crosses the player; i-frame through it.
+        if ring < dist && dist - ring < 70.0 {
+            dash = true;
+            steer += from_center.normalize_or_zero() * 0.8;
+            threat += 0.8;
+        }
+    }
+
+    for shell in &g.void_shells {
+        let to_zone = nearest_globe_delta(p, shell.target);
+        let zone_r = shell.radius + 40.0;
+        let dist = to_zone.length();
+        if dist < zone_r {
+            steer -= to_zone.normalize_or_zero() * (1.5 * (1.0 - dist / zone_r));
+            threat += 1.0;
+        }
+    }
+
+    if threat < 0.8 {
+        let mut nearest: Option<(f32, Vec2)> = None;
+        for gem in &g.gems {
+            let to_g = nearest_globe_delta(p, gem.pos);
+            let d = to_g.length();
+            if d < 280.0 && nearest.is_none_or(|(nd, _)| d < nd) {
+                nearest = Some((d, to_g));
+            }
+        }
+        if let Some((_, to_g)) = nearest {
+            steer += to_g.normalize_or_zero() * (0.9 * (0.8 - threat));
+        }
+    }
+
+    steer += wander_input(frame) * 0.25;
+    if threat > 2.4 {
+        dash = true; // panic button
+    }
+    (steer.normalize_or_zero(), dash)
+}
+
+struct RunRecord {
+    seed: u32,
+    victory: bool,
+    end_time: f32,
+    death_cause: i32,
+    peak_rank: u32,
+    kills: u32,
+    boss_kills: u32,
+    damage_taken: f32,
+    damage_by_source: [f32; DAMAGE_SOURCE_COUNT],
+    gems: u32,
+    skips: u32,
+    rerolls: u32,
+    max_enemies: u32,
+    /// (boss, fight seconds) — None when the run ended with the boss alive.
+    boss_fights: Vec<(BossKind, Option<f32>)>,
+    rank_by_minute: [u32; RANK_TIMELINE_BUCKETS],
+    /// Cumulative damage taken at each minute boundary.
+    damage_marks: [f32; RANK_TIMELINE_BUCKETS],
+    build: Vec<(ShardKind, u8)>,
+    evolutions: Vec<EvolutionKind>,
+}
+
+fn play_full_run(seed: u32, policy: PickPolicy, orbit: (f32, f32)) -> RunRecord {
+    let mut g = new_game(seed);
+    let mut frame = 0u32;
+    let mut boss_active: Option<(BossKind, f32)> = None;
+    let mut boss_fights: Vec<(BossKind, Option<f32>)> = Vec::new();
+    let mut damage_marks = [0.0f32; RANK_TIMELINE_BUCKETS];
+    let mut minute_cursor = 0usize;
+
+    while !g.is_dead() && frame < 80_000 {
+        frame += 1;
+        if g.is_leveling_up() {
+            resolve_level_up(&mut g, policy);
+            continue; // modal frames do not advance the sim clock
+        }
+        let (dir, dash) = survival_input(&g, frame, orbit);
+        g.set_input(dir.x, dir.y);
+        g.set_dash_input(dash);
+        g.update(DT);
+
+        // In-situ boss fight clock: first non-telegraph frame -> slot clear.
+        if let Some(b) = &g.boss {
+            if boss_active.is_none() && b.state != BossState::Telegraphing {
+                boss_active = Some((b.kind, g.time));
+            }
+        } else if let Some((kind, t0)) = boss_active.take() {
+            boss_fights.push((kind, Some(g.time - t0)));
+        }
+
+        let minute = ((g.time / 60.0) as usize).min(RANK_TIMELINE_BUCKETS - 1);
+        while minute_cursor < minute {
+            minute_cursor += 1;
+            damage_marks[minute_cursor] = g.damage_taken();
+        }
+    }
+    if let Some((kind, _)) = boss_active {
+        boss_fights.push((kind, None));
+    }
+    for mark in damage_marks.iter_mut().skip(minute_cursor + 1) {
+        *mark = g.damage_taken();
+    }
+
+    let mut build: Vec<(ShardKind, u8)> = (0..SHARD_COUNT as u8)
+        .filter_map(ShardKind::from_index)
+        .map(|k| (k, g.inventory.level(k)))
+        .filter(|&(_, lvl)| lvl > 0)
+        .collect();
+    build.sort_by(|a, b| b.1.cmp(&a.1));
+    let evolutions = (0..EVOLUTION_COUNT as u8)
+        .filter_map(EvolutionKind::from_index)
+        .filter(|e| g.inventory.evolutions[e.as_index()])
+        .collect();
+
+    let mut rank_by_minute = [0u32; RANK_TIMELINE_BUCKETS];
+    for (m, slot) in rank_by_minute.iter_mut().enumerate() {
+        *slot = g.rank_at_minute(m as u8);
+    }
+    let mut damage_by_source = [0.0f32; DAMAGE_SOURCE_COUNT];
+    for (i, slot) in damage_by_source.iter_mut().enumerate() {
+        *slot = g.damage_by_source(i as u8);
+    }
+
+    RunRecord {
+        seed,
+        victory: g.is_victory(),
+        end_time: g.time,
+        death_cause: g.death_cause(),
+        peak_rank: g.peak_rank(),
+        kills: g.kills_total,
+        boss_kills: g.boss_kills_count(),
+        damage_taken: g.damage_taken(),
+        damage_by_source,
+        gems: g.gems_collected(),
+        skips: g.skip_count(),
+        rerolls: g.reroll_count(),
+        max_enemies: g.max_enemies_observed(),
+        boss_fights,
+        rank_by_minute,
+        damage_marks,
+        build,
+        evolutions,
+    }
+}
+
+fn mmss(t: f32) -> String {
+    format!("{}:{:02}", t as u32 / 60, t as u32 % 60)
+}
+
+#[test]
+#[ignore = "balance evidence harness — run with --ignored --nocapture"]
+fn baseline_runs_report() {
+    use ShardKind::*;
+    const DAMAGE_SOURCE_NAMES: [&str; DAMAGE_SOURCE_COUNT] =
+        ["contact", "projectile", "boss", "shockwave"];
+    // Orbit bands match measure_boss_ttk: contact-aura builds must hug the
+    // boss to damage it; everyone else holds a mid-range beam orbit.
+    let archetypes: [(&str, PickPolicy, (f32, f32)); 3] = [
+        ("normal / no forced build", PickPolicy::FirstOffer, (160.0, 220.0)),
+        (
+            "aggressive close-range",
+            PickPolicy::Prefer(&[Halo, Barrier, Siphon, Interference, Thorns, Armor, PrismHeart]),
+            (40.0, 90.0),
+        ),
+        (
+            "runaway beam",
+            PickPolicy::Prefer(&[Split, Mirror, Cascade, Lens, Chromatic, Refract, Armor]),
+            (160.0, 220.0),
+        ),
+    ];
+    let seeds = [101u32, 2026, 4242, 7777, 90210];
+
+    println!();
+    println!("BASELINE 15:00 RUNS (shared survival pilot, {} seeds/archetype)", seeds.len());
+    println!("targets: unfocused first death ~min 4-7; bosses 20-45 s; post-10:00 still moving");
+    println!("{:=<78}", "");
+
+    for (label, policy, orbit) in archetypes {
+        let runs: Vec<RunRecord> = seeds
+            .iter()
+            .map(|&s| play_full_run(s, policy, orbit))
+            .collect();
+
+        println!();
+        println!("== {label} ==");
+        for r in &runs {
+            let outcome = if r.victory {
+                format!("VICTORY at {}", mmss(r.end_time))
+            } else {
+                let cause = DAMAGE_SOURCE_NAMES
+                    .get(r.death_cause as usize)
+                    .copied()
+                    .unwrap_or("?");
+                format!("death   at {} ({cause})", mmss(r.end_time))
+            };
+            println!(
+                "seed {:5}  {outcome:24} rank {:2}  kills {:4}  dmg {:5.0}  gems {:3}  maxE {:3}",
+                r.seed, r.peak_rank, r.kills, r.damage_taken, r.gems, r.max_enemies
+            );
+            let fights: Vec<String> = r
+                .boss_fights
+                .iter()
+                .map(|(k, t)| match t {
+                    Some(t) => format!("{k:?} {t:.1}s"),
+                    None => format!("{k:?} DNF"),
+                })
+                .collect();
+            let build: Vec<String> = r
+                .build
+                .iter()
+                .take(7)
+                .map(|(k, l)| format!("{k:?} {l}"))
+                .collect();
+            let evos: Vec<String> = r.evolutions.iter().map(|e| format!("{e:?}")).collect();
+            println!(
+                "           bosses [{}]  skips {} rerolls {}  build [{}]{}",
+                fights.join(", "),
+                r.skips,
+                r.rerolls,
+                build.join(", "),
+                if evos.is_empty() {
+                    String::new()
+                } else {
+                    format!("  evo [{}]", evos.join(", "))
+                }
+            );
+        }
+
+        // Archetype aggregates.
+        let mut end_times: Vec<f32> = runs.iter().map(|r| r.end_time).collect();
+        end_times.sort_by(f32::total_cmp);
+        let median = end_times[end_times.len() / 2];
+        let victories = runs.iter().filter(|r| r.victory).count();
+        let avg_peak: f32 =
+            runs.iter().map(|r| r.peak_rank as f32).sum::<f32>() / runs.len() as f32;
+
+        let mut source_totals = [0.0f32; DAMAGE_SOURCE_COUNT];
+        for r in &runs {
+            for (total, v) in source_totals.iter_mut().zip(r.damage_by_source) {
+                *total += v;
+            }
+        }
+        let source_summary: Vec<String> = DAMAGE_SOURCE_NAMES
+            .iter()
+            .zip(source_totals)
+            .filter(|(_, v)| *v > 0.0)
+            .map(|(n, v)| format!("{n} {:.0}", v / runs.len() as f32))
+            .collect();
+
+        // Damage rate before and after overdrive, only over minutes a run
+        // actually survived (otherwise dead runs dilute the late rate).
+        let (mut early_dmg, mut early_min, mut late_dmg, mut late_min) = (0.0f32, 0u32, 0.0f32, 0u32);
+        for r in &runs {
+            let end_minute = (r.end_time / 60.0).min(15.0);
+            for m in 1..RANK_TIMELINE_BUCKETS {
+                if (m as f32) > end_minute.ceil() {
+                    break;
+                }
+                let delta = (r.damage_marks[m]
+                    - r.damage_marks[m - 1])
+                    .max(0.0);
+                if m <= 10 {
+                    early_dmg += delta;
+                    early_min += 1;
+                } else {
+                    late_dmg += delta;
+                    late_min += 1;
+                }
+            }
+        }
+
+        let mut rank_line = String::new();
+        for m in [3usize, 5, 8, 10, 13, 15] {
+            let avg: f32 = runs
+                .iter()
+                .map(|r| r.rank_by_minute[m.min(RANK_TIMELINE_BUCKETS - 1)] as f32)
+                .sum::<f32>()
+                / runs.len() as f32;
+            rank_line.push_str(&format!("{m}:00->{avg:.0}  "));
+        }
+
+        let avg_boss_kills: f32 =
+            runs.iter().map(|r| r.boss_kills as f32).sum::<f32>() / runs.len() as f32;
+        println!(
+            "-- {victories}/{} victories, median end {}, avg peak rank {avg_peak:.1}, avg boss kills {avg_boss_kills:.1}",
+            runs.len(),
+            mmss(median)
+        );
+        println!("-- avg dmg by source: {}", source_summary.join(", "));
+        println!(
+            "-- dmg/min survived: {:.0} (min 1-10) vs {:.0} (min 11-15)",
+            if early_min > 0 { early_dmg / early_min as f32 } else { 0.0 },
+            if late_min > 0 { late_dmg / late_min as f32 } else { 0.0 }
+        );
+        println!("-- avg rank at {rank_line}");
+    }
+    println!();
+    println!("{:=<78}", "");
 }
 
 #[test]
