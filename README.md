@@ -1,8 +1,17 @@
 # Prism
 
+[![Play Live](https://img.shields.io/badge/Play%20Live-prism.ericrolph.workers.dev-38bdf8)](https://prism.ericrolph.workers.dev/)
+[![Rust + WASM](https://img.shields.io/badge/Rust-WebAssembly%20%2B%20GLSL-f97316?logo=rust&logoColor=white)](https://github.com/eric-rolph/prism-game)
+
 Auto-firing light, refracted through shards you collect. A Vampire-Survivors-paced action game rendered as geometric light, built in Rust + WASM, deployed to Cloudflare Workers.
 
 **[▶ Play at prism.ericrolph.workers.dev](https://prism.ericrolph.workers.dev/)**
+
+<p align="center">
+  <a href="https://prism.ericrolph.workers.dev/">
+    <img src="docs/preview.png" alt="Prism Rust + WASM spherical light arena" width="760" />
+  </a>
+</p>
 
 **Controls:** WASD or arrow keys. On touch devices, drag anywhere — it becomes a virtual analog stick. When a rank-up modal appears, click a card or press `1` / `2` / `3`. `Esc` to pause.
 
