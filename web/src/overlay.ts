@@ -1,12 +1,15 @@
-// Lightweight 2D Canvas Tactical & Aim-Trainer Overlay layered over WebGL2:
-//   - FPS Aim-Trainer Optical Crosshair (tightens & turns gold on hover, pulses on hit/miss)
-//   - Resonance Drill visual cues (Flick Chain tether vector + step number, Smooth Track charge arc, Micro triangle links)
-//   - Coalesced floating damage / crit / heal / shatter numbers
-//   - Milestone / synergy / evolution / drill completion callouts
-//   - Off-screen directional boss chevron tracker
+// Lightweight 2D Canvas Tactical, Ghost-Sniper & Dead-Eye Overlay layered over WebGL2:
+//   - Pink/Magenta Ghost Player Sniper Callsigns, real-player tags & imminent LOCK! warnings
+//   - Boss Weakpoint, Prism Lattice Relay & Lunar Curtain click-to-detonate reticles
+//   - Evolving Superposition Optical Crosshair (1×→5×) + outer Dead-Eye Overdrive charge ring
+//   - Dead-Eye slow-motion golden vignette + lock counter
+//   - Off-screen Boss chevron & Golden Prism Obelisk directional beacon + capture ring gauge
+//   - Coalesced floating damage / crit / heal / shatter numbers & milestone callouts
+
+import { GhostSniperProfile } from './ghosts.js';
 
 const POPUP_STRIDE_FLOATS = 4;
-const AIM_TARGET_STRIDE_FLOATS = 8;
+const AIM_TARGET_STRIDE_FLOATS = 10;
 const MAX_ACTIVE_POPUPS = 68;
 
 interface FloatingNumber {
@@ -39,6 +42,16 @@ export interface AimOverlayState {
   lastHitY: number;
   targetsView: Float32Array;
   targetsLen: number;
+  focusMult: number;
+  overdriveCharge: number;
+  deadeyeActive: boolean;
+  deadeyeTimerPct: number;
+  deadeyeLocks: number;
+  obeliskActive: boolean;
+  obeliskX: number;
+  obeliskY: number;
+  obeliskProgress: number;
+  lookupGhost: (id: number) => GhostSniperProfile | null;
 }
 
 export class OverlayRenderer {
@@ -98,7 +111,7 @@ export class OverlayRenderer {
       subtext,
       color,
       age: 0,
-      maxAge: 2.1,
+      maxAge: 2.25,
     });
     if (this.banners.length > 3) this.banners.shift();
   }
@@ -167,6 +180,56 @@ export class OverlayRenderer {
     ];
   }
 
+  private drawEdgeBeacon(
+    rx: number,
+    ry: number,
+    dist: number,
+    label: string,
+    color: string,
+    glow: string,
+  ): void {
+    const ctx = this.ctx;
+    const ang = Math.atan2(ry, rx);
+    const cx = this.viewW * 0.5;
+    const cy = this.viewH * 0.5;
+    const hw = cx - 54;
+    const hh = cy - 68;
+    const cos = Math.cos(ang);
+    const sin = Math.sin(ang);
+    const tx = Math.abs(cos) > 1e-4 ? hw / Math.abs(cos) : 1e9;
+    const ty = Math.abs(sin) > 1e-4 ? hh / Math.abs(sin) : 1e9;
+    const edgeDist = Math.min(tx, ty);
+    const ex = cx + cos * edgeDist;
+    const ey = cy + sin * edgeDist;
+
+    const pulse = 0.72 + 0.28 * Math.sin(performance.now() * 0.008);
+    ctx.save();
+    ctx.translate(ex, ey);
+    ctx.rotate(ang);
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = color;
+    ctx.shadowColor = glow;
+    ctx.shadowBlur = 14;
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(-8, -9);
+    ctx.lineTo(-3, 0);
+    ctx.lineTo(-8, 9);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    ctx.font = '600 9px "Cascadia Mono", Consolas, ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = color;
+    ctx.shadowColor = 'rgba(0,0,0,0.95)';
+    ctx.shadowBlur = 4;
+    ctx.fillText(`${label} · ${Math.round(dist)}M`, ex, ey + 20);
+    ctx.restore();
+  }
+
   public render(
     dt: number,
     camX: number,
@@ -187,9 +250,35 @@ export class OverlayRenderer {
     this.hitMarkerTimer = Math.max(0, this.hitMarkerTimer - dt);
     this.missMarkerTimer = Math.max(0, this.missMarkerTimer - dt);
 
-    // 1. FPS Aim-Trainer Resonance Node gauges, flick tethers, and micro-cluster links.
+    // 0. Dead-Eye Overdrive cinematic golden slow-motion frame!
+    if (aim.deadeyeActive) {
+      const grad = ctx.createRadialGradient(
+        this.viewW * 0.5, this.viewH * 0.5, Math.min(this.viewW, this.viewH) * 0.24,
+        this.viewW * 0.5, this.viewH * 0.5, Math.max(this.viewW, this.viewH) * 0.72,
+      );
+      grad.addColorStop(0, 'rgba(255, 217, 94, 0.0)');
+      grad.addColorStop(1, 'rgba(255, 168, 42, 0.22)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, this.viewW, this.viewH);
+
+      ctx.save();
+      ctx.font = '700 12px "Cascadia Mono", Consolas, ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffe580';
+      ctx.shadowColor = 'rgba(255, 190, 40, 0.9)';
+      ctx.shadowBlur = 14;
+      ctx.fillText(
+        `◈ PRISMATIC DEAD-EYE · SWEEP TARGETS (${aim.deadeyeLocks}/6 LOCKED) · ${(aim.deadeyeTimerPct * 3.2).toFixed(1)}S`,
+        this.viewW * 0.5,
+        this.viewH * 0.145,
+      );
+      ctx.restore();
+    }
+
+    // 1. Pink Ghost Sniper Phantom Callsigns, Lock Gauges & Boss Weakpoint Reticles.
     if (aim.targetsLen > 0) {
       const microPts: [number, number][] = [];
+      let microHeader = 'TRI-CLONE';
 
       for (let i = 0; i < aim.targetsLen; i++) {
         const base = i * AIM_TARGET_STRIDE_FLOATS;
@@ -201,21 +290,75 @@ export class OverlayRenderer {
         const lifeFrac = aim.targetsView[base + 5]!;
         const step = Math.round(aim.targetsView[base + 6]!);
         const total = Math.round(aim.targetsView[base + 7]!);
+        const ghostId = Math.round(aim.targetsView[base + 8]!);
+        const flags = Math.round(aim.targetsView[base + 9]!);
+        const isGolden = (flags & 1) !== 0;
+        const lockImminent = (flags & 4) !== 0;
+
+        const ghost = ghostId >= 0 ? aim.lookupGhost(ghostId) : null;
+        const tagPrefix = isGolden ? '★ ACE' : ghost?.isHuman ? '⚡ PLAYER' : '⚡ GHOST';
+        const ghostTag = ghost
+          ? `${tagPrefix} ${ghost.callsign} · RK ${ghost.peakRank}`
+          : `${tagPrefix} SNIPER`;
 
         const screen = this.projectToScreen(wx, wy, camX, camY, shakeX, shakeY, arenaRadius);
-        if (!screen) continue;
+        const onScreen =
+          screen !== null &&
+          screen[0] >= 26 &&
+          screen[0] <= this.viewW - 26 &&
+          screen[1] >= 26 &&
+          screen[1] <= this.viewH - 26;
+        if (!onScreen || !screen) {
+          if (kind !== 3) {
+            const rx = wx - camX;
+            const ry = wy - camY;
+            const dist = Math.hypot(rx, ry);
+            if (dist > 10) {
+              this.drawEdgeBeacon(
+                rx,
+                ry,
+                dist,
+                ghost ? `⌖ ${ghost.callsign}` : '⌖ GHOST SNIPER',
+                isGolden ? '#ffe066' : '#ff66c4',
+                isGolden ? 'rgba(255, 224, 102, 0.9)' : 'rgba(255, 72, 188, 0.9)',
+              );
+            }
+          }
+          continue;
+        }
         const [sx, sy] = screen;
 
+        if (kind === 3) {
+          // Boss Weakpoint / Prism Lattice Relay / Mirror Sovereign Counter / Lunar Prism!
+          ctx.save();
+          ctx.strokeStyle = lockImminent ? '#ff4da6' : '#ffe26a';
+          ctx.shadowColor = lockImminent ? '#ff4da6' : '#ffe26a';
+          ctx.shadowBlur = 10;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.font = '700 9px "Cascadia Mono", Consolas, ui-monospace, monospace';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#fff3b8';
+          ctx.shadowColor = 'rgba(0,0,0,0.95)';
+          ctx.shadowBlur = 4;
+          ctx.fillText(lockImminent ? 'SNIPE TO STAGGER!' : 'CRIT NODE', sx, sy - radius - 8);
+          ctx.restore();
+          continue;
+        }
+
         if (kind === 0) {
-          // FLICK CHAIN: faint dashed guiding tether from previous flick hit!
+          // FLICK DUELIST GHOST SNIPER: guiding tether + countdown lock ring + callsign!
           if (aim.hasPrevLink) {
             const prev = this.projectToScreen(
               aim.lastHitX, aim.lastHitY, camX, camY, shakeX, shakeY, arenaRadius,
             );
             if (prev) {
               ctx.save();
-              ctx.strokeStyle = 'rgba(255, 224, 102, 0.35)';
-              ctx.lineWidth = 1.5;
+              ctx.strokeStyle = isGolden ? 'rgba(255, 224, 102, 0.45)' : 'rgba(255, 96, 198, 0.42)';
+              ctx.lineWidth = 1.6;
               ctx.setLineDash([5, 6]);
               ctx.beginPath();
               ctx.moveTo(prev[0], prev[1]);
@@ -225,54 +368,63 @@ export class OverlayRenderer {
             }
           }
 
-          // Crisp outer countdown arc + step label.
           ctx.save();
-          ctx.strokeStyle = '#ffe066';
-          ctx.lineWidth = 2;
+          ctx.strokeStyle = lockImminent ? '#ff2e6e' : isGolden ? '#ffe066' : '#ff66c4';
+          ctx.lineWidth = lockImminent ? 2.8 : 2.1;
           ctx.beginPath();
           ctx.arc(sx, sy, radius + 7, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * lifeFrac);
           ctx.stroke();
 
-          ctx.font = '700 10px "Cascadia Mono", Consolas, ui-monospace, monospace';
+          ctx.font = '700 9.5px "Cascadia Mono", Consolas, ui-monospace, monospace';
           ctx.textAlign = 'center';
-          ctx.fillStyle = '#fff5cc';
+          ctx.fillStyle = lockImminent ? '#ff99bb' : isGolden ? '#fff2b0' : '#ffb8e8';
           ctx.shadowColor = 'rgba(0,0,0,0.95)';
-          ctx.shadowBlur = 4;
-          ctx.fillText(`FLICK ${step}/${total}`, sx, sy - radius - 13);
+          ctx.shadowBlur = 5;
+          ctx.fillText(ghostTag, sx, sy - radius - 22);
+          ctx.fillStyle = lockImminent ? '#ff3d7f' : '#ffffff';
+          ctx.fillText(
+            lockImminent ? `FIRE IMMINENT! [${step}/${total}]` : `COUNTER-SNIPE ${step}/${total}`,
+            sx,
+            sy - radius - 10,
+          );
           ctx.restore();
         } else if (kind === 1) {
-          // SMOOTH TRACKING: circular charge progress gauge + HOLD cue!
+          // TRACK HUNTER GHOST SNIPER: orbital strafer + hold-track break bar!
           ctx.save();
-          // Remaining time faint outer ring.
-          ctx.strokeStyle = 'rgba(130, 210, 255, 0.32)';
-          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = lockImminent ? 'rgba(255, 46, 110, 0.72)' : 'rgba(255, 110, 210, 0.36)';
+          ctx.lineWidth = 1.8;
           ctx.beginPath();
-          ctx.arc(sx, sy, radius + 10, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * lifeFrac);
+          ctx.arc(sx, sy, radius + 11, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * lifeFrac);
           ctx.stroke();
 
-          // Live tracking lock charge arc (0 → 100%).
-          ctx.strokeStyle = aim.tracking ? '#7effd4' : '#70c8ff';
-          ctx.shadowColor = aim.tracking ? '#7effd4' : '#70c8ff';
+          ctx.strokeStyle = aim.tracking ? '#7effd4' : isGolden ? '#ffe066' : '#ff77d4';
+          ctx.shadowColor = aim.tracking ? '#7effd4' : '#ff66c4';
           ctx.shadowBlur = aim.tracking ? 14 : 6;
-          ctx.lineWidth = 3.5;
+          ctx.lineWidth = 3.6;
           ctx.beginPath();
           ctx.arc(sx, sy, radius + 4, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * progress);
           ctx.stroke();
 
-          ctx.font = '700 10px "Cascadia Mono", Consolas, ui-monospace, monospace';
+          ctx.font = '700 9.5px "Cascadia Mono", Consolas, ui-monospace, monospace';
           ctx.textAlign = 'center';
-          ctx.fillStyle = aim.tracking ? '#a8ffdf' : '#bceeff';
+          ctx.fillStyle = isGolden ? '#fff2b0' : '#ffc2ee';
           ctx.shadowColor = 'rgba(0,0,0,0.95)';
-          ctx.shadowBlur = 4;
-          const label = aim.tracking ? `LOCK ${Math.round(progress * 100)}%` : 'HOLD TO TRACK';
-          ctx.fillText(label, sx, sy - radius - 16);
+          ctx.shadowBlur = 5;
+          ctx.fillText(ghostTag, sx, sy - radius - 26);
+          ctx.fillStyle = aim.tracking ? '#a8ffdf' : lockImminent ? '#ff477e' : '#ffffff';
+          ctx.fillText(
+            aim.tracking ? `BREAKING LOCK ${Math.round(progress * 100)}%` : 'HOLD LMB TO COUNTER-TRACK',
+            sx,
+            sy - radius - 14,
+          );
           ctx.restore();
         } else {
-          // MICRO-CLUSTER: tight precision ruby-gold nodes.
+          // TRI-CLONE GHOST AMBUSH: 3 tight hot-pink sniper clones!
           microPts.push([sx, sy]);
+          microHeader = ghostTag;
           ctx.save();
-          ctx.strokeStyle = '#ff7eb6';
-          ctx.lineWidth = 1.8;
+          ctx.strokeStyle = lockImminent ? '#ff2e6e' : isGolden ? '#ffe066' : '#ff5cb8';
+          ctx.lineWidth = lockImminent ? 2.5 : 1.9;
           ctx.beginPath();
           ctx.arc(sx, sy, radius + 5, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * lifeFrac);
           ctx.stroke();
@@ -280,11 +432,10 @@ export class OverlayRenderer {
         }
       }
 
-      // Draw faint triangular constellation web connecting active Micro-Cluster nodes.
       if (microPts.length >= 2) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(255, 126, 182, 0.35)';
-        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = 'rgba(255, 102, 196, 0.42)';
+        ctx.lineWidth = 1.3;
         ctx.setLineDash([3, 5]);
         ctx.beginPath();
         for (let i = 0; i < microPts.length; i++) {
@@ -298,8 +449,43 @@ export class OverlayRenderer {
         ctx.font = '700 9px "Cascadia Mono", Consolas, ui-monospace, monospace';
         ctx.textAlign = 'center';
         ctx.fillStyle = '#ffc2dd';
-        ctx.fillText(`MICRO ×${microPts.length}`, anchor[0], anchor[1] - 24);
+        ctx.shadowColor = 'rgba(0,0,0,0.95)';
+        ctx.shadowBlur = 4;
+        ctx.fillText(`${microHeader} · CLONES ×${microPts.length}`, anchor[0], anchor[1] - 26);
         ctx.restore();
+      }
+    }
+
+    // 1b. Prism Obelisk on-screen capture label OR off-screen golden directional beacon!
+    if (aim.obeliskActive) {
+      const rx = aim.obeliskX - camX;
+      const ry = aim.obeliskY - camY;
+      const dist = Math.hypot(rx, ry);
+      const screen = this.projectToScreen(aim.obeliskX, aim.obeliskY, camX, camY, shakeX, shakeY, arenaRadius);
+      const margin = 52;
+      const onScreen =
+        screen !== null &&
+        screen[0] >= margin &&
+        screen[0] <= this.viewW - margin &&
+        screen[1] >= margin &&
+        screen[1] <= this.viewH - margin;
+
+      if (onScreen && screen) {
+        ctx.save();
+        ctx.font = '700 10px "Cascadia Mono", Consolas, ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = aim.obeliskProgress > 0 ? '#7effd4' : '#ffe26a';
+        ctx.shadowColor = 'rgba(0,0,0,0.95)';
+        ctx.shadowBlur = 5;
+        const pct = Math.round(aim.obeliskProgress * 100);
+        ctx.fillText(
+          pct > 0 ? `◈ CAPTURING OBELISK ${pct}%` : '◈ STAND INSIDE · RELIC CHEST',
+          screen[0],
+          screen[1] - 32,
+        );
+        ctx.restore();
+      } else if (dist > 10) {
+        this.drawEdgeBeacon(rx, ry, dist, '◈ PRISM OBELISK', '#ffe26a', 'rgba(255, 217, 94, 0.9)');
       }
     }
 
@@ -330,7 +516,7 @@ export class OverlayRenderer {
         let glow: string;
 
         if (p.kind === 3) {
-          text = 'OVERDRIVE!';
+          text = p.value >= 1000 ? `${(p.value / 1000).toFixed(1)}K!` : 'BREAK!';
           font = '700 15px "Cascadia Mono", Consolas, ui-monospace, monospace';
           fill = '#fff2c2';
           glow = 'rgba(255, 200, 72, 0.92)';
@@ -383,79 +569,57 @@ export class OverlayRenderer {
         screen[1] <= this.viewH - margin;
 
       if (!onScreen && dist > 10) {
-        const ang = Math.atan2(ry, rx);
-        const cx = this.viewW * 0.5;
-        const cy = this.viewH * 0.5;
-        const hw = cx - 54;
-        const hh = cy - 68;
-        const cos = Math.cos(ang);
-        const sin = Math.sin(ang);
-        const tx = Math.abs(cos) > 1e-4 ? hw / Math.abs(cos) : 1e9;
-        const ty = Math.abs(sin) > 1e-4 ? hh / Math.abs(sin) : 1e9;
-        const edgeDist = Math.min(tx, ty);
-        const ex = cx + cos * edgeDist;
-        const ey = cy + sin * edgeDist;
-
-        const pulse = 0.72 + 0.28 * Math.sin(performance.now() * 0.008);
-        ctx.save();
-        ctx.translate(ex, ey);
-        ctx.rotate(ang);
-        ctx.globalAlpha = pulse;
-        ctx.fillStyle = '#ff9c59';
-        ctx.shadowColor = 'rgba(255, 110, 80, 0.9)';
-        ctx.shadowBlur = 14;
-        ctx.beginPath();
-        ctx.moveTo(14, 0);
-        ctx.lineTo(-8, -9);
-        ctx.lineTo(-3, 0);
-        ctx.lineTo(-8, 9);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
-
-        ctx.save();
-        ctx.globalAlpha = pulse;
-        ctx.font = '600 9px "Cascadia Mono", Consolas, ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.fillStyle = '#ffd59e';
-        ctx.shadowColor = 'rgba(0,0,0,0.95)';
-        ctx.shadowBlur = 4;
-        ctx.fillText(`${bossLabel} · ${Math.round(dist)}M`, ex, ey + 20);
-        ctx.restore();
+        this.drawEdgeBeacon(rx, ry, dist, bossLabel, '#ff9c59', 'rgba(255, 110, 80, 0.9)');
       }
     }
 
-    // 4. Razor-sharp FPS Aim-Trainer Optical Crosshair (drawn over world when mouse/right-stick active).
+    // 4. Evolving Superposition Optical Crosshair + Dead-Eye Overdrive Charge Ring!
     if (aim.active) {
       const cx = this.viewW * 0.5 + aim.offsetX;
       const cy = this.viewH * 0.5 + aim.offsetY;
+      const readyDeadeye = aim.overdriveCharge >= 0.999;
       const gap = aim.hovering ? 5 : 9;
-      const arm = aim.hovering ? 9 : 7;
-      const color =
-        this.missMarkerTimer > 0
+      const arm = aim.hovering ? 10 : 7 + Math.min(4, (aim.focusMult - 1) * 1.1);
+      const color = aim.deadeyeActive
+        ? '#ffe566'
+        : this.missMarkerTimer > 0
           ? '#ff6b7f'
           : aim.tracking
             ? '#7effd4'
             : aim.hovering
-              ? '#ffe26a'
-              : '#b8f6ff';
+              ? '#ff70cc'
+              : readyDeadeye
+                ? '#ffe26a'
+                : '#b8f6ff';
 
       ctx.save();
       // Faint optical sightline from prism center to reticle.
-      ctx.strokeStyle = aim.tracking
-        ? 'rgba(126, 255, 212, 0.28)'
-        : 'rgba(168, 244, 255, 0.08)';
+      ctx.strokeStyle = aim.deadeyeActive
+        ? 'rgba(255, 224, 102, 0.36)'
+        : aim.tracking
+          ? 'rgba(126, 255, 212, 0.28)'
+          : 'rgba(168, 244, 255, 0.08)';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(this.viewW * 0.5 + shakeX, this.viewH * 0.5 + shakeY);
       ctx.lineTo(cx, cy);
       ctx.stroke();
 
-      // Dynamic 4-tick FPS precision reticle.
+      // Circular outer Dead-Eye Overdrive charge arc around reticle!
+      if (aim.overdriveCharge > 0.01 || aim.deadeyeActive) {
+        const arcPct = aim.deadeyeActive ? aim.deadeyeTimerPct : aim.overdriveCharge;
+        ctx.strokeStyle = readyDeadeye || aim.deadeyeActive ? '#ffe26a' : 'rgba(255, 120, 210, 0.52)';
+        ctx.lineWidth = readyDeadeye || aim.deadeyeActive ? 2.2 : 1.3;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 19, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * arcPct);
+        ctx.stroke();
+      }
+
+      // Dynamic 4-tick precision reticle.
       ctx.strokeStyle = color;
       ctx.shadowColor = color;
-      ctx.shadowBlur = aim.hovering || aim.tracking ? 12 : 6;
-      ctx.lineWidth = aim.hovering ? 2 : 1.5;
+      ctx.shadowBlur = aim.hovering || aim.tracking || readyDeadeye ? 12 : 6;
+      ctx.lineWidth = aim.hovering ? 2.1 : 1.5;
 
       ctx.beginPath();
       ctx.moveTo(cx - gap - arm, cy);
@@ -468,11 +632,30 @@ export class OverlayRenderer {
       ctx.lineTo(cx, cy + gap + arm);
       ctx.stroke();
 
-      // Crisp 2px center dot.
+      // Superposition Focus diagonal halo ticks at 2×+ streak!
+      if (aim.focusMult >= 2.0) {
+        const d = 13;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(cx - d, cy - d); ctx.lineTo(cx - d + 4, cy - d + 4);
+        ctx.moveTo(cx + d, cy - d); ctx.lineTo(cx + d - 4, cy - d + 4);
+        ctx.moveTo(cx - d, cy + d); ctx.lineTo(cx - d + 4, cy + d - 4);
+        ctx.moveTo(cx + d, cy + d); ctx.lineTo(cx + d - 4, cy + d - 4);
+        ctx.stroke();
+      }
+
+      // Crisp center dot.
       ctx.fillStyle = '#ffffff';
       ctx.beginPath();
-      ctx.arc(cx, cy, aim.hovering ? 2.2 : 1.6, 0, Math.PI * 2);
+      ctx.arc(cx, cy, aim.hovering ? 2.3 : 1.6, 0, Math.PI * 2);
       ctx.fill();
+
+      if (readyDeadeye && !aim.deadeyeActive) {
+        ctx.font = '700 8px "Cascadia Mono", Consolas, ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#ffe580';
+        ctx.fillText('RMB DEAD-EYE', cx, cy + 31);
+      }
 
       // Crisp X hit-marker flash on precision snap!
       if (this.hitMarkerTimer > 0) {
@@ -483,20 +666,16 @@ export class OverlayRenderer {
         ctx.lineWidth = 2.2;
         ctx.globalAlpha = hm;
         ctx.beginPath();
-        ctx.moveTo(cx - d2, cy - d2);
-        ctx.lineTo(cx - d1, cy - d1);
-        ctx.moveTo(cx + d2, cy - d2);
-        ctx.lineTo(cx + d1, cy - d1);
-        ctx.moveTo(cx - d2, cy + d2);
-        ctx.lineTo(cx - d1, cy + d1);
-        ctx.moveTo(cx + d2, cy + d2);
-        ctx.lineTo(cx + d1, cy + d1);
+        ctx.moveTo(cx - d2, cy - d2); ctx.lineTo(cx - d1, cy - d1);
+        ctx.moveTo(cx + d2, cy - d2); ctx.lineTo(cx + d1, cy - d1);
+        ctx.moveTo(cx - d2, cy + d2); ctx.lineTo(cx - d1, cy + d1);
+        ctx.moveTo(cx + d2, cy + d2); ctx.lineTo(cx + d1, cy + d1);
         ctx.stroke();
       }
       ctx.restore();
     }
 
-    // 5. Milestone / Synergy / Evolution / Drill Completion callout banners.
+    // 5. Milestone / Synergy / Evolution / Ghost Duel callout banners.
     if (this.banners.length > 0) {
       let writeIdx = 0;
       for (let i = 0; i < this.banners.length; i++) {

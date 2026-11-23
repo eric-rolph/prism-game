@@ -1,21 +1,21 @@
-# Prism
+# Prism 2.0
 
 [![Play Live](https://img.shields.io/badge/Play%20Live-prism.ericrolph.workers.dev-38bdf8)](https://prism.ericrolph.workers.dev/)
 [![Rust + WASM](https://img.shields.io/badge/Rust-WebAssembly%20%2B%20GLSL-f97316?logo=rust&logoColor=white)](https://github.com/eric-rolph/prism-game)
 
-Auto-firing light, refracted through shards you collect — paired with an **escalating FPS Mouse Aim-Trainer Overdrive layer** and a **6-movement procedural classic/modern Web Audio soundtrack**. Built in **Rust + WebAssembly + WebGL2 + TypeScript** and deployed to Cloudflare Workers (~109 kB gzip, zero external assets, strict `default-src 'none'` CSP).
+Auto-firing light, refracted through shards you collect — paired with **hostile Ghost Player Sniper Duels**, **cumulative Optical Mastery + RMB Dead-Eye Overdrive**, **6 multi-phase bosses**, **4 playable Prism Cores**, and a **6-movement procedural classic/modern Web Audio soundtrack**. Built in **Rust + WebAssembly + WebGL2 + TypeScript** and deployed to **Cloudflare Workers + SQLite Durable Objects** (~118 kB gzip, zero external assets, strict `default-src 'none'` CSP).
 
 **[▶ Play Live at prism.ericrolph.workers.dev](https://prism.ericrolph.workers.dev/)**
 
 <p align="center">
   <a href="https://prism.ericrolph.workers.dev/">
-    <img src="docs/preview-title.png" alt="Prism asymmetric editorial title screen with live mouse-reactive refracting crystal prism" width="760" />
+    <img src="docs/preview-title.png" alt="Prism 2.0 asymmetric editorial title screen with 4 playable Prism Cores, Pilot Callsign, and Live Ghost Net uplink" width="760" />
   </a>
 </p>
 
 <p align="center">
   <a href="https://prism.ericrolph.workers.dev/">
-    <img src="docs/preview.png" alt="Prism live combat — faceted rainbow prism, FPS Aim-Trainer Smooth Track orb, optical crosshair, diamond gems, and laser beams" width="760" />
+    <img src="docs/preview.png" alt="Prism 2.0 live combat — hostile Pink Ghost Player Sniper painting a live laser sightline, Optical Mastery & Dead-Eye HUD, and Phase Dash reach" width="760" />
   </a>
 </p>
 
@@ -23,21 +23,30 @@ Auto-firing light, refracted through shards you collect — paired with an **esc
 
 - **Keyboard + Mouse (Full Hybrid Mode):**
   - `WASD` / Arrow keys — glide across the 3D sphere
-  - **Mouse Aim + Left Click (`LMB`)** — snap-flick **Resonance Nodes** or fire precision-crit **Focused Prism Lances** at enemies; **Hold `LMB`** on moving **Smooth Track Orbs** to charge **Arc Overload**
-  - `Space` / `Shift` / Right Click (`RMB`) — Phase Dash (grants brief altitude jump + i-frames + blast)
-  - `1` / `2` / `3` — pick shard upgrade (`R` Reroll, `X` Skip) · `Esc` — Pause & Build Spectrum
-- **Twin-Stick Gamepad:** Left stick / D-pad move · **Right stick** steers the optical focus reticle · `RT`/`RB` fire/track · `A`/`LT` dash · `Start` pause · D-pad + `A`/`Y`/`B` in shard picker
+  - **Mouse Aim + Left Click (`LMB`)** — counter-snipe hostile **Pink Ghost Player Snipers**, shatter **Boss Weakpoints / Lattice Relays / Reflector Rear Cores**, or fire precision-crit **Focused Prism Lances** (modified by your shards!); **Hold `LMB`** on orbital **Track Hunter Ghosts** to break their lock
+  - **Right Click (`RMB`) / `Q`** — trigger **Prismatic Dead-Eye Overdrive** when 100% charged (`0.32×` time-dilation — sweep cursor to paint up to 6 golden orbital rail locks!); falls back to **Phase Dash** while charging
+  - `Space` / `Shift` — **Phase Dash** (scales from `125M → 317M+` with `Phase Step` & `Momentum` and leaves a damaging **Chromatic Warp Ribbon**)
+  - `1` / `2` / `3` — pick shard / evolution / Hyper-Prism Overclock (`R` Reroll, `X` Skip, click `BANISH` on any card to permanently prune it) · `Esc` — Pause & Build Spectrum
+- **Twin-Stick Gamepad:** Left stick / D-pad move · **Right stick** steers the optical crosshair · `RT`/`RB` snipe/track · `LB` Dead-Eye Overdrive · `A`/`LT` Phase Dash · `Start` pause · D-pad + `A`/`Y`/`B` in shard picker
 - **Touch:** Drag anywhere for a virtual analog stick · Double-tap to Dash
 
-## Core Loop & FPS Aim-Trainer Overdrive
+## Core Loop, Ghost Sniper Duels & 6-Boss Escalation
 
-1. **Survive 15:00 or Shatter 3 Bosses** (*Prism Sentinel*, *Hydra*, and the *Void Prism* — then unlock **Endless Overdrive**).
-2. **Collect Diamond Radiance Gems → Evolve Your Spectrum:** Choose from **23 shards**, **19 synergies**, and **5 level-6 evolutions** on holographic 3D-tilt prism cards with bespoke optical SVG glyphs and live synergy-unlock callouts.
-3. **Optional Bonus Skill Layer — FPS Aim-Trainer Resonance Drills (Adaptive Tiers 1–10):**
-   - **Flick Chain (Wide-Angle Flicking & Target Switching):** Snap-click a sequence of 3–5 shrinking golden nodes linked by guiding vectors to detonate a **Prismatic Supernova**.
-   - **Smooth Tracking (Continuous Velocity-Matched Tracking):** Hold `LMB` / `RT` smoothly over a weaving **Kinetic Track Orb** to charge its lock ring to 100% and unleash **Arc Overload** chain lightning.
-   - **Micro-Cluster (Precision Micro-Adjustments):** Rapidly shatter 3 tight ruby-gold nodes to trigger **Triple Prism Convergence** cross-slicing rail beams.
-   - **Direct Precision Crits:** Clicking directly on any enemy or boss fires a high-damage piercing **Focused Prism Lance** (live accuracy %, tier, and chain combo tracked in HUD & post-run dossier).
+1. **15:00 Run · 6 Distinct Multi-Phase Bosses (Target Rank 45–50 + Endless Overclock):**
+   - `2:30` **The Prism Lattice** (rotating crystal shield relays — click relays to stagger)
+   - `5:00` **Prism Sentinel** (armored beam fortress with glowing breakable shield)
+   - `7:30` **The Mirror Sovereign** (telegraphing sniper clone boss — counter-snipe its mirror lock!)
+   - `10:00` **Chromatic Hydra** (multi-headed radial barrage titan)
+   - `12:30` **The Chrono Eclipse** (orbiting Lunar Prisms — snipe prisms to halt time-freeze rings)
+   - `14:00` **Void Prism — Apex Finale** (3-phase grand encounter unlocking **Endless Overdrive**)
+   - Every boss and captured **Golden Prism Obelisk** drops a **Relic Chest** (`+2` shard levels + full hull heal + Reroll + Banish).
+2. **4 Playable Prism Cores + 13 Tactical Enemy Archetypes:**
+   - Choose *Sniper Lens*, *Phase Blade*, *Refraction Nova*, or *Resonance Conduit* on launch.
+   - Fight 13 distinct enemy behaviors including **Weaver** laser-tether pairs, **Reflector** directional mirror shields (flank or snipe rear weakpoint), **Anchor** gravity wells, **Stalker** predictive teleporters, and fleeing golden **Carrier** loot beetles.
+3. **Hostile Ghost Player Sniper Network & Cumulative Optical Mastery:**
+   - Completed runs upload asynchronously to a **Cloudflare SQLite Durable Object** (`/api/ghosts`), letting real players' callsigns & builds invade other arenas as hostile Pink Spectral Snipers (plus 8 built-in Ace Phantoms & rare **Golden Ace Phantoms**).
+   - Counter-sniping Ghosts builds permanent **Optical Mastery Stacks** (`+6%` global DMG, `+2%` crit per stack), accelerates auto-salvo cadence via live **Focus Streak (`1×→5×`)**, unlocks **4 Milestone Perks** at `3 / 7 / 12 / 20` stacks (*Weakpoint Sight*, *Prism Ricochet*, *Phase Refund*, *Spectral Overclock*), and charges **RMB Prismatic Dead-Eye Overdrive**.
+   - **Shards Directly Transform Mouse Sniping:** `Split` adds wing-lances, `Refract` bounces shots, `Lens` widens hitboxes & rails, `Chromatic` applies Prism Mark (`+35%` DMG + RGB burst), `Echo` fires a 120ms ghost-strike, `Frost` slows Ghost lock timers, `Cascade` chain-detonates Ghost kills, `Phase Step` refunds Dash on hit, and `Luck` spawns Golden Ace Phantoms.
 
 ## Procedural Classic & Modern Adaptive Soundtrack (`web/src/music.ts`)
 
@@ -60,7 +69,7 @@ Auto-firing light, refracted through shards you collect — paired with an **esc
 ## Local Development
 
 ```bash
-# Run deterministic Rust simulation, spatial-grid, boss-relief & aim-trainer tests (21 tests)
+# Run deterministic Rust simulation, Ghost Duel, 6-boss & Dash scaling tests (25 tests)
 cargo test
 
 # Build optimized release WebAssembly module
@@ -77,23 +86,26 @@ npm run dev
 ```
 prism-game/
 ├── src/
-│   ├── lib.rs                      #[wasm_bindgen] surface + #[repr(C)] zero-copy GPU/popup/aim structs
-│   ├── game.rs                     Simulation, globe geodesics, bosses, endless mode, FPS aim-trainer drills
+│   ├── lib.rs                      #[wasm_bindgen] surface + #[repr(C)] zero-copy GPU/popup/ghost structs
+│   ├── game.rs                     Simulation, 6 bosses, 13 enemies, Ghost Sniper Duels, Dead-Eye & Obelisks
 │   ├── spatial.rs                  Zero-allocation flat spatial hash grid (O(N) broadphase & separation)
-│   ├── shards.rs                   23 shard operators, 19 synergies, 5 evolutions, compose_salvo
-│   ├── entities.rs                 Plain data structs
+│   ├── shards.rs                   23 shard operators, 19 synergies, 5 evolutions, 4 Hyper-Prism Overclocks, Banish
+│   ├── entities.rs                 PrismCore archetypes, enemies, bosses, PrismObelisk & GhostProfile
 │   ├── math.rs                     Deterministic seeded xorshift RNG
-│   └── game_tests.rs               21 deterministic unit/smoke/aim/endless tests + boss TTK harness
+│   └── game_tests.rs               25 deterministic unit/smoke/ghost/boss/dash/banish tests + boss TTK harness
+├── worker/
+│   └── index.js                    Cloudflare Worker + SQLite Durable Object live Ghost Roster API (/api/ghosts)
 └── web/
-    ├── index.html                  Bespoke chamfered UI, Title Screen, Holographic Picker, Run Story Recap
+    ├── index.html                  Bespoke UI, Prism Core selector, Optical Mastery / Dead-Eye HUD, Relic Chests
     ├── public/                     Strict CSP _headers + geometric SVG favicon
     └── src/
-        ├── main.ts                 Bootstrap, RAF loop, mouse-reactive title globe, HUD, Daily & Endless
+        ├── main.ts                 Bootstrap, RAF loop, Core selector, Ghost sync, Banish/Relic modal, Dossier
+        ├── ghosts.ts               Client GhostNetwork sync (/api/ghosts + localStorage + Ace Phantom fallback)
         ├── renderer.ts             WebGL2 5-pass Dual Kawase HDR pipeline + beam density attenuation
         ├── shaders.ts              GLSL 300 ES — faceted SDFs, beams, globe/starfield, thin-film tonemap
-        ├── overlay.ts              2D canvas optical crosshair, aim drill gauges, damage numbers, boss arrow
+        ├── overlay.ts              2D canvas Ghost callsigns, weakpoint reticles, Dead-Eye vignette & beacons
         ├── music.ts                6-movement classic/modern adaptive synth & drum soundtrack engine
-        ├── audio.ts                Harmonically-locked crystalline modal SFX + smooth tracking shimmer
+        ├── audio.ts                Harmonically-locked SFX + Ghost Lock/Shot, Dead-Eye & Obelisk synth
         ├── shardIcons.ts           23 bespoke inline-SVG optical shard emblems + 5 evolution glyphs
-        └── input.ts                Keyboard, Mouse aiming/clicking/tracking, Touch & Twin-Stick Gamepad
+        └── input.ts                Keyboard, Mouse sniping/RMB Dead-Eye, Touch & Twin-Stick Gamepad
 ```

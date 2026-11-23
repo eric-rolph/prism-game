@@ -152,15 +152,16 @@
         display: flex;
         flex-direction: column;
         gap: 7px;
-        width: 196px;
+        width: 228px;
       }
       .vitals-row { display: flex; flex-direction: column; gap: 3px; }
       .vitals-label {
         font-size: 8.5px;
-        letter-spacing: 3px;
+        letter-spacing: 2.2px;
         color: var(--dim);
         display: flex;
         justify-content: space-between;
+        white-space: nowrap;
         text-shadow: var(--hud-shadow);
       }
       #hp-bar {
@@ -201,31 +202,95 @@
         text-shadow: var(--hud-shadow);
       }
 
-      /* Live FPS Aim-Trainer HUD block (auto-appears when aiming with mouse or right stick) */
+      /* Live Optical Mastery / Ghost Duel / Dead-Eye Overdrive HUD block */
       #aim-hud {
         margin-top: 8px;
-        padding: 7px 10px;
+        padding: 8px 10px;
         border-left: 2px solid var(--gold);
-        background: linear-gradient(90deg, rgba(255, 217, 94, 0.11), rgba(6, 14, 30, 0));
+        background: linear-gradient(90deg, rgba(255, 217, 94, 0.12), rgba(6, 14, 30, 0.22));
         display: none;
         flex-direction: column;
-        gap: 3px;
+        gap: 4px;
+        width: 228px;
         text-shadow: var(--hud-shadow);
       }
       #aim-hud.shown { display: flex; }
+      #aim-hud.ghost-alert {
+        border-left-color: #ff5cc8;
+        background: linear-gradient(90deg, rgba(255, 76, 198, 0.22), rgba(6, 14, 30, 0.28));
+      }
+      #aim-hud.deadeye-ready {
+        border-left-color: #ffe875;
+        box-shadow: -3px 0 16px rgba(255, 224, 102, 0.35);
+      }
       #aim-hud-top {
         display: flex;
         justify-content: space-between;
         font-size: 9px;
         font-weight: 700;
-        letter-spacing: 2.5px;
+        letter-spacing: 2px;
         color: var(--gold);
+      }
+      #aim-stacks-val {
+        font-size: 7.5px;
+        letter-spacing: 1.2px;
+        color: #8df4ff;
+      }
+      #perk-row {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 3px;
+        margin: 1px 0;
+      }
+      .perk-pip {
+        font-size: 7px;
+        letter-spacing: 0.6px;
+        text-align: center;
+        padding: 2px 2px;
+        border: 1px solid rgba(184, 240, 255, 0.18);
+        color: rgba(184, 240, 255, 0.32);
+        background: rgba(2, 8, 22, 0.45);
+      }
+      .perk-pip.unlocked {
+        border-color: var(--gold);
+        color: #fff6c2;
+        background: rgba(255, 217, 94, 0.22);
+        box-shadow: 0 0 8px rgba(255, 217, 94, 0.35);
+      }
+      #overdrive-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin-top: 2px;
+      }
+      #overdrive-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 7.5px;
+        letter-spacing: 1.4px;
+        color: rgba(255, 234, 160, 0.85);
+      }
+      #overdrive-bar {
+        height: 4px;
+        background: rgba(0, 0, 0, 0.55);
+        clip-path: polygon(3px 0, 100% 0, calc(100% - 3px) 100%, 0 100%);
+        overflow: hidden;
+      }
+      #overdrive-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #ff5cc8, #7df4ff);
+        transition: width 80ms linear;
+      }
+      #overdrive-fill.ready {
+        background: linear-gradient(90deg, #ffae42, #fff4a8, #ffd95e);
+        box-shadow: 0 0 12px rgba(255, 217, 94, 0.9);
       }
       #aim-hud-sub {
         display: flex;
         justify-content: space-between;
-        font-size: 8px;
-        letter-spacing: 1.5px;
+        font-size: 7.5px;
+        letter-spacing: 1.2px;
         color: rgba(226, 248, 255, 0.78);
       }
 
@@ -489,28 +554,29 @@
         pointer-events: none;
         align-items: center;
         justify-content: flex-start;
-        padding: clamp(28px, 6vw, 84px);
+        padding: clamp(20px, 4vw, 64px);
+        overflow-y: auto;
         background: linear-gradient(
           102deg,
-          rgba(2, 5, 16, 0.88) 0%,
-          rgba(3, 8, 22, 0.62) 44%,
-          rgba(2, 5, 16, 0.08) 76%,
-          rgba(2, 5, 16, 0.32) 100%
+          rgba(2, 5, 16, 0.90) 0%,
+          rgba(3, 8, 22, 0.68) 48%,
+          rgba(2, 5, 16, 0.10) 78%,
+          rgba(2, 5, 16, 0.34) 100%
         );
       }
       #title-column {
         pointer-events: auto;
-        max-width: 530px;
+        max-width: 560px;
         display: flex;
         flex-direction: column;
-        gap: 18px;
+        gap: 12px;
       }
       #title-kicker {
         display: flex;
         align-items: center;
         gap: 10px;
         font-size: 9px;
-        letter-spacing: 4.5px;
+        letter-spacing: 4px;
         color: var(--accent);
       }
       #title-kicker::before {
@@ -521,7 +587,7 @@
       }
       #title-wordmark {
         font-family: var(--font-display);
-        font-size: clamp(64px, 10vw, 108px);
+        font-size: clamp(52px, 8vw, 88px);
         font-weight: 700;
         letter-spacing: 14px;
         line-height: 0.92;
@@ -535,28 +601,128 @@
       #title-spectrum-rule {
         height: 2px;
         width: 100%;
-        background: linear-gradient(90deg, #62f4ff 0%, #c99bff 42%, #ffd95e 72%, transparent 100%);
+        background: linear-gradient(90deg, #62f4ff 0%, #ff5cc8 38%, #c99bff 65%, #ffd95e 85%, transparent 100%);
       }
-      #title-lead {
-        font-size: 12px;
-        line-height: 1.75;
-        color: rgba(214, 244, 255, 0.80);
-        letter-spacing: 0.6px;
-        max-width: 470px;
+      #pilot-bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .pilot-field {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 4px 10px;
+        background: rgba(7, 16, 36, 0.72);
+        border: 1px solid rgba(132, 236, 255, 0.26);
+        clip-path: polygon(7px 0, 100% 0, calc(100% - 7px) 100%, 0 100%);
+      }
+      .pilot-field label {
+        font-size: 8px;
+        letter-spacing: 2px;
+        color: var(--dim);
+      }
+      #callsign-input {
+        background: transparent;
+        border: none;
+        outline: none;
+        color: #ffffff;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 2px;
+        width: 118px;
+        text-transform: uppercase;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      #ghost-net-status {
+        font-size: 8.5px;
+        letter-spacing: 1.8px;
+        color: #ff8df2;
+        padding: 4px 10px;
+        border: 1px solid rgba(255, 92, 200, 0.32);
+        background: rgba(255, 72, 188, 0.09);
+        clip-path: polygon(7px 0, 100% 0, calc(100% - 7px) 100%, 0 100%);
+      }
+      #core-section-label {
+        font-size: 8px;
+        letter-spacing: 3px;
+        color: var(--dim);
+        margin-bottom: -6px;
+      }
+      #core-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+      }
+      @media (max-width: 560px) {
+        #core-grid { grid-template-columns: 1fr; }
+      }
+      .core-card {
+        --cc: #7df4ff;
+        padding: 9px 11px;
+        border: none;
+        text-align: left;
+        cursor: pointer;
+        font-family: var(--font-mono);
+        color: var(--ink);
+        background: linear-gradient(140deg, rgba(10, 22, 48, 0.84), rgba(4, 9, 22, 0.90));
+        clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+        box-shadow: inset 0 0 0 1px rgba(132, 236, 255, 0.22);
+        transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .core-card:hover {
+        transform: translateY(-2px);
+        box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--cc) 65%, #fff);
+      }
+      .core-card.selected {
+        background: linear-gradient(140deg, color-mix(in srgb, var(--cc) 22%, rgba(8, 18, 42, 0.92)), rgba(5, 10, 26, 0.95));
+        box-shadow: inset 0 0 0 1.8px var(--cc), 0 0 18px color-mix(in srgb, var(--cc) 28%, transparent);
+      }
+      .core-card-top {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+      }
+      .core-card-name {
+        font-family: var(--font-display);
+        font-size: 12.5px;
+        font-weight: 700;
+        letter-spacing: 2px;
+        color: #ffffff;
+        white-space: nowrap;
+      }
+      .core-card-tag {
+        font-size: 7.5px;
+        font-weight: 700;
+        letter-spacing: 1.5px;
+        color: var(--cc);
+        white-space: nowrap;
+      }
+      .core-card-desc {
+        font-size: 8.5px;
+        line-height: 1.4;
+        color: rgba(210, 240, 255, 0.76);
       }
       #title-guide {
         display: flex;
         flex-direction: column;
-        gap: 9px;
-        padding: 4px 0;
+        gap: 6px;
+        padding: 2px 0;
       }
       .guide-step {
         display: flex;
         align-items: baseline;
-        gap: 12px;
-        font-size: 10px;
-        line-height: 1.5;
-        color: rgba(196, 238, 255, 0.72);
+        gap: 10px;
+        font-size: 9.5px;
+        line-height: 1.45;
+        color: rgba(196, 238, 255, 0.74);
       }
       .guide-num {
         font-weight: 700;
@@ -564,7 +730,7 @@
         letter-spacing: 2px;
         flex-shrink: 0;
       }
-      .guide-step strong { color: #f2fdff; font-weight: 600; letter-spacing: 1px; }
+      .guide-step strong { color: #f2fdff; font-weight: 600; letter-spacing: 0.8px; }
 
       #title-actions {
         display: flex;
@@ -769,6 +935,32 @@
         color: rgba(214, 242, 255, 0.80);
         flex: 1;
       }
+      #levelup.relic-chest {
+        background: radial-gradient(circle at 50% 38%, rgba(54, 34, 6, 0.78) 0%, rgba(4, 6, 16, 0.94) 100%);
+      }
+      #levelup.relic-chest #levelup-title {
+        color: #ffe875;
+        text-shadow: 0 0 16px rgba(255, 217, 94, 0.75);
+      }
+      #levelup.relic-chest #levelup-rank {
+        color: #fff2b2;
+        text-shadow: 0 0 32px rgba(255, 200, 72, 0.85);
+      }
+      .shard-card.overclock {
+        background:
+          radial-gradient(circle at var(--mx) var(--my), rgba(255, 217, 94, 0.28), transparent 60%),
+          linear-gradient(155deg, rgba(38, 22, 6, 0.94) 0%, rgba(16, 8, 26, 0.97) 100%);
+      }
+      .shard-rarity.overclock { color: #ffe875; }
+      .shard-mouse-tag {
+        padding: 5px 8px;
+        font-size: 8px;
+        letter-spacing: 0.9px;
+        line-height: 1.4;
+        border-left: 2px solid #ff6ad5;
+        background: rgba(255, 92, 200, 0.10);
+        color: #ffd0f2;
+      }
       .shard-syn-callout {
         padding: 6px 9px;
         font-size: 8.5px;
@@ -783,6 +975,28 @@
         background: rgba(255, 217, 94, 0.14);
         color: #fff2b2;
         font-weight: 700;
+      }
+      .shard-card-foot {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 2px;
+      }
+      .shard-banish-btn {
+        background: rgba(255, 86, 118, 0.12);
+        border: 1px solid rgba(255, 107, 139, 0.36);
+        color: #ff9bb1;
+        font-family: var(--font-mono);
+        font-size: 7.5px;
+        font-weight: 700;
+        letter-spacing: 1.8px;
+        padding: 3px 8px;
+        cursor: pointer;
+        transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+      }
+      .shard-banish-btn:hover {
+        background: rgba(255, 86, 118, 0.34);
+        border-color: #ff6b8b;
+        color: #ffffff;
       }
 
       /* ── BESPOKE PAUSE DECK ───────────────────────── */
@@ -989,16 +1203,22 @@
     <!-- BESPOKE TITLE SCREEN (Asymmetric editorial over live mouse-reactive prism!) -->
     <div id="title-screen" class="overlay shown">
       <div id="title-column">
-        <div id="title-kicker">RUST + WASM + WEBGL2 · SPHERICAL ACTION ROGUELITE</div>
+        <div id="title-kicker">PRISM 2.0 · RUST + WASM + WEBGL2 · SPHERICAL ACTION ROGUELITE</div>
         <h1 id="title-wordmark">PRISM</h1>
         <div id="title-spectrum-rule"></div>
-        <div id="title-lead">
-          Glide across a luminous 3D sphere while your prism bends auto-firing light through 23 shards, 19 synergies, and 5 evolutions. Move your mouse to bend the spectrum — snap-click &amp; track golden Resonance Nodes for explosive Prism Overdrive clears.
+        <div id="pilot-bar">
+          <div class="pilot-field">
+            <label for="callsign-input">CALLSIGN</label>
+            <input id="callsign-input" type="text" maxlength="14" value="PRISM-01" autocomplete="off" spellcheck="false" />
+          </div>
+          <div id="ghost-net-status">● GHOST UPLINK · SYNCING…</div>
         </div>
+        <div id="core-section-label">SELECT PRISM CORE ARCHETYPE</div>
+        <div id="core-grid"></div>
         <div id="title-guide">
-          <div class="guide-step"><span class="guide-num">01</span><span><strong>SURVIVE 15:00 OR SHATTER 3 BOSSES</strong> — Sentinel, Hydra &amp; Void Prism (+ Endless Overdrive).</span></div>
-          <div class="guide-step"><span class="guide-num">02</span><span><strong>COLLECT CRYSTAL GEMS → EVOLVE</strong> — Fuse shards to bend beams, arcs, frost fields &amp; gravity wells.</span></div>
-          <div class="guide-step"><span class="guide-num">03</span><span><strong>FPS AIM-TRAINER OVERDRIVE</strong> — Flick chains, smooth tracking orbs &amp; micro-clusters scale with your skill.</span></div>
+          <div class="guide-step"><span class="guide-num">01</span><span><strong>15:00 RUN · 6 MULTI-PHASE BOSSES</strong> — Lattice, Sentinel, Mirror Sovereign, Hydra, Chrono Eclipse &amp; Void Prism (+ Endless).</span></div>
+          <div class="guide-step"><span class="guide-num">02</span><span><strong>GHOST SNIPER DUELS &amp; DEAD-EYE</strong> — Hostile Pink Ghosts of real players lock laser sights on you. Counter-snipe to stack permanent Optical Mastery &amp; charge <strong>RMB Dead-Eye Overdrive</strong>.</span></div>
+          <div class="guide-step"><span class="guide-num">03</span><span><strong>SHARD SYNERGIES &amp; OBELISKS</strong> — Every shard transforms auto-beams AND mouse sniping; capture Golden Obelisks for +2 Relic Chests.</span></div>
         </div>
         <div id="title-actions">
           <button id="btn-play" class="prism-btn" type="button">PLAY RUN</button>
@@ -1007,10 +1227,11 @@
         <div id="title-best"></div>
         <div id="title-keys">
           <span><span class="kbd">WASD</span>MOVE</span>
-          <span><span class="kbd">LMB</span>FLICK / HOLD TRACK</span>
-          <span><span class="kbd">SPACE</span><span class="kbd">RMB</span>DASH</span>
+          <span><span class="kbd">LMB</span>COUNTER-SNIPE / TRACK</span>
+          <span><span class="kbd">RMB</span><span class="kbd">Q</span>DEAD-EYE OVERDRIVE</span>
+          <span><span class="kbd">SPACE</span>PHASE DASH</span>
           <span><span class="kbd">1–3</span>SHARDS</span>
-          <span><span class="kbd">GAMEPAD</span>TWIN-STICK READY</span>
+          <span><span class="kbd">GAMEPAD</span>TWIN-STICK</span>
         </div>
       </div>
     </div>
@@ -1023,17 +1244,31 @@
           <div id="hp-bar"><div id="hp-fill"></div></div>
         </div>
         <div class="vitals-row">
-          <div class="vitals-label"><span>PHASE DASH</span><span id="dash-status">READY</span></div>
+          <div class="vitals-label"><span>PHASE DASH</span><span id="dash-status">READY · 125M</span></div>
           <div id="dash-bar"><div id="dash-fill"></div></div>
-          <div id="dash-hint">[SPACE · RMB · A/LT]</div>
+          <div id="dash-hint">[SPACE · SHIFT · A/LT]</div>
         </div>
         <div id="aim-hud">
           <div id="aim-hud-top">
-            <span id="aim-tier-val">AIM TIER 1</span>
-            <span id="aim-combo-val">×0</span>
+            <span id="aim-tier-val">FOCUS ×1.0</span>
+            <span id="aim-combo-val">DUELS 0</span>
+          </div>
+          <div id="aim-stacks-val">OPTICAL 0 · +0% DMG · +0% CRIT</div>
+          <div id="perk-row">
+            <span class="perk-pip" id="perk-0" title="3 Optical Stacks: Weakpoint Sight">3·SIGHT</span>
+            <span class="perk-pip" id="perk-1" title="7 Optical Stacks: Prism Ricochet">7·RICO</span>
+            <span class="perk-pip" id="perk-2" title="12 Optical Stacks: Phase Refund">12·DASH</span>
+            <span class="perk-pip" id="perk-3" title="20 Optical Stacks: Spectral Overclock">20·OVER</span>
+          </div>
+          <div id="overdrive-wrap">
+            <div id="overdrive-label">
+              <span id="overdrive-text">DEAD-EYE [RMB / Q]</span>
+              <span id="overdrive-pct">0%</span>
+            </div>
+            <div id="overdrive-bar"><div id="overdrive-fill"></div></div>
           </div>
           <div id="aim-hud-sub">
-            <span id="aim-drill-val">RESONANCE READY</span>
+            <span id="aim-drill-val">PRECISION LANCE</span>
             <span id="aim-acc-val">—% ACC</span>
           </div>
         </div>

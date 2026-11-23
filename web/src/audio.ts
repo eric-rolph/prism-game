@@ -19,6 +19,12 @@ const AUDIO_EVOLUTION = 1 << 8;
 const AUDIO_AIM_HIT = 1 << 9;
 const AUDIO_AIM_COMPLETE = 1 << 10;
 const AUDIO_AIM_MISS = 1 << 11;
+const AUDIO_GHOST_LOCK = 1 << 12;
+const AUDIO_GHOST_SHOT = 1 << 13;
+const AUDIO_DEADEYE_START = 1 << 14;
+const AUDIO_DEADEYE_VOLLEY = 1 << 15;
+const AUDIO_OBELISK_CAPTURE = 1 << 16;
+const AUDIO_WEAKPOINT_CRIT = 1 << 17;
 
 export class AudioManager {
   private ctx: AudioContext | null = null;
@@ -408,10 +414,16 @@ export class AudioManager {
       this.playKillShatter(killCount, killStreak);
     }
 
-    // 6. FPS Aim-Trainer precision audio feedback!
+    // 6. FPS Aim-Trainer & Ghost Sniper precision audio feedback!
     if (eventBits & AUDIO_AIM_HIT) this.playAimHit(aimCombo);
     if (eventBits & AUDIO_AIM_COMPLETE) this.playAimDrillComplete();
     if (eventBits & AUDIO_AIM_MISS) this.playAimMiss();
+    if (eventBits & AUDIO_GHOST_LOCK) this.playGhostLock();
+    if (eventBits & AUDIO_GHOST_SHOT) this.playGhostShot();
+    if (eventBits & AUDIO_DEADEYE_START) this.playDeadeyeStart();
+    if (eventBits & AUDIO_DEADEYE_VOLLEY) this.playDeadeyeVolley();
+    if (eventBits & AUDIO_OBELISK_CAPTURE) this.playObeliskCapture();
+    if (eventBits & AUDIO_WEAKPOINT_CRIT) this.playWeakpointCrit(aimCombo);
 
     // 7. Combat & milestone SFX.
     if (eventBits & AUDIO_DASH_BLAST) this.playDashWhoosh();
@@ -480,6 +492,96 @@ export class AudioManager {
     g.connect(this.sfxBus);
     osc.start(now);
     osc.stop(now + 0.085);
+  }
+
+  /** Distinct crystalline radar lock chirp when a hostile Pink Ghost Sniper spawns or locks on! */
+  private playGhostLock(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.sfxBus || this.sfxMuted) return;
+    const now = ctx.currentTime;
+    [0, 0.075].forEach((offset, idx) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'triangle';
+      const base = idx === 0 ? 1180 : 1560;
+      osc.frequency.setValueAtTime(base, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(base * 1.18, now + offset + 0.055);
+      g.gain.setValueAtTime(0.08, now + offset);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.065);
+      osc.connect(g);
+      g.connect(this.sfxBus!);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.07);
+    });
+  }
+
+  /** Sharp high-velocity sniper crack when an un-countered Ghost Player gets a shot off! */
+  private playGhostShot(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.sfxBus || this.sfxMuted) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(920, now);
+    osc.frequency.exponentialRampToValueAtTime(72, now + 0.16);
+    g.gain.setValueAtTime(0.16, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    osc.connect(g);
+    g.connect(this.sfxBus);
+    osc.start(now);
+    osc.stop(now + 0.19);
+    this.playFilteredNoise('bandpass', 2800, 620, 1.5, 0.14, 0.12);
+  }
+
+  /** Iconic time-dilation bass dive + shimmering crystal veil entering Prismatic Dead-Eye! */
+  private playDeadeyeStart(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.sfxBus || this.sfxMuted) return;
+    const now = ctx.currentTime;
+    const sub = ctx.createOscillator();
+    const sg = ctx.createGain();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(290, now);
+    sub.frequency.exponentialRampToValueAtTime(42, now + 0.42);
+    sg.gain.setValueAtTime(0.24, now);
+    sg.gain.exponentialRampToValueAtTime(0.0001, now + 0.48);
+    sub.connect(sg);
+    sg.connect(this.sfxBus);
+    sub.start(now);
+    sub.stop(now + 0.5);
+
+    this.playFilteredNoise('lowpass', 3600, 260, 1.2, 0.13, 0.36);
+    this.playGlassBell(this.harmonicNote(10), 0.10, 0.9, -0.4, true);
+    this.playGlassBell(this.harmonicNote(12), 0.09, 0.9, 0.4, true);
+  }
+
+  /** Cascading golden orbital rail volley when Dead-Eye releases all painted locks! */
+  private playDeadeyeVolley(): void {
+    this.playFilteredNoise('bandpass', 1400, 7400, 1.8, 0.16, 0.28);
+    [5, 7, 9, 11, 13, 15].forEach((deg, i) => {
+      setTimeout(() => {
+        this.playGlassBell(this.harmonicNote(deg), 0.12, 0.52, (i - 2.5) * 0.26, true);
+      }, i * 34);
+    });
+  }
+
+  /** Triumphant rising harmonic beacon chime upon capturing a Golden Prism Obelisk! */
+  private playObeliskCapture(): void {
+    this.playFilteredNoise('highpass', 2200, 8200, 1.2, 0.11, 0.24);
+    [3, 5, 7, 10, 12, 14].forEach((deg, i) => {
+      setTimeout(() => {
+        this.playGlassBell(this.harmonicNote(deg), 0.105, 0.85, (i - 2.5) * 0.28, true);
+      }, i * 52);
+    });
+  }
+
+  /** Hyper-crisp diamond weakpoint shatter for Boss Weakpoints / Lattice Relays / Reflector Rear! */
+  private playWeakpointCrit(combo: number): void {
+    const note = this.harmonicNote(8 + (combo % 6));
+    this.playGlassBell(note, 0.125, 0.34, -0.25, true);
+    this.playGlassBell(note * 1.5, 0.09, 0.26, 0.25, true);
+    this.playFilteredNoise('highpass', 3600, 9600, 2.0, 0.08, 0.09);
   }
 
   private playKillShatter(count: number, streak: number): void {

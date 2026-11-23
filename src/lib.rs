@@ -47,8 +47,10 @@ pub struct DamagePopup {
     pub kind: f32,
 }
 
-/// Per-frame FPS Aim-Trainer Resonance Target record. 8 × f32 = 32 bytes.
-/// `kind`: 0 = Flick Chain, 1 = Smooth Track Orb, 2 = Micro-Cluster.
+/// Per-frame Ghost Sniper Phantom / Aim-Trainer Target record. 10 × f32 = 40 bytes.
+/// `kind`: 0 = Flick Duelist, 1 = Track Hunter, 2 = Tri-Clone Sniper, 3 = Boss Weakpoint / Lunar Prism.
+/// `ghost_id`: Roster ID into the live Ghost Network (-1.0 for non-ghost boss weakpoint).
+/// `flags`: bit 0 = Golden Ace Phantom, bit 1 = Dead-Eye locked, bit 2 = sniper lock imminent (<30% time left).
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct AimTargetInstance {
@@ -60,6 +62,8 @@ pub struct AimTargetInstance {
     pub life_frac: f32,
     pub step: f32,
     pub total: f32,
+    pub ghost_id: f32,
+    pub flags: f32,
 }
 
 /// GPU instance data for a colored, glowing beam (capsule). 10 × f32 = 40 bytes.
@@ -102,6 +106,35 @@ impl Game {
 
     pub fn set_dash_input(&mut self, pressed: bool) {
         self.inner.set_dash_input(pressed);
+    }
+
+    pub fn set_overdrive_input(&mut self, pressed: bool) {
+        self.inner.set_overdrive_input(pressed);
+    }
+
+    pub fn set_prism_core(&mut self, core_idx: u8) {
+        self.inner.set_prism_core(core_idx);
+    }
+
+    pub fn prism_core(&self) -> u8 {
+        self.inner.prism_core()
+    }
+
+    pub fn clear_ghost_profiles(&mut self) {
+        self.inner.clear_ghost_profiles();
+    }
+
+    pub fn register_ghost_profile(
+        &mut self,
+        id: u32,
+        core: u8,
+        style: u8,
+        peak_rank: u32,
+        aim_tier: u32,
+        hue: f32,
+    ) {
+        self.inner
+            .register_ghost_profile(id, core, style, peak_rank, aim_tier, hue);
     }
 
     pub fn set_aim_input(
@@ -194,6 +227,69 @@ impl Game {
     }
     pub fn aim_hovering_target(&self) -> bool {
         self.inner.aim_hovering_target()
+    }
+    pub fn optical_stacks(&self) -> u32 {
+        self.inner.optical_stacks()
+    }
+    pub fn optical_perk_bits(&self) -> u32 {
+        self.inner.optical_perk_bits()
+    }
+    pub fn focus_multiplier(&self) -> f32 {
+        self.inner.focus_multiplier()
+    }
+    pub fn overdrive_charge(&self) -> f32 {
+        self.inner.overdrive_charge()
+    }
+    pub fn deadeye_active(&self) -> bool {
+        self.inner.deadeye_active()
+    }
+    pub fn deadeye_timer_pct(&self) -> f32 {
+        self.inner.deadeye_timer_pct()
+    }
+    pub fn deadeye_locks_count(&self) -> u32 {
+        self.inner.deadeye_locks_count()
+    }
+    pub fn ghost_duels_won(&self) -> u32 {
+        self.inner.ghost_duels_won()
+    }
+    pub fn ghost_snipes_taken(&self) -> u32 {
+        self.inner.ghost_snipes_taken()
+    }
+    pub fn active_ghost_id(&self) -> i32 {
+        self.inner.active_ghost_id()
+    }
+    pub fn active_ghost_is_golden(&self) -> bool {
+        self.inner.active_ghost_is_golden()
+    }
+    pub fn dash_distance_px(&self) -> f32 {
+        self.inner.dash_distance_px()
+    }
+    pub fn banish_level_choice(&mut self, slot: u8) {
+        self.inner.banish_level_choice(slot);
+    }
+    pub fn banish_charges(&self) -> u32 {
+        self.inner.banish_charges()
+    }
+    pub fn relic_chest_active(&self) -> bool {
+        self.inner.relic_chest_active()
+    }
+    pub fn overclock_count(&self) -> u32 {
+        self.inner.overclock_count()
+    }
+    pub fn obelisk_active(&self) -> bool {
+        self.inner.obelisk_active()
+    }
+    pub fn obelisk_world_x(&self) -> f32 {
+        self.inner.obelisk_camera_pos().x
+    }
+    pub fn obelisk_world_y(&self) -> f32 {
+        self.inner.obelisk_camera_pos().y
+    }
+    pub fn obelisk_progress(&self) -> f32 {
+        self.inner.obelisk_progress()
+    }
+    pub fn obelisks_captured(&self) -> u32 {
+        self.inner.obelisks_captured()
     }
 
     // --- Combat juice, telemetry & endless mode ---

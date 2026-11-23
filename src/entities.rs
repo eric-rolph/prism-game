@@ -2,6 +2,30 @@
 
 use glam::Vec2;
 
+/// Playable starter archetype chosen on the title screen.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PrismCore {
+    /// Precision mouse specialist: starts with Lens + Refract, +25% sniper DMG, +1 built-in ricochet, faster Dead-Eye.
+    SniperLens = 0,
+    /// Hyper-mobility dash assassin: starts with PhaseStep L2 + Momentum, +25% dash reach, 2× warp-slice DMG.
+    PhaseBlade = 1,
+    /// Classic bullet-heaven prism: starts with Split + Mirror, +15% auto-salvo cadence.
+    RefractionNova = 2,
+    /// Ghost Duelist specialist: starts with Cascade + Arc + 2 Optical Stacks; 2× stacks & bonus Reroll/Banish from Duels.
+    ResonanceConduit = 3,
+}
+
+impl PrismCore {
+    pub fn from_index(i: u8) -> Self {
+        match i {
+            1 => Self::PhaseBlade,
+            2 => Self::RefractionNova,
+            3 => Self::ResonanceConduit,
+            _ => Self::SniperLens,
+        }
+    }
+}
+
 pub struct Player {
     pub pos: Vec2,
     pub radius: f32,
@@ -11,6 +35,8 @@ pub struct Player {
     pub iframe_timer: f32,
     pub dash_cooldown: f32,
     pub dash_timer: f32,
+    pub dash_duration_active: f32,
+    pub dash_distance_active: f32,
     pub dash_dir: Vec2,
     pub barrier_hp: f32,
     pub barrier_max: f32,
@@ -19,15 +45,27 @@ pub struct Player {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EnemyKind {
-    Drone,
-    Brute,
-    Dasher,
-    Splitter,
-    Orbiter,
-    Emitter,
-    Pulsar,
-    Umbra,
+    Drone = 0,
+    Brute = 1,
+    Dasher = 2,
+    Splitter = 3,
+    Orbiter = 4,
+    Emitter = 5,
+    Pulsar = 6,
+    Umbra = 7,
+    /// Linked laser-tether pair: dash over the beam or snipe either anchor to snap it.
+    Weaver = 8,
+    /// Directional front mirror shield that deflects frontal auto-beams; flank or snipe rear core.
+    Reflector = 9,
+    /// Stationary gravity well that pulls the player & gems inward; high-priority snipe target.
+    Anchor = 10,
+    /// Predictive teleporter that blinks ahead of your movement vector.
+    Stalker = 11,
+    /// Fleeing golden crystalline loot beetle carrying a Vacuum Magnet + Reroll + XP cache.
+    Carrier = 12,
 }
+
+pub const ENEMY_KIND_COUNT: usize = 13;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MiniBossKind {
@@ -50,6 +88,12 @@ pub enum EnemyState {
     Shooting,
     /// Pulsar: swelling area-denial pulse.
     Pulsing,
+    /// Stalker: telegraphing predictive phase-blink destination in `charge_dir`.
+    Blinking,
+    /// Anchor: planted gravity well pulling player & gems inward.
+    Anchored,
+    /// Carrier: fleeing golden loot beetle before escaping.
+    Fleeing,
 }
 
 #[derive(Clone)]
@@ -68,6 +112,12 @@ pub struct Enemy {
     pub no_xp: bool,
     pub spawn_grace: f32,
     pub mini_boss: Option<MiniBossKind>,
+    /// Chromatic sniper mark: takes +35% damage from all sources & detonates in RGB shards on death.
+    pub prism_mark_timer: f32,
+    /// Pair identifier for linked Weaver laser-tether anchors (0 = unlinked).
+    pub link_id: u32,
+    /// When > 0, Reflector's front mirror shield is shattered by a precision snipe or flank.
+    pub shield_broken_timer: f32,
 }
 
 pub struct XpGem {
@@ -92,9 +142,18 @@ pub struct Crystal {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BossKind {
-    Sentinel,
-    Hydra,
-    VoidPrism,
+    /// 5:00 — Tri-shield bastion with radial barrier volleys & shatter stun.
+    Sentinel = 0,
+    /// 10:00 — 3 RGB elemental heads whose kill order shapes enraged patterns.
+    Hydra = 1,
+    /// 14:00 — Apex cosmic finale with void shockwaves, pull, weakpoint shards & Ghost summons.
+    VoidPrism = 2,
+    /// 2:30 — Clockwork rotating laser-spoke boss; snipe relay nodes on spokes to short-circuit beams!
+    PrismLattice = 3,
+    /// 7:30 — Fast anti-player sniper duelist that dashes, telegraphs sniper rails & spawns mirror decoys!
+    MirrorSovereign = 4,
+    /// 12:30 — Alternates Solar Flare danger lanes and Lunar Eclipse click-to-detonate prism curtains!
+    ChronoEclipse = 5,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -124,6 +183,17 @@ pub struct Boss {
     pub lobe_alive: [bool; 3],
     pub lobe_orbit: f32,
     pub fire_timer: f32,
+    // Extended multi-phase boss fields (PrismLattice, MirrorSovereign, ChronoEclipse, Weakpoints)
+    pub spoke_angle: f32,
+    pub spoke_disabled: [f32; 6],
+    pub aux_timer: f32,
+    pub stun_timer: f32,
+    pub weakpoint_angle: f32,
+    pub weakpoint_cooldown: f32,
+    pub aim_dir: Vec2,
+    pub aim_charge: f32,
+    pub decoy_angles: [f32; 2],
+    pub lunar_prisms: [(Vec2, bool); 6],
 }
 
 pub struct Beam {
@@ -213,4 +283,28 @@ pub struct VoidShell {
     pub altitude: f32, // 1.0 (spawned high) to 0.0 (landed)
     pub radius: f32,
     pub descent_speed: f32, // altitude units per second
+}
+
+/// Capturable mid-run globe objective ("Prism Obelisk"): stand inside the ring
+/// while holding off a Ghost ambush to trigger a purifying wave + Relic Chest!
+#[derive(Clone)]
+pub struct PrismObelisk {
+    pub pos: Vec2,
+    pub radius: f32,
+    pub progress: f32, // 0.0 .. 1.0
+    pub life: f32,
+    pub max_life: f32,
+    pub ambush_spawned: bool,
+}
+
+/// Real or seeded player ghost profile used to parameterize invading pink Ghost Snipers.
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug)]
+pub struct GhostProfile {
+    pub id: u32,
+    pub core: u8,
+    pub style: u8, // 0 = Flick Duelist, 1 = Track Hunter, 2 = Tri-Clone Sniper
+    pub peak_rank: u32,
+    pub aim_tier: u32,
+    pub hue: f32,
 }

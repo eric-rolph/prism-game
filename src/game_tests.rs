@@ -230,6 +230,9 @@ fn lethal_contact_kills_and_records_cause() {
         no_xp: true,
         spawn_grace: 0.0,
         mini_boss: None,
+        prism_mark_timer: 0.0,
+        link_id: 0,
+        shield_broken_timer: 0.0,
     });
     for _ in 0..120 {
         if g.is_dead() {
@@ -390,13 +393,25 @@ fn measure_boss_ttk(kind: BossKind, build: &[(ShardKind, u8)], seed: u32) -> Opt
     god_mode(&mut g);
     set_build(&mut g, build);
     match kind {
+        BossKind::PrismLattice => {
+            g.time = LATTICE_SPAWN_TIME;
+            g.maybe_spawn_lattice();
+        }
         BossKind::Sentinel => {
             g.time = SENTINEL_SPAWN_TIME;
             g.maybe_spawn_sentinel();
         }
+        BossKind::MirrorSovereign => {
+            g.time = SOVEREIGN_SPAWN_TIME;
+            g.maybe_spawn_sovereign();
+        }
         BossKind::Hydra => {
             g.time = HYDRA_SPAWN_TIME;
             g.maybe_spawn_hydra();
+        }
+        BossKind::ChronoEclipse => {
+            g.time = ECLIPSE_SPAWN_TIME;
+            g.maybe_spawn_eclipse();
         }
         BossKind::VoidPrism => {
             g.time = VOID_PRISM_SPAWN_TIME;
@@ -1041,6 +1056,9 @@ fn combat_generates_kill_streak_and_damage_popups() {
             no_xp: false,
             spawn_grace: 0.0,
             mini_boss: None,
+            prism_mark_timer: 0.0,
+            link_id: 0,
+            shield_broken_timer: 0.0,
         });
     }
     let mut saw_popup = false;
@@ -1076,6 +1094,9 @@ fn soft_separation_keeps_overlapping_enemies_from_stacking() {
             no_xp: false,
             spawn_grace: 0.0,
             mini_boss: None,
+            prism_mark_timer: 0.0,
+            link_id: 0,
+            shield_broken_timer: 0.0,
         });
     }
     for _ in 0..10 {
@@ -1170,6 +1191,9 @@ fn aim_precision_lance_direct_clicks_damage_enemies() {
         no_xp: false,
         spawn_grace: 0.0,
         mini_boss: None,
+        prism_mark_timer: 0.0,
+        link_id: 0,
+        shield_broken_timer: 0.0,
     });
     g.aim_drill_cooldown = 99.0; // keep arena clear of drills for direct-click test
     let theta = 180.0 / GLOBE_RADIUS;
@@ -1178,4 +1202,99 @@ fn aim_precision_lance_direct_clicks_damage_enemies() {
     g.update(DT);
     assert_eq!(g.aim_hits(), 1);
     assert!(g.enemies[0].hp < 500.0, "direct click should precision-crit enemy");
+}
+
+#[test]
+fn dash_length_scales_with_phase_step_and_momentum() {
+    let mut g = Game::new(1280.0, 720.0, 101);
+    let base_dist = g.dash_distance_px();
+    for _ in 0..4 {
+        g.inventory.upgrade(ShardKind::PhaseStep);
+    }
+    g.inventory.upgrade(ShardKind::Momentum);
+    let upgraded_dist = g.dash_distance_px();
+    assert!(
+        upgraded_dist > base_dist + 120.0,
+        "PhaseStep L4 + Momentum L1 should significantly increase dash reach: base={base_dist}, up={upgraded_dist}"
+    );
+}
+
+#[test]
+fn ghost_duel_grants_permanent_cumulative_optical_stacks_and_shard_synergies() {
+    let mut g = Game::new(1280.0, 720.0, 202);
+    g.set_prism_core(3); // ResonanceConduit starts with 2 optical stacks + 2x duel reward!
+    assert_eq!(g.optical_stacks(), 2);
+    g.inventory.upgrade(ShardKind::PhaseStep);
+    g.player.dash_cooldown = 2.5;
+
+    g.set_aim_input(0.0, 0.0, true, false, false);
+    for _ in 0..100 {
+        g.update(DT);
+        if !g.aim_targets().is_empty() {
+            break;
+        }
+    }
+    assert!(!g.aim_targets().is_empty());
+
+    // Complete a 3-step Flick Duelist Ghost encounter!
+    for _ in 0..3 {
+        let t = g.aim_targets()[0];
+        let rel = Vec2::new(t.x - g.camera().x, t.y - g.camera().y);
+        let d = rel.length();
+        let theta = d / GLOBE_RADIUS;
+        let screen_off = if theta > 1e-4 { rel * (theta.sin() / theta) } else { rel };
+        g.set_aim_input(screen_off.x, screen_off.y, true, true, false);
+        g.update(DT);
+        g.set_aim_input(screen_off.x, screen_off.y, true, false, false);
+        for _ in 0..5 {
+            g.update(DT);
+        }
+    }
+    assert_eq!(g.ghost_duels_won(), 1);
+    assert!(
+        g.optical_stacks() >= 4,
+        "winning a Ghost Duel must permanently add cumulative Optical Precision stacks"
+    );
+    assert!(
+        g.optical_perk_bits() & 1 != 0,
+        "3+ Optical Stacks must unlock Weakpoint Sight milestone perk"
+    );
+    assert!(
+        g.player.dash_cooldown < 1.5,
+        "PhaseStep must refund dash cooldown on Ghost counter-snipe"
+    );
+    assert!(
+        g.overdrive_charge() > 0.4,
+        "precision hits + Ghost duel must charge RMB Dead-Eye Overdrive"
+    );
+}
+
+#[test]
+fn all_six_bosses_spawn_and_drop_relic_chests() {
+    let mut g = new_game(303);
+    god_mode(&mut g);
+
+    g.time = LATTICE_SPAWN_TIME;
+    g.maybe_spawn_lattice();
+    assert_eq!(g.boss_kind_index(), 3, "PrismLattice should spawn at 2:30");
+
+    g.boss = None;
+    g.time = SOVEREIGN_SPAWN_TIME;
+    g.maybe_spawn_sovereign();
+    assert_eq!(g.boss_kind_index(), 4, "MirrorSovereign should spawn at 7:30");
+
+    g.boss = None;
+    g.time = ECLIPSE_SPAWN_TIME;
+    g.maybe_spawn_eclipse();
+    assert_eq!(g.boss_kind_index(), 5, "ChronoEclipse should spawn at 12:30");
+}
+
+#[test]
+fn banish_excludes_shard_and_deadeye_activates_when_charged() {
+    let mut g = Game::new(1280.0, 720.0, 404);
+    g.overdrive_charge = 1.0;
+    g.set_overdrive_input(true);
+    g.update(DT);
+    assert!(g.deadeye_active(), "full overdrive charge must activate Dead-Eye slow-mo");
+    assert!(g.banish_charges() >= 2);
 }

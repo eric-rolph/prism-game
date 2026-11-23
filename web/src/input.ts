@@ -22,6 +22,7 @@ export class Input {
   private touchOrigin: [number, number] = [0, 0];
   private touchVec: [number, number] = [0, 0];
   private dashPending = false;
+  private overdrivePending = false;
   private pausePending = false;
   private lastTapTime = 0;
 
@@ -38,6 +39,7 @@ export class Input {
   private padConnected = false;
   private padFireHeld = false;
   private prevPadDash = false;
+  private prevPadOverdrive = false;
   private prevPadFire = false;
   private prevPadPause = false;
   private prevPadLeft = false;
@@ -52,9 +54,14 @@ export class Input {
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
+      const targetEl = e.target as HTMLElement | null;
+      if (targetEl && (targetEl.tagName === 'INPUT' || targetEl.tagName === 'TEXTAREA')) return;
       this.keys.add(e.code);
       if (e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
         this.dashPending = true;
+      }
+      if (e.code === 'KeyQ') {
+        this.overdrivePending = true;
       }
       if (
         e.code === 'ArrowUp' ||
@@ -97,7 +104,8 @@ export class Input {
         this.mouseDown = true;
         this.aimClickPending = true;
       } else if (e.button === 2) {
-        this.dashPending = true;
+        // RMB activates Prismatic Dead-Eye Overdrive when 100% charged, else triggers Phase Dash!
+        this.overdrivePending = true;
       }
     });
 
@@ -260,12 +268,17 @@ export class Input {
       this.prevPadFire = btnRT || btnRB;
       this.padFireHeld = false;
     } else {
-      // A or LT dashes; RT or RB fires/tracks Focused Prism Lance!
+      // A or LT dashes; LB activates Dead-Eye Overdrive; RT or RB fires/tracks Precision Lance!
       const dashNow = btnA || btnLT;
       if (dashNow && !this.prevPadDash) {
         this.dashPending = true;
       }
       this.prevPadDash = dashNow;
+
+      if (btnLB && !this.prevPadOverdrive) {
+        this.overdrivePending = true;
+      }
+      this.prevPadOverdrive = btnLB;
 
       const fireNow = btnRT || btnRB;
       if (fireNow && !this.prevPadFire) {
@@ -313,6 +326,12 @@ export class Input {
     return p;
   }
 
+  public consumeOverdrive(): boolean {
+    const p = this.overdrivePending;
+    this.overdrivePending = false;
+    return p;
+  }
+
   public consumePause(): boolean {
     const p = this.pausePending;
     this.pausePending = false;
@@ -328,6 +347,7 @@ export class Input {
     this.touchId = null;
     this.touchVec = [0, 0];
     this.dashPending = false;
+    this.overdrivePending = false;
     this.pausePending = false;
     this.mouseDown = false;
     this.aimClickPending = false;

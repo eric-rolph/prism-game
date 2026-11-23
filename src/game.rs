@@ -5,9 +5,9 @@
 //! JS side can show a picker UI in response to `is_leveling_up()`.
 
 use crate::entities::{
-    Beam, Boss, BossKind, BossState, Crystal, Enemy, EnemyKind, EnemyState, FrostField, Halo,
-    InterferencePulse, MiniBossKind, Particle, Player, Projectile, PulseKind, VoidShell,
-    VoidShockwave, XpGem,
+    Beam, Boss, BossKind, BossState, Crystal, Enemy, EnemyKind, EnemyState, FrostField,
+    GhostProfile, Halo, InterferencePulse, MiniBossKind, Particle, Player, PrismCore,
+    PrismObelisk, Projectile, PulseKind, VoidShell, VoidShockwave, XpGem, ENEMY_KIND_COUNT,
 };
 
 #[cfg(test)]
@@ -15,7 +15,8 @@ use crate::entities::{
 mod game_tests;
 use crate::math::Rng;
 use crate::shards::{
-    compose_salvo, BeamRequest, EvolutionKind, Inventory, ShardKind, UpgradeOffer, SYNERGY_COUNT,
+    compose_salvo, BeamRequest, EvolutionKind, Inventory, OverclockKind, ShardKind, UpgradeOffer,
+    SYNERGY_COUNT,
 };
 use crate::spatial::SpatialGrid;
 use crate::{AimTargetInstance, BeamInstance, CircleInstance, DamagePopup};
@@ -27,6 +28,7 @@ const RANK_TIMELINE_BUCKETS: usize = 16; // minute buckets 0..15 for a 15-minute
 const UPGRADE_PICK_SHARD: u8 = 0;
 const UPGRADE_PICK_EVOLUTION: u8 = 1;
 const UPGRADE_PICK_SKIP: u8 = 2;
+const UPGRADE_PICK_OVERCLOCK: u8 = 3;
 
 #[derive(Copy, Clone)]
 enum DamageSource {
@@ -70,6 +72,9 @@ struct AimTarget {
     orbit_radius: f32,
     strafe_phase: f32,
     strafe_sign: f32,
+    ghost_id: i32,
+    golden: bool,
+    warned: bool,
 }
 
 pub struct Game {
@@ -89,8 +94,11 @@ pub struct Game {
     boss: Option<Boss>,
 
     input: Vec2,
+    player_vel: Vec2,
     jump_timer: f32, // counts down from JUMP_DURATION; altitude = sin(t/T * π)
     dash_input: bool,
+    overdrive_input: bool,
+    prism_core: PrismCore,
     seed: u32,
     rng: Rng,
 
@@ -117,10 +125,17 @@ pub struct Game {
     mine_timer: f32,
     lance_timer: f32,
 
-    // Level-up modal state.
+    // Level-up modal & Relic Chest state.
     leveling_up: bool,
     level_choices: [Option<UpgradeOffer>; 3],
     reroll_charges: u32,
+    banish_charges: u32,
+    relic_chest_active: bool,
+    pending_relic_chests: u32,
+    overclock_dmg_stacks: u32,
+    overclock_cadence_stacks: u32,
+    overclock_phase_stacks: u32,
+    overclock_count: u32,
 
     // Death / game-over state.
     dead: bool,
@@ -129,8 +144,11 @@ pub struct Game {
     halo_trail_timer: f32,
     wave_event_fired: bool,
     prism_cannon_timer: f32,
+    lattice_spawned: bool,
     sentinel_spawned: bool,
+    sovereign_spawned: bool,
     hydra_spawned: bool,
+    eclipse_spawned: bool,
     void_prism_spawned: bool,
     void_victory: bool,
     boss_breather_timer: f32,
@@ -138,12 +156,16 @@ pub struct Game {
     boss_kills: u32,
     void_shockwaves: Vec<VoidShockwave>,
     void_shells: Vec<VoidShell>,
+    obelisk: Option<PrismObelisk>,
+    obelisk_timer: f32,
+    obelisks_captured: u32,
+    next_weaver_link_id: u32,
 
     // Run telemetry (reset on restart, read at death/victory).
     damage_taken: f32,
     barrier_absorbed: f32,
     gems_collected: u32,
-    kills_by_kind: [u32; 8],
+    kills_by_kind: [u32; ENEMY_KIND_COUNT],
     peak_rank: u32,
     damage_by_source: [f32; DAMAGE_SOURCE_COUNT],
     death_cause: Option<DamageSource>,
@@ -209,6 +231,18 @@ pub struct Game {
     aim_last_hit_pos: Option<Vec2>,
     aim_targets: Vec<AimTarget>,
     aim_target_buf: Vec<AimTargetInstance>,
+    // Cumulative Optical Mastery, Ghost Sniper Roster & RMB Dead-Eye Overdrive.
+    optical_stacks: u32,
+    ghost_duels_won: u32,
+    ghost_snipes_taken: u32,
+    overdrive_charge: f32,
+    deadeye_timer: f32,
+    deadeye_locks: Vec<Vec2>,
+    ghost_profiles: Vec<GhostProfile>,
+    active_ghost_id: i32,
+    active_ghost_golden: bool,
+    pending_sniper_echoes: Vec<(f32, Vec2, f32)>,
+    spectral_salvo_counter: u32,
 
     // Draw buffers, rebuilt every frame.
     circle_buf: Vec<CircleInstance>,
@@ -223,17 +257,28 @@ const PLAYER_RADIUS: f32 = 6.0;
 const BEAM_LIFETIME: f32 = 0.14;
 const BEAM_COOLDOWN: f32 = 0.20;
 
-// Dash.
-const DASH_DISTANCE: f32 = 120.0;
-const DASH_DURATION: f32 = 0.10;
+// Dash (scales significantly with PhaseStep + Momentum + PhaseBlade core!).
+const DASH_DISTANCE: f32 = 125.0;
+const DASH_DISTANCE_PER_PHASE: f32 = 32.0;
+const DASH_DISTANCE_PER_MOMENTUM: f32 = 12.0;
+const DASH_DURATION: f32 = 0.105;
+const DASH_DURATION_PER_PHASE: f32 = 0.008;
 const DASH_COOLDOWN: f32 = 3.0;
-const DASH_BLAST_BASE_RADIUS: f32 = 92.0;
-const DASH_BLAST_RADIUS_PER_PHASE: f32 = 9.0;
-const DASH_BLAST_BASE_DAMAGE: f32 = 210.0;
-const DASH_BLAST_DAMAGE_PER_MOMENTUM: f32 = 18.0;
+const DASH_BLAST_BASE_RADIUS: f32 = 96.0;
+const DASH_BLAST_RADIUS_PER_PHASE: f32 = 11.0;
+const DASH_BLAST_BASE_DAMAGE: f32 = 225.0;
+const DASH_BLAST_DAMAGE_PER_MOMENTUM: f32 = 20.0;
 const DASH_BLAST_PUSH: f32 = 260.0;
 const DASH_BLAST_LIFETIME: f32 = 0.34;
-const DASH_BLAST_BOSS_DAMAGE_MULT: f32 = 0.40;
+const DASH_BLAST_BOSS_DAMAGE_MULT: f32 = 0.45;
+const DEADEYE_DURATION: f32 = 3.2;
+const DEADEYE_TIME_SCALE: f32 = 0.32;
+const DEADEYE_MAX_LOCKS: usize = 6;
+const OBELISK_FIRST_TIME: f32 = 75.0;
+const OBELISK_INTERVAL: f32 = 95.0;
+const OBELISK_RADIUS: f32 = 115.0;
+const OBELISK_CAPTURE_TIME: f32 = 7.5;
+const OBELISK_MAX_LIFE: f32 = 48.0;
 
 // Wave system.
 const WAVE_DURATION: f32 = 30.0;
@@ -344,6 +389,12 @@ pub const AUDIO_EVOLUTION: u32 = 1 << 8;
 pub const AUDIO_AIM_HIT: u32 = 1 << 9;
 pub const AUDIO_AIM_COMPLETE: u32 = 1 << 10;
 pub const AUDIO_AIM_MISS: u32 = 1 << 11;
+pub const AUDIO_GHOST_LOCK: u32 = 1 << 12;
+pub const AUDIO_GHOST_SHOT: u32 = 1 << 13;
+pub const AUDIO_DEADEYE_START: u32 = 1 << 14;
+pub const AUDIO_DEADEYE_VOLLEY: u32 = 1 << 15;
+pub const AUDIO_OBELISK_CAPTURE: u32 = 1 << 16;
+pub const AUDIO_WEAKPOINT_CRIT: u32 = 1 << 17;
 
 // GPU SDF shape identifiers packed into CircleInstance::shape.
 const SHAPE_ORB: f32 = 0.0;
@@ -364,9 +415,21 @@ const KILL_STREAK_WINDOW: f32 = 3.4;
 const ENEMY_SEPARATION_SPEED: f32 = 58.0;
 const BOSS_CLEAR_RADIUS: f32 = 260.0;
 
-// Boss milestones.
-const SENTINEL_SPAWN_TIME: f32 = 300.0;
-const HYDRA_SPAWN_TIME: f32 = 600.0;
+// Boss milestones (6 distinct multi-phase bosses across a 15-minute run!).
+const LATTICE_SPAWN_TIME: f32 = 150.0; // 2:30
+const LATTICE_HP: f32 = 36_000.0;
+const LATTICE_RADIUS: f32 = 42.0;
+const LATTICE_SPOKE_LENGTH: f32 = 250.0;
+const LATTICE_RELAY_DIST: f32 = 148.0;
+const SENTINEL_SPAWN_TIME: f32 = 300.0; // 5:00
+const SOVEREIGN_SPAWN_TIME: f32 = 450.0; // 7:30
+const SOVEREIGN_HP: f32 = 155_000.0;
+const SOVEREIGN_RADIUS: f32 = 34.0;
+const SOVEREIGN_DECOY_ORBIT: f32 = 115.0;
+const HYDRA_SPAWN_TIME: f32 = 600.0; // 10:00
+const ECLIPSE_SPAWN_TIME: f32 = 750.0; // 12:30
+const ECLIPSE_HP: f32 = 460_000.0;
+const ECLIPSE_RADIUS: f32 = 48.0;
 const HYDRA_HP_PER_LOBE: f32 = 100_000.0;
 const HYDRA_ORBIT_RADIUS: f32 = 58.0;
 const HYDRA_ORBIT_SPEED: f32 = 0.55;
@@ -387,7 +450,7 @@ const SENTINEL_SHIELD_HP: f32 = 4_400.0;
 const SENTINEL_SHIELD_RADIUS: f32 = 12.0;
 const SENTINEL_SHIELD_ORBIT: f32 = 72.0;
 const SENTINEL_SHIELD_SPIN: f32 = 1.35;
-const VOID_PRISM_SPAWN_TIME: f32 = 780.0; // 13:00
+const VOID_PRISM_SPAWN_TIME: f32 = 840.0; // 14:00 apex finale!
 const VOID_PRISM_HP: f32 = 700_000.0;
 const VOID_PRISM_RADIUS: f32 = 50.0;
 const VOID_PRISM_BASE_SPEED: f32 = 34.0;
@@ -583,11 +646,91 @@ fn enemy_stats(kind: EnemyKind, minute: f32) -> (f32, f32, f32, f32, [f32; 3]) {
             20.0 * dmg_scale,
             [0.45, 0.15, 0.70], // dark violet (stealth)
         ),
+        EnemyKind::Weaver => (
+            10.5,
+            290.0 * hp_scale,
+            78.0 * spd_scale,
+            16.0 * dmg_scale,
+            [1.00, 0.36, 0.18], // blazing laser-tether coral-orange
+        ),
+        EnemyKind::Reflector => (
+            15.5,
+            640.0 * hp_scale,
+            62.0 * spd_scale,
+            22.0 * dmg_scale,
+            [0.74, 0.94, 1.00], // chrome-mirror silver-cyan
+        ),
+        EnemyKind::Anchor => (
+            14.0,
+            520.0 * hp_scale,
+            44.0 * spd_scale,
+            14.0 * dmg_scale,
+            [0.48, 0.32, 1.00], // deep gravity indigo
+        ),
+        EnemyKind::Stalker => (
+            9.5,
+            245.0 * hp_scale,
+            112.0 * spd_scale,
+            22.0 * dmg_scale,
+            [0.92, 0.24, 0.92], // phase-blink neon magenta-violet
+        ),
+        EnemyKind::Carrier => (
+            13.0,
+            410.0 * hp_scale,
+            138.0 * spd_scale,
+            4.0 * dmg_scale,
+            [1.00, 0.86, 0.24], // shimmering golden loot beetle
+        ),
     }
 }
 
 fn xp_for_rank(rank: u32) -> u32 {
-    8 + rank * 6 + rank * rank * 2
+    8 + rank * 5 + (rank * rank * 3) / 2
+}
+
+fn default_ghost_profiles() -> Vec<GhostProfile> {
+    vec![
+        GhostProfile { id: 0, core: 0, style: 0, peak_rank: 34, aim_tier: 4, hue: 0.91 },
+        GhostProfile { id: 1, core: 1, style: 1, peak_rank: 41, aim_tier: 6, hue: 0.86 },
+        GhostProfile { id: 2, core: 3, style: 2, peak_rank: 38, aim_tier: 5, hue: 0.95 },
+        GhostProfile { id: 3, core: 2, style: 0, peak_rank: 47, aim_tier: 7, hue: 0.89 },
+        GhostProfile { id: 4, core: 0, style: 1, peak_rank: 29, aim_tier: 3, hue: 0.93 },
+        GhostProfile { id: 5, core: 3, style: 2, peak_rank: 52, aim_tier: 8, hue: 0.84 },
+        GhostProfile { id: 6, core: 1, style: 0, peak_rank: 44, aim_tier: 6, hue: 0.96 },
+        GhostProfile { id: 7, core: 2, style: 1, peak_rank: 60, aim_tier: 9, hue: 0.88 },
+    ]
+}
+
+fn make_boss_shell(kind: BossKind, pos: Vec2, radius: f32, hp: f32, speed: f32, contact_damage: f32) -> Boss {
+    Boss {
+        kind,
+        pos,
+        radius,
+        hp,
+        max_hp: hp,
+        speed,
+        contact_damage,
+        state: BossState::Telegraphing,
+        state_timer: BOSS_TELEGRAPH_TIME,
+        active_time: 0.0,
+        phase: 0,
+        shield_angle: 0.0,
+        shield_hp: [0.0; 3],
+        lobe_hp: [0.0; 3],
+        lobe_alive: [false; 3],
+        lobe_orbit: 0.0,
+        fire_timer: 1.4,
+        spoke_angle: 0.0,
+        spoke_disabled: [0.0; 6],
+        aux_timer: 4.5,
+        stun_timer: 0.0,
+        weakpoint_angle: 0.0,
+        weakpoint_cooldown: 0.0,
+        aim_dir: Vec2::X,
+        aim_charge: 0.0,
+        decoy_angles: [2.094, 4.188],
+        lunar_prisms: [(pos, false); 6],
+    }
 }
 
 fn smoothstep01(t: f32) -> f32 {
@@ -758,6 +901,8 @@ impl Game {
                 altitude: 0.0,
                 dash_cooldown: 0.0,
                 dash_timer: 0.0,
+                dash_duration_active: DASH_DURATION,
+                dash_distance_active: DASH_DISTANCE,
                 dash_dir: Vec2::ZERO,
                 barrier_hp: 0.0,
                 barrier_max: 0.0,
@@ -773,8 +918,11 @@ impl Game {
             crystals: Vec::new(),
             boss: None,
             input: Vec2::ZERO,
+            player_vel: Vec2::ZERO,
             jump_timer: 0.0,
             dash_input: false,
+            overdrive_input: false,
+            prism_core: PrismCore::SniperLens,
             seed,
             rng: Rng::new(seed),
             fire_timer: 0.0,
@@ -797,6 +945,13 @@ impl Game {
             leveling_up: false,
             level_choices: [None; 3],
             reroll_charges: 2,
+            banish_charges: 2,
+            relic_chest_active: false,
+            pending_relic_chests: 0,
+            overclock_dmg_stacks: 0,
+            overclock_cadence_stacks: 0,
+            overclock_phase_stacks: 0,
+            overclock_count: 0,
             dead: false,
             score: 0,
             shake_amount: 0.0,
@@ -833,15 +988,26 @@ impl Game {
             aim_track_progress: 0.0,
             aim_hovering_target: false,
             aim_last_hit_pos: None,
-            aim_targets: Vec::with_capacity(6),
-            aim_target_buf: Vec::with_capacity(6),
+            aim_targets: Vec::with_capacity(8),
+            aim_target_buf: Vec::with_capacity(14),
+            optical_stacks: 0,
+            ghost_duels_won: 0,
+            ghost_snipes_taken: 0,
+            overdrive_charge: 0.0,
+            deadeye_timer: 0.0,
+            deadeye_locks: Vec::with_capacity(DEADEYE_MAX_LOCKS),
+            ghost_profiles: default_ghost_profiles(),
+            active_ghost_id: -1,
+            active_ghost_golden: false,
+            pending_sniper_echoes: Vec::new(),
+            spectral_salvo_counter: 0,
             halo_trail_timer: 0.0,
             wave_event_fired: false,
             prism_cannon_timer: 0.0,
             damage_taken: 0.0,
             barrier_absorbed: 0.0,
             gems_collected: 0,
-            kills_by_kind: [0; 8],
+            kills_by_kind: [0; ENEMY_KIND_COUNT],
             peak_rank: 0,
             damage_by_source: [0.0; DAMAGE_SOURCE_COUNT],
             death_cause: None,
@@ -857,8 +1023,11 @@ impl Game {
             audio_kill_count: 0,
             audio_gem_count: 0,
             audio_event_bits: 0,
+            lattice_spawned: false,
             sentinel_spawned: false,
+            sovereign_spawned: false,
             hydra_spawned: false,
+            eclipse_spawned: false,
             void_prism_spawned: false,
             void_victory: false,
             boss_breather_timer: 0.0,
@@ -866,6 +1035,10 @@ impl Game {
             boss_kills: 0,
             void_shockwaves: Vec::new(),
             void_shells: Vec::new(),
+            obelisk: None,
+            obelisk_timer: OBELISK_FIRST_TIME,
+            obelisks_captured: 0,
+            next_weaver_link_id: 1,
             circle_buf: Vec::with_capacity(1024),
             beam_buf: Vec::with_capacity(256),
         }
@@ -886,6 +1059,69 @@ impl Game {
 
     pub fn set_dash_input(&mut self, pressed: bool) {
         self.dash_input = pressed;
+    }
+
+    pub fn set_overdrive_input(&mut self, pressed: bool) {
+        if pressed {
+            self.overdrive_input = true;
+        }
+    }
+
+    pub fn set_prism_core(&mut self, core_idx: u8) {
+        let core = PrismCore::from_index(core_idx);
+        self.prism_core = core;
+        // Apply starter loadout only on a fresh run (rank 0 & time == 0).
+        if self.time < 0.05 && self.rank == 0 && self.inventory.levels.iter().all(|&l| l == 0) {
+            match core {
+                PrismCore::SniperLens => {
+                    self.inventory.upgrade(ShardKind::Lens);
+                    self.inventory.upgrade(ShardKind::Refract);
+                }
+                PrismCore::PhaseBlade => {
+                    self.inventory.upgrade(ShardKind::PhaseStep);
+                    self.inventory.upgrade(ShardKind::PhaseStep);
+                    self.inventory.upgrade(ShardKind::Momentum);
+                }
+                PrismCore::RefractionNova => {
+                    self.inventory.upgrade(ShardKind::Split);
+                    self.inventory.upgrade(ShardKind::Mirror);
+                }
+                PrismCore::ResonanceConduit => {
+                    self.inventory.upgrade(ShardKind::Cascade);
+                    self.inventory.upgrade(ShardKind::Arc);
+                    self.optical_stacks = self.optical_stacks.max(2);
+                    self.reroll_charges = self.reroll_charges.max(3);
+                    self.banish_charges = self.banish_charges.max(3);
+                }
+            }
+        }
+    }
+
+    pub fn prism_core(&self) -> u8 {
+        self.prism_core as u8
+    }
+
+    pub fn clear_ghost_profiles(&mut self) {
+        self.ghost_profiles.clear();
+    }
+
+    pub fn register_ghost_profile(
+        &mut self,
+        id: u32,
+        core: u8,
+        style: u8,
+        peak_rank: u32,
+        aim_tier: u32,
+        hue: f32,
+    ) {
+        self.ghost_profiles.push(GhostProfile {
+            id,
+            core: core.min(3),
+            style: style % 3,
+            peak_rank: peak_rank.clamp(1, 999),
+            aim_tier: aim_tier.clamp(1, 10),
+            hue: hue.rem_euclid(1.0),
+        });
     }
 
     pub fn set_aim_input(
@@ -916,12 +1152,159 @@ impl Game {
 
     fn effective_player_speed(&self) -> f32 {
         let momentum = self.inventory.level(ShardKind::Momentum) as f32;
-        self.player.speed * (1.0 + momentum * MOMENTUM_SPEED_PER_LEVEL)
+        let phase_oc = 1.0 + self.overclock_phase_stacks as f32 * 0.14;
+        self.player.speed * (1.0 + momentum * MOMENTUM_SPEED_PER_LEVEL) * phase_oc
+    }
+
+    pub fn dash_distance_px(&self) -> f32 {
+        let phase = self.inventory.level(ShardKind::PhaseStep) as f32;
+        let momentum = self.inventory.level(ShardKind::Momentum) as f32;
+        let core_mult = if self.prism_core == PrismCore::PhaseBlade {
+            1.25
+        } else {
+            1.0
+        };
+        (DASH_DISTANCE
+            + phase * DASH_DISTANCE_PER_PHASE
+            + momentum * DASH_DISTANCE_PER_MOMENTUM
+            + self.overclock_phase_stacks as f32 * 36.0)
+            * core_mult
+    }
+
+    fn dash_duration_sec(&self) -> f32 {
+        let phase = self.inventory.level(ShardKind::PhaseStep) as f32;
+        DASH_DURATION + phase * DASH_DURATION_PER_PHASE
     }
 
     fn dash_cooldown_duration(&self) -> f32 {
         let momentum = self.inventory.level(ShardKind::Momentum) as f32;
-        DASH_COOLDOWN * (1.0 - momentum * MOMENTUM_DASH_REDUCTION_PER_LEVEL).max(0.50)
+        let core_mult = if self.prism_core == PrismCore::PhaseBlade {
+            0.85
+        } else {
+            1.0
+        };
+        DASH_COOLDOWN
+            * (1.0 - momentum * MOMENTUM_DASH_REDUCTION_PER_LEVEL).max(0.50)
+            * core_mult
+    }
+
+    pub fn optical_stacks(&self) -> u32 {
+        self.optical_stacks
+    }
+
+    /// Permanent cumulative Optical Precision milestones unlocked during a run:
+    /// bit 0 (3+):  WEAKPOINT SIGHT — Boss & Elite crit weakpoints illuminated (3× sniper DMG)
+    /// bit 1 (7+):  PRISM RICOCHET — Sniper hits bounce to nearby enemies/boss weakpoints
+    /// bit 2 (12+): PHASE REFUND — Counter-sniping Ghost Phantoms refunds 65–100% Dash cooldown
+    /// bit 3 (20+): SPECTRAL OVERCLOCK — Every 4th auto-salvo fires a synced precision rail at cursor
+    pub fn optical_perk_bits(&self) -> u32 {
+        let mut bits = 0u32;
+        if self.optical_stacks >= 3 {
+            bits |= 1 << 0;
+        }
+        if self.optical_stacks >= 7 {
+            bits |= 1 << 1;
+        }
+        if self.optical_stacks >= 12 {
+            bits |= 1 << 2;
+        }
+        if self.optical_stacks >= 20 {
+            bits |= 1 << 3;
+        }
+        bits
+    }
+
+    pub fn focus_multiplier(&self) -> f32 {
+        (1.0 + (self.aim_combo.min(20) as f32) * 0.20).min(5.0)
+    }
+
+    pub fn global_damage_mult(&self) -> f32 {
+        let optical = 1.0 + self.optical_stacks as f32 * 0.025;
+        let overclock = 1.0 + self.overclock_dmg_stacks as f32 * 0.12;
+        optical * overclock
+    }
+
+    pub fn global_crit_chance(&self) -> f32 {
+        let core_bonus = if self.prism_core == PrismCore::SniperLens {
+            0.08
+        } else {
+            0.0
+        };
+        (core_bonus + self.optical_stacks as f32 * 0.015).min(0.65)
+    }
+
+    pub fn effective_beam_cooldown(&self) -> f32 {
+        let focus_boost = 1.0 + (self.focus_multiplier() - 1.0) * 0.105; // up to +42% fire rate at 5x Focus!
+        let core_boost = if self.prism_core == PrismCore::RefractionNova {
+            1.15
+        } else {
+            1.0
+        };
+        let oc_boost = 1.0 + self.overclock_cadence_stacks as f32 * 0.12;
+        (BEAM_COOLDOWN / (focus_boost * core_boost * oc_boost)).max(0.085)
+    }
+
+    pub fn overdrive_charge(&self) -> f32 {
+        self.overdrive_charge.clamp(0.0, 1.0)
+    }
+
+    pub fn deadeye_active(&self) -> bool {
+        self.deadeye_timer > 0.0
+    }
+
+    pub fn deadeye_timer_pct(&self) -> f32 {
+        (self.deadeye_timer / DEADEYE_DURATION).clamp(0.0, 1.0)
+    }
+
+    pub fn deadeye_locks_count(&self) -> u32 {
+        self.deadeye_locks.len() as u32
+    }
+
+    pub fn ghost_duels_won(&self) -> u32 {
+        self.ghost_duels_won
+    }
+
+    pub fn ghost_snipes_taken(&self) -> u32 {
+        self.ghost_snipes_taken
+    }
+
+    pub fn active_ghost_id(&self) -> i32 {
+        self.active_ghost_id
+    }
+
+    pub fn active_ghost_is_golden(&self) -> bool {
+        self.active_ghost_golden
+    }
+
+    pub fn banish_charges(&self) -> u32 {
+        self.banish_charges
+    }
+
+    pub fn relic_chest_active(&self) -> bool {
+        self.relic_chest_active
+    }
+
+    pub fn overclock_count(&self) -> u32 {
+        self.overclock_count
+    }
+
+    pub fn obelisk_active(&self) -> bool {
+        self.obelisk.is_some()
+    }
+
+    pub fn obelisk_camera_pos(&self) -> Vec2 {
+        self.obelisk
+            .as_ref()
+            .map(|o| nearest_globe_pos(self.camera, o.pos))
+            .unwrap_or(self.camera)
+    }
+
+    pub fn obelisk_progress(&self) -> f32 {
+        self.obelisk.as_ref().map(|o| o.progress).unwrap_or(0.0)
+    }
+
+    pub fn obelisks_captured(&self) -> u32 {
+        self.obelisks_captured
     }
 
     fn gem_magnet_radius(&self) -> f32 {
@@ -970,6 +1353,9 @@ impl Game {
             Some(BossKind::Sentinel) => 0,
             Some(BossKind::Hydra) => 1,
             Some(BossKind::VoidPrism) => 2,
+            Some(BossKind::PrismLattice) => 3,
+            Some(BossKind::MirrorSovereign) => 4,
+            Some(BossKind::ChronoEclipse) => 5,
             None => -1,
         }
     }
@@ -1225,73 +1611,52 @@ impl Game {
         let mut pos = self.player.pos;
         move_on_globe(&mut pos, dir * self.screen_size.length() * 0.48);
 
-        match cycle % 3 {
+        match cycle % 6 {
             0 => {
-                let hp = SENTINEL_HP * 4.5 * hp_scale;
-                self.boss = Some(Boss {
-                    kind: BossKind::Sentinel,
-                    pos,
-                    radius: SENTINEL_RADIUS,
-                    hp,
-                    max_hp: hp,
-                    speed: 0.0,
-                    contact_damage: 0.0,
-                    state: BossState::Telegraphing,
-                    state_timer: BOSS_TELEGRAPH_TIME,
-                    active_time: 0.0,
-                    phase: 0,
-                    shield_angle: self.rng.angle(),
-                    shield_hp: [SENTINEL_SHIELD_HP * 2.5 * hp_scale; 3],
-                    lobe_hp: [0.0; 3],
-                    lobe_alive: [false; 3],
-                    lobe_orbit: 0.0,
-                    fire_timer: 0.0,
-                });
+                let hp = LATTICE_HP * 10.0 * hp_scale;
+                let mut b = make_boss_shell(BossKind::PrismLattice, pos, LATTICE_RADIUS, hp, 0.0, 0.0);
+                b.spoke_angle = self.rng.angle();
+                self.boss = Some(b);
             }
             1 => {
+                let hp = SENTINEL_HP * 4.5 * hp_scale;
+                let mut b = make_boss_shell(BossKind::Sentinel, pos, SENTINEL_RADIUS, hp, 0.0, 0.0);
+                b.shield_angle = self.rng.angle();
+                b.shield_hp = [SENTINEL_SHIELD_HP * 2.5 * hp_scale; 3];
+                self.boss = Some(b);
+            }
+            2 => {
+                let hp = SOVEREIGN_HP * 3.0 * hp_scale;
+                let b = make_boss_shell(BossKind::MirrorSovereign, pos, SOVEREIGN_RADIUS, hp, 0.0, 0.0);
+                self.boss = Some(b);
+            }
+            3 => {
                 let lobe = HYDRA_HP_PER_LOBE * 2.2 * hp_scale;
                 let total_hp = lobe * 3.0;
-                self.boss = Some(Boss {
-                    kind: BossKind::Hydra,
+                let mut b = make_boss_shell(
+                    BossKind::Hydra,
                     pos,
-                    radius: HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
-                    hp: total_hp,
-                    max_hp: total_hp,
-                    speed: HYDRA_BODY_SPEED * 1.15,
-                    contact_damage: HYDRA_CONTACT_DAMAGE * 1.25,
-                    state: BossState::Telegraphing,
-                    state_timer: BOSS_TELEGRAPH_TIME,
-                    active_time: 0.0,
-                    phase: 0,
-                    shield_angle: 0.0,
-                    shield_hp: [0.0; 3],
-                    lobe_hp: [lobe; 3],
-                    lobe_alive: [true; 3],
-                    lobe_orbit: self.rng.angle(),
-                    fire_timer: HYDRA_FIRE_INTERVAL * 0.5,
-                });
+                    HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
+                    total_hp,
+                    HYDRA_BODY_SPEED * 1.15,
+                    HYDRA_CONTACT_DAMAGE * 1.25,
+                );
+                b.lobe_hp = [lobe; 3];
+                b.lobe_alive = [true; 3];
+                b.lobe_orbit = self.rng.angle();
+                b.fire_timer = HYDRA_FIRE_INTERVAL * 0.5;
+                self.boss = Some(b);
+            }
+            4 => {
+                let hp = ECLIPSE_HP * 1.6 * hp_scale;
+                let b = make_boss_shell(BossKind::ChronoEclipse, pos, ECLIPSE_RADIUS, hp, 0.0, 0.0);
+                self.boss = Some(b);
             }
             _ => {
                 let hp = VOID_PRISM_HP * 1.15 * hp_scale;
-                self.boss = Some(Boss {
-                    kind: BossKind::VoidPrism,
-                    pos,
-                    radius: VOID_PRISM_RADIUS,
-                    hp,
-                    max_hp: hp,
-                    speed: 0.0,
-                    contact_damage: 0.0,
-                    state: BossState::Telegraphing,
-                    state_timer: BOSS_TELEGRAPH_TIME,
-                    active_time: 0.0,
-                    phase: 0,
-                    shield_angle: 0.0,
-                    shield_hp: [0.0; 3],
-                    lobe_hp: [0.0; 3],
-                    lobe_alive: [false; 3],
-                    lobe_orbit: 0.0,
-                    fire_timer: VOID_PRISM_SHOCKWAVE_INTERVAL_P1,
-                });
+                let mut b = make_boss_shell(BossKind::VoidPrism, pos, VOID_PRISM_RADIUS, hp, 0.0, 0.0);
+                b.fire_timer = VOID_PRISM_SHOCKWAVE_INTERVAL_P1;
+                self.boss = Some(b);
             }
         }
         self.projectiles.clear();
@@ -1374,6 +1739,7 @@ impl Game {
         match self.level_choices[slot as usize] {
             Some(UpgradeOffer::Shard(_)) => 0,
             Some(UpgradeOffer::Evolution(_)) => 1,
+            Some(UpgradeOffer::Overclock(_)) => 2,
             None => -1,
         }
     }
@@ -1384,7 +1750,33 @@ impl Game {
         match self.level_choices[slot as usize] {
             Some(UpgradeOffer::Shard(k)) => k as i32,
             Some(UpgradeOffer::Evolution(e)) => e as i32,
+            Some(UpgradeOffer::Overclock(o)) => o as i32,
             None => -1,
+        }
+    }
+
+    fn apply_shard_level(&mut self, kind: ShardKind) {
+        if !self.inventory.upgrade(kind) {
+            return;
+        }
+        if kind == ShardKind::Halo {
+            self.rebuild_halos();
+        }
+        if kind == ShardKind::Barrier {
+            self.player.barrier_max =
+                BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
+            self.player.barrier_hp = (self.player.barrier_hp + self.player.barrier_max * 0.5)
+                .min(self.player.barrier_max);
+        }
+        if kind == ShardKind::PrismHeart {
+            self.player.max_hp += PRISM_HEART_HP_PER_LEVEL;
+            self.player.hp = (self.player.hp + PRISM_HEART_HP_PER_LEVEL).min(self.player.max_hp);
+        }
+        match kind {
+            ShardKind::Arc => self.arc_timer = self.arc_timer.min(0.0),
+            ShardKind::Minefield => self.mine_timer = self.mine_timer.min(0.0),
+            ShardKind::Lance => self.lance_timer = self.lance_timer.min(0.0),
+            _ => {}
         }
     }
 
@@ -1393,30 +1785,14 @@ impl Game {
             return;
         }
         if let Some(offer) = self.level_choices[slot as usize] {
+            let is_relic = self.relic_chest_active;
             self.record_upgrade_pick(offer);
             match offer {
                 UpgradeOffer::Shard(kind) => {
-                    self.inventory.upgrade(kind);
-                    if kind == ShardKind::Halo {
-                        self.rebuild_halos();
-                    }
-                    if kind == ShardKind::Barrier {
-                        self.player.barrier_max =
-                            BARRIER_HP_PER_LEVEL * self.inventory.level(ShardKind::Barrier) as f32;
-                        self.player.barrier_hp = (self.player.barrier_hp
-                            + self.player.barrier_max * 0.5)
-                            .min(self.player.barrier_max);
-                    }
-                    if kind == ShardKind::PrismHeart {
-                        self.player.max_hp += PRISM_HEART_HP_PER_LEVEL;
-                        self.player.hp =
-                            (self.player.hp + PRISM_HEART_HP_PER_LEVEL).min(self.player.max_hp);
-                    }
-                    match kind {
-                        ShardKind::Arc => self.arc_timer = self.arc_timer.min(0.0),
-                        ShardKind::Minefield => self.mine_timer = self.mine_timer.min(0.0),
-                        ShardKind::Lance => self.lance_timer = self.lance_timer.min(0.0),
-                        _ => {}
+                    self.apply_shard_level(kind);
+                    // Relic Chests grant DOUBLE shard levels + bonus reroll + full heal!
+                    if is_relic {
+                        self.apply_shard_level(kind);
                     }
                 }
                 UpgradeOffer::Evolution(evolution) => {
@@ -1425,14 +1801,50 @@ impl Game {
                     self.audio_event_bits |= AUDIO_EVOLUTION;
                     self.screen_flash = self.screen_flash.max(0.75);
                 }
+                UpgradeOffer::Overclock(oc) => {
+                    let stacks = if is_relic { 2 } else { 1 };
+                    self.overclock_count += stacks;
+                    match oc {
+                        OverclockKind::PrismAmplify => self.overclock_dmg_stacks += stacks,
+                        OverclockKind::CadenceBoost => self.overclock_cadence_stacks += stacks,
+                        OverclockKind::HullAscension => {
+                            self.player.max_hp += 30.0 * stacks as f32;
+                            self.player.hp = self.player.max_hp;
+                        }
+                        OverclockKind::HyperPhase => self.overclock_phase_stacks += stacks,
+                    }
+                    self.audio_event_bits |= AUDIO_EVOLUTION;
+                    self.screen_flash = self.screen_flash.max(0.55);
+                }
+            }
+            if is_relic {
+                self.player.hp = self.player.max_hp;
+                self.reroll_charges += 1;
+                self.banish_charges += 1;
+                self.relic_chest_active = false;
             }
             self.record_new_synergies();
             self.leveling_up = false;
             self.level_choices = [None; 3];
-            // A single on_death can earn multiple ranks' worth of XP.
+            // A single on_death or Boss Relic Chest can trigger another modal.
             self.check_for_level_up();
         }
         // If slot was None (empty), do nothing — don't close the modal.
+    }
+
+    pub fn banish_level_choice(&mut self, slot: u8) {
+        if !self.leveling_up || self.banish_charges == 0 || (slot as usize) >= 3 {
+            return;
+        }
+        if let Some(UpgradeOffer::Shard(kind)) = self.level_choices[slot as usize] {
+            if self.inventory.banish(kind) {
+                self.banish_charges -= 1;
+                // Immediately reroll fresh choices with that shard permanently banished!
+                self.level_choices = self
+                    .inventory
+                    .roll_choices_with_overclock(&mut self.rng, self.endless_mode);
+            }
+        }
     }
 
     pub fn skip_level_up(&mut self) {
@@ -1440,6 +1852,7 @@ impl Game {
             return;
         }
         self.leveling_up = false;
+        self.relic_chest_active = false;
         self.level_choices = [None; 3];
         self.record_skip_pick();
         let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
@@ -1454,7 +1867,9 @@ impl Game {
         }
         self.reroll_charges -= 1;
         self.reroll_count += 1;
-        self.level_choices = self.inventory.roll_choices(&mut self.rng);
+        self.level_choices = self
+            .inventory
+            .roll_choices_with_overclock(&mut self.rng, self.endless_mode);
     }
 
     pub fn reroll_charges(&self) -> u32 {
@@ -1559,13 +1974,18 @@ impl Game {
         let w = self.screen_size.x;
         let h = self.screen_size.y;
         let seed = self.rng.next_u32();
+        let core = self.prism_core;
+        let ghosts = self.ghost_profiles.clone();
         *self = Self::new(w, h, seed);
+        self.ghost_profiles = ghosts;
+        self.set_prism_core(core as u8);
     }
 
     fn record_upgrade_pick(&mut self, offer: UpgradeOffer) {
         let (offer_type, offer_index) = match offer {
             UpgradeOffer::Shard(kind) => (UPGRADE_PICK_SHARD, kind as i32),
             UpgradeOffer::Evolution(evolution) => (UPGRADE_PICK_EVOLUTION, evolution as i32),
+            UpgradeOffer::Overclock(oc) => (UPGRADE_PICK_OVERCLOCK, oc as i32),
         };
         self.upgrade_pick_order.push(UpgradePick {
             time: self.time,
@@ -1600,7 +2020,7 @@ impl Game {
 
     // --- Main update ----------------------------------------------------
 
-    pub fn update(&mut self, dt: f32) {
+    pub fn update(&mut self, raw_dt: f32) {
         self.audio_beam_count = 0;
         self.audio_kill_count = 0;
         self.audio_gem_count = 0;
@@ -1613,14 +2033,40 @@ impl Game {
             return;
         }
 
+        // RMB / Q Dead-Eye Overdrive trigger (when 100% charged; falls back cleanly to Dash otherwise).
+        if self.overdrive_input {
+            self.overdrive_input = false;
+            if self.overdrive_charge >= 0.999 && self.deadeye_timer <= 0.0 {
+                self.overdrive_charge = 0.0;
+                self.deadeye_timer = DEADEYE_DURATION;
+                self.deadeye_locks.clear();
+                self.audio_event_bits |= AUDIO_DEADEYE_START;
+                self.screen_flash = self.screen_flash.max(0.45);
+                self.shake_amount = (self.shake_amount + 4.0).min(14.0);
+            } else if self.player.dash_cooldown <= 0.0 {
+                self.dash_input = true;
+            }
+        }
+
+        let deadeye_was_active = self.deadeye_timer > 0.0;
+        if self.deadeye_timer > 0.0 {
+            self.deadeye_timer = (self.deadeye_timer - raw_dt).max(0.0);
+        }
+        // World time dilates smoothly during Prismatic Dead-Eye while aim cursor moves at full speed!
+        let dt = if deadeye_was_active {
+            raw_dt * DEADEYE_TIME_SCALE
+        } else {
+            raw_dt
+        };
+
         self.time += dt;
         self.record_rank_timeline();
         self.hit_flash_positions.clear();
         self.raw_popups.clear();
 
         // Decay visual flashes & kill streak combo timer.
-        self.screen_flash = (self.screen_flash - dt * 2.6).max(0.0);
-        self.damage_flash = (self.damage_flash - dt * 3.2).max(0.0);
+        self.screen_flash = (self.screen_flash - raw_dt * 2.6).max(0.0);
+        self.damage_flash = (self.damage_flash - raw_dt * 3.2).max(0.0);
         if self.kill_streak_timer > 0.0 {
             self.kill_streak_timer = (self.kill_streak_timer - dt).max(0.0);
             if self.kill_streak_timer <= 0.0 {
@@ -1638,11 +2084,59 @@ impl Game {
             self.player.dash_cooldown -= dt;
         }
 
-        // Dash active.
+        // Dash active — distance scales strongly with PhaseStep + Momentum + PhaseBlade core,
+        // carving a luminous chromatic warp ribbon that slices enemies crossed!
+        let prev_player_pos = self.player.pos;
         if self.player.dash_timer > 0.0 {
             self.player.dash_timer -= dt;
-            let speed = DASH_DISTANCE / DASH_DURATION;
+            let seg_start = self.player.pos;
+            let dur = self.player.dash_duration_active.max(0.05);
+            let speed = self.player.dash_distance_active / dur;
             move_on_globe(&mut self.player.pos, self.player.dash_dir * speed * dt);
+            let seg_end = self.player.pos;
+
+            // Chromatic Warp Ribbon beam + dash-through slicing damage!
+            let phase_lvl = self.inventory.level(ShardKind::PhaseStep) as f32;
+            let core_slice_mult = if self.prism_core == PrismCore::PhaseBlade {
+                2.0
+            } else {
+                1.0
+            };
+            let slice_dmg = (95.0 + self.rank as f32 * 14.0 + phase_lvl * 38.0)
+                * core_slice_mult
+                * self.global_damage_mult();
+            let slice_thick = 10.0 + phase_lvl * 2.2;
+            self.beams.push(Beam {
+                start: seg_start,
+                end: seg_end,
+                life: 0.0,
+                max_life: 0.24 + phase_lvl * 0.03,
+                thickness: slice_thick * 0.45,
+                color: if self.prism_core == PrismCore::PhaseBlade {
+                    [0.36, 1.0, 0.88]
+                } else {
+                    [0.52, 0.94, 1.0]
+                },
+                is_echo: false,
+            });
+            for e in &mut self.enemies {
+                if e.hp > 0.0
+                    && capsule_circle_intersect_globe(
+                        seg_start,
+                        seg_end,
+                        slice_thick,
+                        e.pos,
+                        e.radius,
+                    )
+                {
+                    e.hp -= slice_dmg;
+                    self.total_damage_dealt += slice_dmg;
+                    if e.kind == EnemyKind::Reflector {
+                        e.shield_broken_timer = e.shield_broken_timer.max(3.5);
+                    }
+                    self.hit_flash_positions.push(e.pos);
+                }
+            }
         } else if self.dash_input && self.player.dash_cooldown <= 0.0 {
             // Start dash if there's a movement direction.
             let dir = if self.input.length_squared() > 0.01 {
@@ -1652,11 +2146,15 @@ impl Game {
             };
             let phase_step = self.inventory.level(ShardKind::PhaseStep);
             let dash_start_pos = self.player.pos;
+            let dash_dist = self.dash_distance_px();
+            let dash_dur = self.dash_duration_sec();
             self.player.dash_dir = dir;
-            self.player.dash_timer = DASH_DURATION;
+            self.player.dash_distance_active = dash_dist;
+            self.player.dash_duration_active = dash_dur;
+            self.player.dash_timer = dash_dur;
             self.player.dash_cooldown = self.dash_cooldown_duration();
             self.player.iframe_timer =
-                DASH_DURATION + phase_step as f32 * PHASE_STEP_IFRAME_PER_LEVEL;
+                dash_dur + phase_step as f32 * PHASE_STEP_IFRAME_PER_LEVEL;
             // Every dash launches a jump arc; Phase Step extends hang time.
             let phase_step_lvl = self.inventory.level(ShardKind::PhaseStep) as f32;
             self.jump_timer = JUMP_DURATION * (1.0 + phase_step_lvl * 0.35);
@@ -1714,6 +2212,10 @@ impl Game {
             let player_step = self.input * self.effective_player_speed() * dt;
             move_on_globe(&mut self.player.pos, player_step);
         }
+        if dt > 1e-4 {
+            let inst_vel = nearest_globe_delta(prev_player_pos, self.player.pos) / dt;
+            self.player_vel = self.player_vel * 0.8 + inst_vel * 0.2;
+        }
         self.camera = self.player.pos;
 
         // --- Jump arc (triggered by dash) ---
@@ -1763,12 +2265,16 @@ impl Game {
         if self.boss_breather_timer > 0.0 {
             self.boss_breather_timer = (self.boss_breather_timer - dt).max(0.0);
         }
+        self.maybe_spawn_lattice();
         self.maybe_spawn_sentinel();
+        self.maybe_spawn_sovereign();
         self.maybe_spawn_hydra();
+        self.maybe_spawn_eclipse();
         self.maybe_spawn_void_prism();
         self.maybe_spawn_endless_boss();
         self.update_boss(dt);
         self.update_void_shockwaves(dt);
+        self.update_obelisk(dt);
 
         // Spawn enemies (wave-based).
         let enemy_cap = self.enemy_cap_for_wave();
@@ -1801,13 +2307,22 @@ impl Game {
                 .then_some(b.pos)
         });
         let mut new_void_shells: Vec<VoidShell> = Vec::new();
+        let mut gravity_wells: Vec<Vec2> = Vec::new();
+        let mut weaver_links: Vec<(u32, Vec2)> = Vec::new();
+        let player_vel_snap = self.player_vel;
         for e in &mut self.enemies {
             if e.spawn_grace > 0.0 {
                 e.spawn_grace = (e.spawn_grace - dt).max(0.0);
             }
-            // Frost slow decay.
+            // Frost slow, Chromatic Prism Mark, and Reflector broken-shield decay.
             if e.slow_timer > 0.0 {
                 e.slow_timer -= dt;
+            }
+            if e.prism_mark_timer > 0.0 {
+                e.prism_mark_timer = (e.prism_mark_timer - dt).max(0.0);
+            }
+            if e.shield_broken_timer > 0.0 {
+                e.shield_broken_timer = (e.shield_broken_timer - dt).max(0.0);
             }
             let speed_mult = if e.slow_timer > 0.0 {
                 FROST_SLOW_FACTOR
@@ -1866,9 +2381,79 @@ impl Game {
                                 perp * (e.state_timer * UMBRA_WEAVE_FREQ).sin() * UMBRA_WEAVE_SPEED;
                             move_on_globe(&mut e.pos, (dir * e.speed + weave) * speed_mult * dt);
                         }
+                        EnemyKind::Reflector => {
+                            // Tracks player with frontal mirror shield facing dir (stored in charge_dir).
+                            e.charge_dir = dir;
+                            move_on_globe(&mut e.pos, dir * e.speed * speed_mult * dt);
+                        }
+                        EnemyKind::Anchor => {
+                            move_on_globe(&mut e.pos, dir * e.speed * speed_mult * dt);
+                            if to_player.length() < 210.0 {
+                                e.state = EnemyState::Anchored;
+                                e.state_timer = 0.0;
+                            }
+                        }
+                        EnemyKind::Stalker => {
+                            e.state_timer += dt;
+                            move_on_globe(&mut e.pos, dir * e.speed * speed_mult * dt);
+                            if e.state_timer >= 2.6 && to_player.length() < 340.0 && to_player.length() > 80.0 {
+                                e.state = EnemyState::Blinking;
+                                e.state_timer = 0.65;
+                                // Predict 135 px ahead of the player's current movement vector!
+                                let lead = if player_vel_snap.length_squared() > 900.0 {
+                                    player_vel_snap.normalize() * 135.0
+                                } else {
+                                    -dir * 110.0
+                                };
+                                e.charge_dir = tangent_endpoint_on_globe(player_pos, lead);
+                            }
+                        }
+                        EnemyKind::Carrier => {
+                            e.state = EnemyState::Fleeing;
+                            e.state_timer = 10.5;
+                            let perp = Vec2::new(-dir.y, dir.x);
+                            e.charge_dir = (perp * 0.85 - dir * 0.5).normalize_or_zero();
+                        }
+                        EnemyKind::Weaver => {
+                            // Gently sweeps across the arena while holding its laser tether partner.
+                            e.state_timer += dt;
+                            let perp = Vec2::new(-dir.y, dir.x);
+                            let sweep = perp * (e.state_timer * 1.1).sin() * 34.0;
+                            move_on_globe(&mut e.pos, (dir * e.speed + sweep) * speed_mult * dt);
+                            if e.link_id > 0 {
+                                weaver_links.push((e.link_id, e.pos));
+                            }
+                        }
                         _ => {
                             move_on_globe(&mut e.pos, dir * e.speed * speed_mult * dt);
                         }
+                    }
+                }
+                EnemyState::Blinking => {
+                    e.state_timer -= dt;
+                    if e.state_timer <= 0.0 {
+                        e.pos = e.charge_dir;
+                        e.state = EnemyState::Charging;
+                        e.state_timer = 0.34;
+                        e.charge_dir = nearest_globe_delta(e.pos, player_pos).normalize_or_zero();
+                    }
+                }
+                EnemyState::Anchored => {
+                    e.state_timer += dt;
+                    gravity_wells.push(e.pos);
+                    if globe_distance(e.pos, player_pos) > 300.0 {
+                        e.state = EnemyState::Drifting;
+                    }
+                }
+                EnemyState::Fleeing => {
+                    e.state_timer -= dt;
+                    let from_player = nearest_globe_delta(player_pos, e.pos).normalize_or_zero();
+                    let tang = Vec2::new(-from_player.y, from_player.x);
+                    let flee_dir = (e.charge_dir * 0.55 + from_player * 0.45 + tang * 0.35).normalize_or_zero();
+                    move_on_globe(&mut e.pos, flee_dir * e.speed * speed_mult * dt);
+                    if e.state_timer <= 0.0 {
+                        e.no_xp = true;
+                        e.hp = 0.0; // Escaped!
                     }
                 }
                 EnemyState::Telegraphing => {
@@ -1968,6 +2553,51 @@ impl Game {
                     let pull_dir = delta.normalize_or_zero();
                     move_on_globe(&mut e.pos, pull_dir * VOID_PRISM_PULL_STRENGTH * dt);
                 }
+            }
+        }
+
+        // Anchor Gravity Wells: gently pull player & nearby XP gems inward!
+        for well_pos in &gravity_wells {
+            let to_well = nearest_globe_delta(self.player.pos, *well_pos);
+            let dist = to_well.length();
+            if dist > 18.0 && dist < 155.0 && self.player.dash_timer <= 0.0 {
+                let pull = (1.0 - dist / 155.0) * 115.0;
+                move_on_globe(&mut self.player.pos, to_well.normalize_or_zero() * pull * dt);
+                self.camera = self.player.pos;
+            }
+            for g in &mut self.gems {
+                let gd = nearest_globe_delta(g.pos, *well_pos);
+                let l = gd.length();
+                if l > 12.0 && l < 155.0 {
+                    move_on_globe(&mut g.pos, gd.normalize_or_zero() * 90.0 * dt);
+                }
+            }
+        }
+
+        // Weaver Laser Tether Wire check (can be cleanly jumped/dashed over!).
+        if weaver_links.len() >= 2 && self.player.iframe_timer <= 0.0 && self.player.altitude < 0.14 {
+            let mut wire_hit = false;
+            for i in 0..weaver_links.len() {
+                for j in (i + 1)..weaver_links.len() {
+                    if weaver_links[i].0 == weaver_links[j].0 {
+                        let a = weaver_links[i].1;
+                        let b = weaver_links[j].1;
+                        if globe_distance(a, b) < 280.0
+                            && capsule_circle_intersect_globe(a, b, 3.5, self.player.pos, self.player.radius)
+                        {
+                            wire_hit = true;
+                            break;
+                        }
+                    }
+                }
+                if wire_hit {
+                    break;
+                }
+            }
+            if wire_hit {
+                self.apply_damage_to_player(16.0, DamageSource::Projectile);
+                self.player.iframe_timer = IFRAME_DURATION;
+                self.shake_amount += SHAKE_HIT_PX;
             }
         }
 
@@ -2201,7 +2831,11 @@ impl Game {
             if let Some(boss) = &self.boss {
                 if boss.state == BossState::Active {
                     let hit = match boss.kind {
-                        BossKind::Sentinel | BossKind::VoidPrism => {
+                        BossKind::Sentinel
+                        | BossKind::VoidPrism
+                        | BossKind::PrismLattice
+                        | BossKind::MirrorSovereign
+                        | BossKind::ChronoEclipse => {
                             globe_distance(boss.pos, self.player.pos)
                                 < boss.radius + self.player.radius
                         }
@@ -2230,12 +2864,21 @@ impl Game {
             return;
         }
 
-        // Fire.
+        // Fire (cadence boosted by live Focus Streak, RefractionNova core, and Cadence Overclocks).
         self.prism_cannon_timer -= dt;
         self.fire_timer -= dt;
         if self.fire_timer <= 0.0 {
             if self.fire_primary() {
-                self.fire_timer += BEAM_COOLDOWN;
+                self.fire_timer += self.effective_beam_cooldown();
+                // 20-Stack Optical Milestone: SPECTRAL OVERCLOCK fires a synchronized precision lance every 4th salvo!
+                if self.optical_stacks >= 20 && self.aim_active {
+                    self.spectral_salvo_counter += 1;
+                    if self.spectral_salvo_counter % 4 == 0 {
+                        let aim_tangent = unproject_globe_offset(self.aim_screen_offset);
+                        let aim_world = tangent_endpoint_on_globe(self.player.pos, aim_tangent);
+                        self.fire_precision_lance(aim_world, [1.0, 0.72, 1.0], 0.85, false);
+                    }
+                }
             } else {
                 self.fire_timer = 0.1;
             }
@@ -2274,7 +2917,7 @@ impl Game {
         }
 
         self.update_extra_weapons(dt);
-        self.update_aim_trainer(dt);
+        self.update_aim_trainer(dt, raw_dt, deadeye_was_active);
 
         // Beam visual ageing.
         for b in &mut self.beams {
@@ -2387,7 +3030,11 @@ impl Game {
                     // Barrier contact is aura damage, not a beam, so it bypasses
                     // Sentinel shields by design.
                     match boss.kind {
-                        BossKind::Sentinel => {
+                        BossKind::Sentinel
+                        | BossKind::VoidPrism
+                        | BossKind::PrismLattice
+                        | BossKind::MirrorSovereign
+                        | BossKind::ChronoEclipse => {
                             if globe_distance(boss.pos, self.player.pos)
                                 < BARRIER_RADIUS + boss.radius
                             {
@@ -2405,13 +3052,6 @@ impl Game {
                                             BARRIER_CONTACT_DPS * AURA_BOSS_DAMAGE_MULT * dt;
                                     }
                                 }
-                            }
-                        }
-                        BossKind::VoidPrism => {
-                            if globe_distance(boss.pos, self.player.pos)
-                                < BARRIER_RADIUS + boss.radius
-                            {
-                                boss.hp -= BARRIER_CONTACT_DPS * AURA_BOSS_DAMAGE_MULT * dt;
                             }
                         }
                     }
@@ -2581,7 +3221,9 @@ impl Game {
             }
         });
         if collected_xp > 0 {
-            self.xp += collected_xp;
+            let xp_mult = 1.0 + self.optical_stacks as f32 * 0.02;
+            let gained = ((collected_xp as f32) * xp_mult).round().max(collected_xp as f32) as u32;
+            self.xp += gained;
             self.gems_collected += collected_count;
             self.audio_gem_count += collected_count;
             self.check_for_level_up();
@@ -2611,6 +3253,8 @@ impl Game {
                     dead.no_xp,
                     dead.slow_timer > 0.0,
                     dead.mini_boss,
+                    dead.prism_mark_timer > 0.0,
+                    dead.link_id,
                 );
             }
             cascade_depth += 1;
@@ -2654,7 +3298,111 @@ impl Game {
         self.build_draw_buffers();
     }
 
-    // --- Boss milestones -----------------------------------------------
+    // --- Capturable Prism Obelisk Globe Objectives ---------------------
+
+    fn update_obelisk(&mut self, dt: f32) {
+        if self.obelisk.is_none() {
+            if self.boss.is_none() {
+                self.obelisk_timer -= dt;
+                if self.obelisk_timer <= 0.0 {
+                    let angle = self.rng.angle();
+                    let dist = self.rng.range(260.0, 380.0);
+                    let mut pos = self.player.pos;
+                    move_on_globe(&mut pos, Vec2::new(angle.cos(), angle.sin()) * dist);
+                    self.obelisk = Some(PrismObelisk {
+                        pos,
+                        radius: OBELISK_RADIUS,
+                        progress: 0.0,
+                        life: 0.0,
+                        max_life: OBELISK_MAX_LIFE,
+                        ambush_spawned: false,
+                    });
+                    self.obelisk_timer = OBELISK_INTERVAL;
+                }
+            }
+            return;
+        }
+
+        let mut captured_pos: Option<Vec2> = None;
+        let mut spawn_ambush_at: Option<Vec2> = None;
+        let mut expired = false;
+        let player_pos = self.player.pos;
+
+        if let Some(ob) = &mut self.obelisk {
+            let inside = globe_distance(ob.pos, player_pos) <= ob.radius;
+            if inside {
+                ob.progress = (ob.progress + dt / OBELISK_CAPTURE_TIME).min(1.0);
+                // Pause despawn timer while player is actively capturing!
+                if ob.progress >= 0.25 && !ob.ambush_spawned {
+                    ob.ambush_spawned = true;
+                    spawn_ambush_at = Some(ob.pos);
+                }
+                if ob.progress >= 1.0 {
+                    captured_pos = Some(ob.pos);
+                }
+            } else {
+                ob.life += dt;
+                ob.progress = (ob.progress - dt * 0.05).max(0.0);
+                if ob.life >= ob.max_life {
+                    expired = true;
+                }
+            }
+        }
+
+        if let Some(amb_pos) = spawn_ambush_at {
+            // Spawn an elite flank squad + immediately trigger a Ghost Sniper ambush!
+            self.spawn_boss_adds(amb_pos, EnemyKind::Dasher, 3, 95.0);
+            self.spawn_boss_adds(amb_pos, EnemyKind::Reflector, 1, 110.0);
+            if self.aim_active && self.aim_targets.is_empty() {
+                self.aim_drill_cooldown = 0.0;
+            }
+            self.shake_amount = (self.shake_amount + 4.0).min(12.0);
+        }
+
+        if let Some(pos) = captured_pos {
+            self.obelisk = None;
+            self.obelisks_captured += 1;
+            self.audio_event_bits |= AUDIO_OBELISK_CAPTURE;
+            self.screen_flash = self.screen_flash.max(0.75);
+            self.hit_stop_pulse = self.hit_stop_pulse.max(0.55);
+            self.shake_amount = (self.shake_amount + 12.0).min(18.0);
+            self.pulses.push(InterferencePulse {
+                pos,
+                life: 0.0,
+                max_life: 0.65,
+                max_radius: 360.0,
+                kind: PulseKind::DashBlast,
+                damage_multiplier: 1.8,
+            });
+            self.damage_area(pos, 320.0, 420.0 + self.rank as f32 * 40.0, 320.0, 0.0, 1.5);
+            self.drop_xp_burst(pos, 10, 3 + self.rank / 8, 42.0);
+            self.pending_relic_chests += 1;
+            self.check_for_level_up();
+        } else if expired {
+            self.obelisk = None;
+        }
+    }
+
+    // --- Boss milestones (6 multi-phase bosses across 15 minutes) ------
+
+    fn maybe_spawn_lattice(&mut self) {
+        if self.lattice_spawned || self.time < LATTICE_SPAWN_TIME || self.boss.is_some() {
+            return;
+        }
+        self.lattice_spawned = true;
+        let angle = self.rng.angle();
+        let dir = Vec2::new(angle.cos(), angle.sin());
+        let mut pos = self.player.pos;
+        move_on_globe(&mut pos, dir * self.screen_size.length() * 0.45);
+        let mut b = make_boss_shell(BossKind::PrismLattice, pos, LATTICE_RADIUS, LATTICE_HP, 0.0, 0.0);
+        b.spoke_angle = self.rng.angle();
+        self.boss = Some(b);
+        self.projectiles.clear();
+        self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
+        self.shake_amount += 8.0;
+        self.audio_event_bits |= AUDIO_BOSS_SPAWN;
+        self.clear_boss_entrance_crowd(pos);
+    }
 
     fn maybe_spawn_sentinel(&mut self) {
         if self.sentinel_spawned || self.time < SENTINEL_SPAWN_TIME || self.boss.is_some() {
@@ -2667,28 +3415,34 @@ impl Game {
         let mut pos = self.player.pos;
         move_on_globe(&mut pos, dir * self.screen_size.length() * 0.48);
 
-        self.boss = Some(Boss {
-            kind: BossKind::Sentinel,
-            pos,
-            radius: SENTINEL_RADIUS,
-            hp: SENTINEL_HP,
-            max_hp: SENTINEL_HP,
-            speed: 0.0,
-            contact_damage: 0.0,
-            state: BossState::Telegraphing,
-            state_timer: BOSS_TELEGRAPH_TIME,
-            active_time: 0.0,
-            phase: 0,
-            shield_angle: self.rng.angle(),
-            shield_hp: [SENTINEL_SHIELD_HP; 3],
-            lobe_hp: [0.0; 3],
-            lobe_alive: [false; 3],
-            lobe_orbit: 0.0,
-            fire_timer: 0.0,
-        });
+        let mut b = make_boss_shell(BossKind::Sentinel, pos, SENTINEL_RADIUS, SENTINEL_HP, 0.0, 0.0);
+        b.shield_angle = self.rng.angle();
+        b.shield_hp = [SENTINEL_SHIELD_HP; 3];
+        b.fire_timer = 0.0;
+        self.boss = Some(b);
         self.projectiles.clear();
         self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
         self.shake_amount += 8.0;
+        self.audio_event_bits |= AUDIO_BOSS_SPAWN;
+        self.clear_boss_entrance_crowd(pos);
+    }
+
+    fn maybe_spawn_sovereign(&mut self) {
+        if self.sovereign_spawned || self.time < SOVEREIGN_SPAWN_TIME || self.boss.is_some() {
+            return;
+        }
+        self.sovereign_spawned = true;
+        let angle = self.rng.angle();
+        let dir = Vec2::new(angle.cos(), angle.sin());
+        let mut pos = self.player.pos;
+        move_on_globe(&mut pos, dir * self.screen_size.length() * 0.46);
+        let mut b = make_boss_shell(BossKind::MirrorSovereign, pos, SOVEREIGN_RADIUS, SOVEREIGN_HP, 0.0, 0.0);
+        b.aux_timer = 2.6;
+        b.fire_timer = 2.0;
+        self.boss = Some(b);
+        self.projectiles.clear();
+        self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
+        self.shake_amount += 9.0;
         self.audio_event_bits |= AUDIO_BOSS_SPAWN;
         self.clear_boss_entrance_crowd(pos);
     }
@@ -2703,28 +3457,42 @@ impl Game {
         let mut pos = self.player.pos;
         move_on_globe(&mut pos, dir * self.screen_size.length() * 0.48);
         let total_hp = HYDRA_HP_PER_LOBE * 3.0;
-        self.boss = Some(Boss {
-            kind: BossKind::Hydra,
+        let mut b = make_boss_shell(
+            BossKind::Hydra,
             pos,
-            radius: HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
-            hp: total_hp,
-            max_hp: total_hp,
-            speed: HYDRA_BODY_SPEED,
-            contact_damage: HYDRA_CONTACT_DAMAGE,
-            state: BossState::Telegraphing,
-            state_timer: BOSS_TELEGRAPH_TIME,
-            active_time: 0.0,
-            phase: 0,
-            shield_angle: 0.0,
-            shield_hp: [0.0; 3],
-            lobe_hp: [HYDRA_HP_PER_LOBE; 3],
-            lobe_alive: [true; 3],
-            lobe_orbit: self.rng.angle(),
-            fire_timer: HYDRA_FIRE_INTERVAL * 0.5,
-        });
+            HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
+            total_hp,
+            HYDRA_BODY_SPEED,
+            HYDRA_CONTACT_DAMAGE,
+        );
+        b.lobe_hp = [HYDRA_HP_PER_LOBE; 3];
+        b.lobe_alive = [true; 3];
+        b.lobe_orbit = self.rng.angle();
+        b.fire_timer = HYDRA_FIRE_INTERVAL * 0.5;
+        self.boss = Some(b);
         self.projectiles.clear();
         self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
         self.shake_amount += 8.0;
+        self.audio_event_bits |= AUDIO_BOSS_SPAWN;
+        self.clear_boss_entrance_crowd(pos);
+    }
+
+    fn maybe_spawn_eclipse(&mut self) {
+        if self.eclipse_spawned || self.time < ECLIPSE_SPAWN_TIME || self.boss.is_some() {
+            return;
+        }
+        self.eclipse_spawned = true;
+        let angle = self.rng.angle();
+        let dir = Vec2::new(angle.cos(), angle.sin());
+        let mut pos = self.player.pos;
+        move_on_globe(&mut pos, dir * self.screen_size.length() * 0.46);
+        let mut b = make_boss_shell(BossKind::ChronoEclipse, pos, ECLIPSE_RADIUS, ECLIPSE_HP, 0.0, 0.0);
+        b.aux_timer = 6.0;
+        b.fire_timer = 1.6;
+        self.boss = Some(b);
+        self.projectiles.clear();
+        self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
+        self.shake_amount += 10.0;
         self.audio_event_bits |= AUDIO_BOSS_SPAWN;
         self.clear_boss_entrance_crowd(pos);
     }
@@ -2738,30 +3506,32 @@ impl Game {
         let dir = Vec2::new(angle.cos(), angle.sin());
         let mut pos = self.player.pos;
         move_on_globe(&mut pos, dir * self.screen_size.length() * 0.48);
-        self.boss = Some(Boss {
-            kind: BossKind::VoidPrism,
-            pos,
-            radius: VOID_PRISM_RADIUS,
-            hp: VOID_PRISM_HP,
-            max_hp: VOID_PRISM_HP,
-            speed: 0.0,
-            contact_damage: 0.0,
-            state: BossState::Telegraphing,
-            state_timer: BOSS_TELEGRAPH_TIME,
-            active_time: 0.0,
-            phase: 0,
-            shield_angle: 0.0,
-            shield_hp: [0.0; 3],
-            lobe_hp: [0.0; 3],
-            lobe_alive: [false; 3],
-            lobe_orbit: 0.0,
-            fire_timer: VOID_PRISM_SHOCKWAVE_INTERVAL_P1,
-        });
+        let mut b = make_boss_shell(BossKind::VoidPrism, pos, VOID_PRISM_RADIUS, VOID_PRISM_HP, 0.0, 0.0);
+        b.fire_timer = VOID_PRISM_SHOCKWAVE_INTERVAL_P1;
+        self.boss = Some(b);
         self.projectiles.clear();
         self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
         self.shake_amount += 10.0;
         self.audio_event_bits |= AUDIO_BOSS_SPAWN;
         self.clear_boss_entrance_crowd(pos);
+    }
+
+    fn lattice_spoke_count(boss: &Boss) -> usize {
+        if boss.phase >= 1 { 6 } else { 4 }
+    }
+
+    fn lattice_relay_pos(boss: &Boss, idx: usize) -> Vec2 {
+        let count = Self::lattice_spoke_count(boss);
+        let a = boss.spoke_angle + (idx as f32) * std::f32::consts::TAU / count as f32;
+        tangent_endpoint_on_globe(boss.pos, Vec2::new(a.cos(), a.sin()) * LATTICE_RELAY_DIST)
+    }
+
+    fn boss_weakpoint_pos(boss: &Boss) -> Vec2 {
+        let r = boss.radius + 28.0;
+        tangent_endpoint_on_globe(
+            boss.pos,
+            Vec2::new(boss.weakpoint_angle.cos(), boss.weakpoint_angle.sin()) * r,
+        )
     }
 
     fn hydra_lobe_pos(boss: &Boss, i: usize) -> Vec2 {
@@ -2784,15 +3554,32 @@ impl Game {
         let mut lobes_died: Vec<(Vec2, usize)> = Vec::new();
         let mut finish_death = false;
         let mut void_shockwave_origins: Vec<(Vec2, f32)> = Vec::new();
+        let mut boss_beam_damage = 0.0_f32;
+        let mut boss_sniper_shot: Option<(Vec2, Vec2, f32)> = None;
+        let mut boss_warp_trail: Option<(Vec2, Vec2)> = None;
+        let mut trigger_void_ghost = false;
         let rank_weapon_scale = 1.0 + self.rank_pressure() * BOSS_WEAPON_DAMAGE_RANK_MULT;
+        let player_pos_snap = self.player.pos;
+        let player_alt = self.player.altitude;
+        let player_r = self.player.radius;
 
         if let Some(boss) = &mut self.boss {
+            boss.weakpoint_angle += 1.25 * dt;
+            if boss.weakpoint_cooldown > 0.0 {
+                boss.weakpoint_cooldown = (boss.weakpoint_cooldown - dt).max(0.0);
+            }
+            if boss.stun_timer > 0.0 {
+                boss.stun_timer = (boss.stun_timer - dt).max(0.0);
+            }
             match boss.state {
                 BossState::Telegraphing => {
                     boss.state_timer -= dt;
                     let init_radius = match boss.kind {
+                        BossKind::PrismLattice => LATTICE_RADIUS,
                         BossKind::Sentinel => SENTINEL_RADIUS,
+                        BossKind::MirrorSovereign => SOVEREIGN_RADIUS,
                         BossKind::Hydra => HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
+                        BossKind::ChronoEclipse => ECLIPSE_RADIUS,
                         BossKind::VoidPrism => VOID_PRISM_RADIUS,
                     };
                     let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
@@ -2804,13 +3591,25 @@ impl Game {
                         boss.radius = init_radius;
                         activated = true;
                         match boss.kind {
+                            BossKind::PrismLattice => {
+                                boss.speed = 36.0;
+                                boss.contact_damage = 28.0;
+                            }
                             BossKind::Sentinel => {
                                 boss.speed = SENTINEL_BASE_SPEED;
                                 boss.contact_damage = 35.0;
                             }
+                            BossKind::MirrorSovereign => {
+                                boss.speed = 76.0;
+                                boss.contact_damage = 40.0;
+                            }
                             BossKind::Hydra => {
                                 boss.speed = HYDRA_BODY_SPEED;
                                 boss.contact_damage = HYDRA_CONTACT_DAMAGE;
+                            }
+                            BossKind::ChronoEclipse => {
+                                boss.speed = 42.0;
+                                boss.contact_damage = 50.0;
                             }
                             BossKind::VoidPrism => {
                                 boss.speed = VOID_PRISM_BASE_SPEED;
@@ -2824,10 +3623,152 @@ impl Game {
                     let escalation = Self::boss_escalation_tier(boss.active_time);
                     let weapon_scale =
                         rank_weapon_scale + escalation as f32 * BOSS_WEAPON_DAMAGE_ESCALATION_MULT;
-                    let dir = nearest_globe_delta(boss.pos, self.player.pos).normalize_or_zero();
-                    move_on_globe(&mut boss.pos, dir * boss.speed * dt);
+                    let stunned = boss.stun_timer > 0.0;
+                    let dir = nearest_globe_delta(boss.pos, player_pos_snap).normalize_or_zero();
+                    if !stunned {
+                        move_on_globe(&mut boss.pos, dir * boss.speed * dt);
+                    }
 
                     match boss.kind {
+                        BossKind::PrismLattice => {
+                            let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
+                            let next_phase = if hp_pct > 0.50 { 0 } else { 1 };
+                            if next_phase != boss.phase {
+                                boss.phase = next_phase;
+                                phase_changed = true;
+                            }
+                            let spin_dir = if boss.phase == 1 && ((boss.active_time / 5.0) as u32 % 2 == 1) {
+                                -1.0
+                            } else {
+                                1.0
+                            };
+                            let spin_speed = (0.48 + boss.phase as f32 * 0.22 + escalation as f32 * 0.03) * spin_dir;
+                            if !stunned {
+                                boss.spoke_angle += spin_speed * dt;
+                            }
+                            let count = Self::lattice_spoke_count(boss);
+                            for i in 0..count {
+                                if boss.spoke_disabled[i] > 0.0 {
+                                    boss.spoke_disabled[i] = (boss.spoke_disabled[i] - dt).max(0.0);
+                                } else if !stunned && player_alt < 0.14 {
+                                    let a = boss.spoke_angle + (i as f32) * std::f32::consts::TAU / count as f32;
+                                    let end = tangent_endpoint_on_globe(
+                                        boss.pos,
+                                        Vec2::new(a.cos(), a.sin()) * LATTICE_SPOKE_LENGTH,
+                                    );
+                                    if capsule_circle_intersect_globe(boss.pos, end, 5.5, player_pos_snap, player_r) {
+                                        boss_beam_damage = boss_beam_damage.max(22.0 * weapon_scale);
+                                    }
+                                }
+                            }
+                            boss.state_timer -= dt;
+                            if boss.state_timer <= 0.0 {
+                                boss.state_timer = (3.4 - boss.phase as f32 * 0.5).max(1.8);
+                                add_spawn = Some((boss.pos, EnemyKind::Weaver, 2));
+                            }
+                        }
+                        BossKind::MirrorSovereign => {
+                            let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
+                            let next_phase = if hp_pct > 0.50 { 0 } else { 1 };
+                            if next_phase != boss.phase {
+                                boss.phase = next_phase;
+                                phase_changed = true;
+                            }
+                            boss.decoy_angles[0] += (1.1 + boss.phase as f32 * 0.45) * dt;
+                            boss.decoy_angles[1] -= (0.95 + boss.phase as f32 * 0.35) * dt;
+                            if !stunned {
+                                // Periodic aggressive dash-blink across the arena!
+                                boss.aux_timer -= dt;
+                                if boss.aux_timer <= 0.0 {
+                                    boss.aux_timer = if boss.phase == 1 { 2.8 } else { 3.8 };
+                                    let old_pos = boss.pos;
+                                    let perp = Vec2::new(-dir.y, dir.x);
+                                    let side = if ((boss.active_time * 3.0) as u32 % 2) == 0 { 1.0 } else { -1.0 };
+                                    let jump = (dir * 0.4 + perp * side * 0.9).normalize_or_zero() * 195.0;
+                                    move_on_globe(&mut boss.pos, jump);
+                                    boss_warp_trail = Some((old_pos, boss.pos));
+                                    // Immediately begin charging a sniper rail from the new flank!
+                                    boss.aim_charge = 0.01;
+                                    boss.aim_dir = nearest_globe_delta(boss.pos, player_pos_snap).normalize_or_zero();
+                                }
+                                // Sniper rail charge & release!
+                                if boss.aim_charge > 0.0 {
+                                    // Tracks player smoothly during first 72% of lock, then locks line so player can Dash!
+                                    if boss.aim_charge < 0.72 {
+                                        let to_p = nearest_globe_delta(boss.pos, player_pos_snap).normalize_or_zero();
+                                        boss.aim_dir = (boss.aim_dir * 0.88 + to_p * 0.12).normalize_or_zero();
+                                    }
+                                    let lock_rate = if boss.phase == 1 { 0.68 } else { 0.54 };
+                                    boss.aim_charge += dt * lock_rate;
+                                    if boss.aim_charge >= 1.0 {
+                                        boss.aim_charge = 0.0;
+                                        boss_sniper_shot = Some((boss.pos, boss.aim_dir, 32.0 * weapon_scale));
+                                    }
+                                }
+                            } else {
+                                boss.aim_charge = 0.0;
+                            }
+                        }
+                        BossKind::ChronoEclipse => {
+                            // Alternates every 6.5s between Phase 0 (SOLAR FLARE) and Phase 1 (LUNAR ECLIPSE).
+                            boss.aux_timer -= dt;
+                            if boss.aux_timer <= 0.0 {
+                                boss.aux_timer = 6.5;
+                                boss.phase = 1 - boss.phase;
+                                phase_changed = true;
+                                if boss.phase == 1 {
+                                    // Spawn 6 dark collapsing Lunar Prisms around the player!
+                                    let base = boss.spoke_angle;
+                                    for i in 0..6 {
+                                        let a = base + (i as f32) * std::f32::consts::TAU / 6.0;
+                                        let lp = tangent_endpoint_on_globe(
+                                            player_pos_snap,
+                                            Vec2::new(a.cos(), a.sin()) * 240.0,
+                                        );
+                                        boss.lunar_prisms[i] = (lp, true);
+                                    }
+                                } else {
+                                    for i in 0..6 {
+                                        boss.lunar_prisms[i].1 = false;
+                                    }
+                                }
+                            }
+                            boss.spoke_angle += (0.55 + escalation as f32 * 0.04) * dt;
+                            if boss.phase == 0 && !stunned {
+                                // Solar Flare: 3 blazing flare corridors (Dash over!).
+                                if player_alt < 0.14 {
+                                    for i in 0..3 {
+                                        let a = boss.spoke_angle + (i as f32) * std::f32::consts::TAU / 3.0;
+                                        let end = tangent_endpoint_on_globe(
+                                            boss.pos,
+                                            Vec2::new(a.cos(), a.sin()) * 290.0,
+                                        );
+                                        if capsule_circle_intersect_globe(boss.pos, end, 7.5, player_pos_snap, player_r) {
+                                            boss_beam_damage = boss_beam_damage.max(28.0 * weapon_scale);
+                                        }
+                                    }
+                                }
+                                boss.fire_timer -= dt;
+                                if boss.fire_timer <= 0.0 {
+                                    boss.fire_timer = 1.45;
+                                    void_shockwave_origins.push((boss.pos, weapon_scale * 0.85));
+                                }
+                            } else if boss.phase == 1 {
+                                // Lunar Curtain: 6 dark prisms converge slowly inward — mouse-clicking them detonates safe pockets!
+                                for i in 0..6 {
+                                    if !boss.lunar_prisms[i].1 {
+                                        continue;
+                                    }
+                                    let to_p = nearest_globe_delta(boss.lunar_prisms[i].0, player_pos_snap);
+                                    let dist = to_p.length();
+                                    move_on_globe(&mut boss.lunar_prisms[i].0, to_p.normalize_or_zero() * 58.0 * dt);
+                                    if dist < 24.0 + player_r {
+                                        boss.lunar_prisms[i].1 = false;
+                                        boss_beam_damage = boss_beam_damage.max(26.0 * weapon_scale);
+                                    }
+                                }
+                            }
+                        }
                         BossKind::Sentinel => {
                             let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
                             let next_phase = if hp_pct > 0.60 {
@@ -2919,6 +3860,7 @@ impl Game {
                             if next_phase != boss.phase {
                                 boss.phase = next_phase;
                                 phase_changed = true;
+                                trigger_void_ghost = true;
                             }
                             if boss.phase == 1 {
                                 boss.speed = VOID_PRISM_P2_SPEED;
@@ -2954,8 +3896,11 @@ impl Game {
                 BossState::Dying => {
                     boss.state_timer -= dt;
                     let init_radius = match boss.kind {
+                        BossKind::PrismLattice => LATTICE_RADIUS,
                         BossKind::Sentinel => SENTINEL_RADIUS,
+                        BossKind::MirrorSovereign => SOVEREIGN_RADIUS,
                         BossKind::Hydra => HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
+                        BossKind::ChronoEclipse => ECLIPSE_RADIUS,
                         BossKind::VoidPrism => VOID_PRISM_RADIUS,
                     };
                     let t = (boss.state_timer / BOSS_DEATH_TIME).clamp(0.0, 1.0);
@@ -2965,6 +3910,46 @@ impl Game {
                     }
                 }
             }
+        }
+
+        if let Some((a, b)) = boss_warp_trail {
+            self.beams.push(Beam {
+                start: a,
+                end: b,
+                life: 0.0,
+                max_life: 0.35,
+                thickness: 6.5,
+                color: [1.0, 0.32, 0.84],
+                is_echo: false,
+            });
+        }
+        if let Some((origin, dir, dmg)) = boss_sniper_shot {
+            let end = tangent_endpoint_on_globe(origin, dir * 560.0);
+            self.beams.push(Beam {
+                start: origin,
+                end,
+                life: 0.0,
+                max_life: 0.28,
+                thickness: 7.5,
+                color: [1.0, 0.22, 0.68],
+                is_echo: false,
+            });
+            self.audio_event_bits |= AUDIO_GHOST_SHOT;
+            self.shake_amount = (self.shake_amount + 6.0).min(16.0);
+            if self.player.iframe_timer <= 0.0
+                && self.player.altitude < 0.15
+                && capsule_circle_intersect_globe(origin, end, 9.0, self.player.pos, self.player.radius)
+            {
+                boss_beam_damage = boss_beam_damage.max(dmg);
+            }
+        }
+        if boss_beam_damage > 0.0 && self.player.iframe_timer <= 0.0 {
+            self.apply_damage_to_player(boss_beam_damage, DamageSource::BossContact);
+            self.player.iframe_timer = IFRAME_DURATION;
+            self.shake_amount += SHAKE_HIT_PX * 1.4;
+        }
+        if trigger_void_ghost && self.aim_active && self.aim_targets.is_empty() {
+            self.aim_drill_cooldown = 0.0;
         }
 
         if activated {
@@ -3085,6 +4070,9 @@ impl Game {
             no_xp: false,
             spawn_grace: SPAWN_GRACE,
             mini_boss: None,
+            prism_mark_timer: 0.0,
+            link_id: 0,
+            shield_broken_timer: 0.0,
         });
     }
 
@@ -3205,6 +4193,9 @@ impl Game {
             no_xp: true,
             spawn_grace: 0.6,
             mini_boss: Some(mini_kind),
+            prism_mark_timer: 0.0,
+            link_id: 0,
+            shield_broken_timer: 0.0,
         });
     }
 
@@ -3237,6 +4228,10 @@ impl Game {
             self.void_victory = true;
             self.dead = true;
             self.score = self.compute_score() + 1000;
+        } else if !self.dead {
+            // Every non-final boss defeat awards a guaranteed Prismatic Relic Chest!
+            self.pending_relic_chests += 1;
+            self.check_for_level_up();
         }
 
         for _ in 0..44 {
@@ -3362,9 +4357,13 @@ impl Game {
                     }
                 }
             }
-            BossKind::VoidPrism => {
+            BossKind::VoidPrism
+            | BossKind::PrismLattice
+            | BossKind::MirrorSovereign
+            | BossKind::ChronoEclipse => {
+                let mult = if boss.stun_timer > 0.0 { 1.75 } else { 1.0 };
                 if capsule_circle_intersect_globe(start, end, cap_half, boss.pos, boss.radius) {
-                    boss.hp -= damage;
+                    boss.hp -= damage * mult;
                     self.hit_flash_positions.push(boss.pos);
                     return Some((boss.pos, false));
                 }
@@ -3449,11 +4448,16 @@ impl Game {
                 }
                 boss.hp = boss.lobe_hp.iter().sum();
             }
-            BossKind::Sentinel | BossKind::VoidPrism => {
+            BossKind::Sentinel
+            | BossKind::VoidPrism
+            | BossKind::PrismLattice
+            | BossKind::MirrorSovereign
+            | BossKind::ChronoEclipse => {
                 let d = globe_distance(boss.pos, origin);
                 if d <= radius + boss.radius {
                     let falloff = (1.0 - d / radius.max(1.0)).clamp(0.0, 1.0);
-                    boss.hp -= damage * boss_mult * (0.45 + 0.55 * falloff);
+                    let stun_mult = if boss.stun_timer > 0.0 { 1.75 } else { 1.0 };
+                    boss.hp -= damage * boss_mult * stun_mult * (0.45 + 0.55 * falloff);
                     self.hit_flash_positions.push(boss.pos);
                     hits += 1;
                 }
@@ -3808,73 +4812,230 @@ impl Game {
 
     // --- Firing ---------------------------------------------------------
 
-    fn update_aim_trainer(&mut self, dt: f32) {
+    fn update_aim_trainer(&mut self, dt: f32, raw_dt: f32, deadeye_was_active: bool) {
         let clicked = self.aim_clicked;
         self.aim_clicked = false;
         self.aim_tracking_active = false;
         self.aim_track_progress = 0.0;
         self.aim_hovering_target = false;
 
+        // Resolve queued Echo shard delayed precision sniper strikes!
+        let now = self.time;
+        let mut echo_idx = 0;
+        while echo_idx < self.pending_sniper_echoes.len() {
+            if self.pending_sniper_echoes[echo_idx].0 <= now {
+                let (_, pos, mult) = self.pending_sniper_echoes.swap_remove(echo_idx);
+                self.fire_precision_lance(pos, [1.0, 0.62, 0.36], mult, false);
+            } else {
+                echo_idx += 1;
+            }
+        }
+
         if !self.aim_active {
             return;
         }
 
         if self.aim_fire_cooldown > 0.0 {
-            self.aim_fire_cooldown = (self.aim_fire_cooldown - dt).max(0.0);
+            self.aim_fire_cooldown = (self.aim_fire_cooldown - raw_dt).max(0.0);
         }
 
         let aim_tangent = unproject_globe_offset(self.aim_screen_offset);
         let aim_world = tangent_endpoint_on_globe(self.player.pos, aim_tangent);
         let tier = self.aim_tier.clamp(1, 10) as f32;
+        let lens_lvl = self.inventory.level(ShardKind::Lens) as f32;
+        let frost_lvl = self.inventory.level(ShardKind::Frost) as f32;
+        // Lens shard expands target hitboxes generously (+6%/lvl)!
+        let hitbox_mult = 1.28 + lens_lvl * 0.06;
 
-        // 1. Spawn next rotating FPS drill when none active.
+        // 0. PRISMATIC DEAD-EYE OVERDRIVE: sweep cursor to paint up to 6 golden orbital locks!
+        if deadeye_was_active {
+            let mut candidate: Option<Vec2> = None;
+            // Prioritize Ghost Snipers, then Boss, then nearest enemy under cursor!
+            for t in &self.aim_targets {
+                if globe_distance(aim_world, t.pos) <= t.radius * 1.9 {
+                    candidate = Some(t.pos);
+                    break;
+                }
+            }
+            if candidate.is_none() {
+                if let Some(boss) = &self.boss {
+                    if boss.state == BossState::Active
+                        && globe_distance(aim_world, boss.pos) <= boss.radius + 42.0
+                    {
+                        candidate = Some(boss.pos);
+                    }
+                }
+            }
+            if candidate.is_none() {
+                let local_aim = nearest_globe_delta(self.player.pos, aim_world);
+                let mut best: Option<(Vec2, f32)> = None;
+                self.spatial.query_circle(local_aim, 48.0, |idx| {
+                    if idx < self.enemies.len() && self.enemies[idx].hp > 0.0 {
+                        let d = globe_distance(aim_world, self.enemies[idx].pos);
+                        if d <= self.enemies[idx].radius + 26.0
+                            && best.map_or(true, |(_, bd)| d < bd)
+                        {
+                            best = Some((self.enemies[idx].pos, d));
+                        }
+                    }
+                });
+                candidate = best.map(|(p, _)| p);
+            }
+            if clicked && candidate.is_none() {
+                candidate = Some(aim_world);
+            }
+            if let Some(lock_pos) = candidate {
+                let far_enough = self
+                    .deadeye_locks
+                    .iter()
+                    .all(|&p| globe_distance(p, lock_pos) > 26.0);
+                if far_enough && self.deadeye_locks.len() < DEADEYE_MAX_LOCKS {
+                    self.deadeye_locks.push(lock_pos);
+                    self.audio_event_bits |= AUDIO_AIM_HIT;
+                }
+            }
+            // Execute orbital rail volley when Dead-Eye timer finishes or all 6 locks are painted!
+            if self.deadeye_timer <= 0.0 || self.deadeye_locks.len() >= DEADEYE_MAX_LOCKS {
+                self.deadeye_timer = 0.0;
+                self.execute_deadeye_volley();
+            }
+            return;
+        }
+
+        // 1. Spawn next Pink Ghost Sniper Phantom duel when none active.
         if self.aim_targets.is_empty() {
+            self.active_ghost_id = -1;
+            self.active_ghost_golden = false;
             self.aim_drill_cooldown -= dt;
             if self.aim_drill_cooldown <= 0.0 {
                 self.spawn_next_aim_drill();
             }
         }
 
-        // 2. Update active Resonance Targets (aging + smooth tracking strafe motion).
-        let mut expired = false;
+        // 2. Update active Ghost Sniper Phantoms (lock-on warning + hostile firing if ignored!).
+        let frost_time_scale = if frost_lvl > 0.0 { 0.78 } else { 1.0 };
+        let frost_strafe_scale = (1.0 - frost_lvl * 0.06).max(0.58);
+        let mut fired_ghosts: Vec<(Vec2, AimDrillKind, bool)> = Vec::new();
         for t in &mut self.aim_targets {
-            t.life += dt;
+            t.life += dt * frost_time_scale;
             if t.kind == AimDrillKind::Track {
-                t.strafe_phase += dt * (1.25 + tier * 0.22);
-                // Smooth harmonic strafe with occasional velocity reversals (classic FPS smooth tracking).
-                let angular_speed = (0.78 + tier * 0.14)
+                t.strafe_phase += dt * (1.25 + tier * 0.20) * frost_strafe_scale;
+                let angular_speed = (0.76 + tier * 0.13)
+                    * frost_strafe_scale
                     * (0.65 + 0.55 * t.strafe_phase.sin().abs())
                     * t.strafe_sign;
                 if (t.strafe_phase * 0.72).sin() > 0.96 {
                     t.strafe_sign = -t.strafe_sign;
                 }
                 t.orbit_angle += angular_speed * dt;
-                let r_mod = t.orbit_radius + (t.strafe_phase * 1.4).cos() * (22.0 + tier * 3.5);
+                let r_mod = t.orbit_radius + (t.strafe_phase * 1.4).cos() * (22.0 + tier * 3.2);
                 let offset = Vec2::new(t.orbit_angle.cos(), t.orbit_angle.sin()) * r_mod;
                 t.pos = tangent_endpoint_on_globe(self.player.pos, offset);
             }
+            // Sniper lock warning ping when < 30% lock time remains!
+            if !t.warned && t.life >= t.max_life * 0.70 {
+                t.warned = true;
+                self.audio_event_bits |= AUDIO_GHOST_LOCK;
+            }
             if t.life >= t.max_life {
-                expired = true;
+                fired_ghosts.push((t.pos, t.kind, t.golden));
             }
         }
 
-        if expired {
+        // Hostile Ghost Sniper fires back if the player failed to counter-snipe in time!
+        if !fired_ghosts.is_empty() {
             self.aim_targets.clear();
             self.aim_last_hit_pos = None;
-            self.aim_drill_cooldown = 1.6;
+            self.active_ghost_id = -1;
+            self.active_ghost_golden = false;
+            self.aim_drill_cooldown = 2.0;
             self.aim_combo = 0;
             self.aim_tier_progress -= 1;
             if self.aim_tier_progress <= -2 && self.aim_tier > 1 {
                 self.aim_tier -= 1;
                 self.aim_tier_progress = 0;
             }
+            self.audio_event_bits |= AUDIO_GHOST_SHOT;
+            for (gpos, kind, golden) in fired_ghosts {
+                let to_p = nearest_globe_delta(gpos, self.player.pos).normalize_or_zero();
+                let rail_end = tangent_endpoint_on_globe(gpos, to_p * 540.0);
+                self.beams.push(Beam {
+                    start: gpos,
+                    end: rail_end,
+                    life: 0.0,
+                    max_life: 0.28,
+                    thickness: if golden { 6.5 } else { 5.2 },
+                    color: [1.0, 0.20, 0.68],
+                    is_echo: false,
+                });
+                // Sniper shot hits unless player dashed / airborne / i-framed!
+                let sniper_dmg = match kind {
+                    AimDrillKind::Flick => 18.0 + tier * 1.2,
+                    AimDrillKind::Track => 15.0 + tier * 1.0,
+                    AimDrillKind::Micro => 11.0 + tier * 0.8,
+                };
+                if self.player.iframe_timer <= 0.0
+                    && self.player.altitude < 0.14
+                    && capsule_circle_intersect_globe(
+                        gpos,
+                        rail_end,
+                        8.0,
+                        self.player.pos,
+                        self.player.radius,
+                    )
+                {
+                    self.apply_damage_to_player(sniper_dmg, DamageSource::Projectile);
+                    self.player.iframe_timer = IFRAME_DURATION;
+                    self.ghost_snipes_taken += 1;
+                    self.shake_amount = (self.shake_amount + 6.0).min(14.0);
+                }
+                // Spawn a fast trailing pink bolt on Track/Micro escape for extra duel tension.
+                if kind != AimDrillKind::Flick {
+                    self.projectiles.push(Projectile {
+                        pos: gpos,
+                        vel: to_p * (PROJ_SPEED * 1.35),
+                        life: 0.0,
+                        damage: sniper_dmg * 0.7,
+                        radius: PROJ_RADIUS * 1.15,
+                    });
+                }
+            }
         }
 
-        // Check hover state (reticle magnet visual feedback).
+        // Check hover state (Ghost Phantoms, Boss Weakpoints, Lunar Prisms, Lattice Relays, Enemies).
         for t in &self.aim_targets {
-            if globe_distance(aim_world, t.pos) <= t.radius * 1.28 {
+            if globe_distance(aim_world, t.pos) <= t.radius * hitbox_mult {
                 self.aim_hovering_target = true;
                 break;
+            }
+        }
+        if !self.aim_hovering_target {
+            if let Some(boss) = &self.boss {
+                if boss.state == BossState::Active {
+                    if (self.optical_stacks >= 3 || matches!(boss.kind, BossKind::Sentinel | BossKind::VoidPrism))
+                        && boss.weakpoint_cooldown <= 0.0
+                        && globe_distance(aim_world, Self::boss_weakpoint_pos(boss)) <= 24.0 * (hitbox_mult / 1.28)
+                    {
+                        self.aim_hovering_target = true;
+                    } else if boss.kind == BossKind::PrismLattice {
+                        let count = Self::lattice_spoke_count(boss);
+                        for i in 0..count {
+                            if boss.spoke_disabled[i] <= 0.0
+                                && globe_distance(aim_world, Self::lattice_relay_pos(boss, i)) <= 24.0
+                            {
+                                self.aim_hovering_target = true;
+                                break;
+                            }
+                        }
+                    } else if boss.kind == BossKind::ChronoEclipse && boss.phase == 1 {
+                        for &(lp, alive) in &boss.lunar_prisms {
+                            if alive && globe_distance(aim_world, lp) <= 26.0 {
+                                self.aim_hovering_target = true;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
         if !self.aim_hovering_target {
@@ -3889,60 +5050,63 @@ impl Game {
             });
         }
 
-        // 3. Smooth Tracking drill (hold LMB / RT on the Kinetic Track Orb).
-        let mut track_completed_pos: Option<Vec2> = None;
+        // 3. Smooth Tracking Ghost Hunter (hold LMB / RT on its orbital shield core).
+        let mut track_completed: Option<(Vec2, bool)> = None;
         for t in &mut self.aim_targets {
             if t.kind != AimDrillKind::Track {
                 continue;
             }
             let dist = globe_distance(aim_world, t.pos);
-            let on_target = self.aim_held && dist <= t.radius * 1.35;
+            let on_target = self.aim_held && dist <= t.radius * (hitbox_mult + 0.08);
             if on_target {
-                let charge_time = (1.38 - tier * 0.035).max(0.92);
+                let charge_time = (1.35 - tier * 0.032).max(0.88);
                 t.progress = (t.progress + dt / charge_time).min(1.0);
-                // Gracefully extend life while smoothly tracking so a steady hand always finishes.
-                t.life = (t.life - dt * 0.65).max(0.0);
+                // Tracking breaks the Ghost's lock-on progress steadily!
+                t.life = (t.life - dt * 0.72).max(0.0);
                 self.aim_tracking_active = true;
                 self.aim_track_progress = t.progress;
 
-                // Emit continuous glowing focusing beam from player to tracking orb.
                 self.beams.push(Beam {
                     start: self.player.pos,
                     end: t.pos,
                     life: 0.0,
                     max_life: 0.06,
-                    thickness: 2.6 + t.progress * 3.2,
-                    color: [0.55 + t.progress * 0.45, 0.92, 1.0],
+                    thickness: 2.8 + t.progress * 3.4 + lens_lvl * 0.35,
+                    color: [1.0, 0.42 + t.progress * 0.55, 0.88],
                     is_echo: false,
                 });
 
                 if t.progress >= 1.0 {
-                    track_completed_pos = Some(t.pos);
+                    track_completed = Some((t.pos, t.golden));
                 }
             } else if t.progress > 0.0 {
-                t.progress = (t.progress - dt * 0.42).max(0.0);
+                t.progress = (t.progress - dt * 0.40).max(0.0);
             }
         }
 
-        // Continuous burn around Track Orb while locked.
+        // Continuous burn around Track Hunter while locked.
         if self.aim_tracking_active {
             if let Some(orb_pos) = self.aim_targets.first().map(|t| t.pos) {
-                let burn_dps = (115.0 + self.rank as f32 * 16.0 + tier * 20.0) * dt;
-                self.damage_area(orb_pos, 84.0, burn_dps, 0.0, 0.0, 1.8);
+                let burn_dps = (125.0 + self.rank as f32 * 18.0 + tier * 22.0)
+                    * self.global_damage_mult()
+                    * dt;
+                self.damage_area(orb_pos, 92.0 + lens_lvl * 8.0, burn_dps, 0.0, 0.0, 1.8);
             }
         }
 
-        if let Some(pos) = track_completed_pos {
+        if let Some((pos, golden)) = track_completed {
             self.aim_targets.clear();
             self.aim_hits += 1;
             self.aim_shots += 1;
-            self.on_aim_drill_completed(AimDrillKind::Track, pos);
+            self.aim_combo += 1;
+            self.peak_aim_combo = self.peak_aim_combo.max(self.aim_combo);
+            self.on_aim_drill_completed(AimDrillKind::Track, pos, golden);
             return;
         }
 
-        // 4. Precision Click / Flick Shot (LMB / RT rising edge).
+        // 4. Precision Click / Counter-Snipe Shot (LMB / RT rising edge).
         if clicked && self.aim_fire_cooldown <= 0.0 {
-            // Check if clicking on a Flick or Micro Resonance Node first!
+            // 4a. Check Ghost Sniper Phantom hit first!
             let mut hit_idx: Option<usize> = None;
             let mut best_d = f32::MAX;
             for (i, t) in self.aim_targets.iter().enumerate() {
@@ -3950,7 +5114,7 @@ impl Game {
                     continue;
                 }
                 let d = globe_distance(aim_world, t.pos);
-                if d <= t.radius * 1.28 && d < best_d {
+                if d <= t.radius * hitbox_mult && d < best_d {
                     best_d = d;
                     hit_idx = Some(i);
                 }
@@ -3961,25 +5125,40 @@ impl Game {
                 self.aim_hits += 1;
                 self.aim_combo += 1;
                 self.peak_aim_combo = self.peak_aim_combo.max(self.aim_combo);
-                self.aim_fire_cooldown = 0.06;
+                self.aim_fire_cooldown = 0.055;
                 self.audio_event_bits |= AUDIO_AIM_HIT;
+                self.add_overdrive_charge(0.11);
 
                 let hit = self.aim_targets.remove(idx);
                 self.aim_last_hit_pos = Some(hit.pos);
-                self.fire_precision_lance(hit.pos, [1.0, 0.88, 0.36], 1.15);
+                let lance_col = if hit.golden {
+                    [1.0, 0.90, 0.30]
+                } else {
+                    [1.0, 0.42, 0.86]
+                };
+                self.fire_precision_lance(hit.pos, lance_col, 1.25, true);
+
+                // PhaseStep / 12-stack Phase Refund cuts Dash cooldown immediately on Ghost counter-snipe!
+                let phase_lvl = self.inventory.level(ShardKind::PhaseStep) as f32;
+                if phase_lvl > 0.0 || self.optical_stacks >= 12 {
+                    let refund = (0.45 + phase_lvl * 0.12
+                        + if self.optical_stacks >= 12 { 0.25 } else { 0.0 })
+                    .min(1.0);
+                    self.player.dash_cooldown =
+                        (self.player.dash_cooldown - self.dash_cooldown_duration() * refund).max(0.0);
+                }
 
                 match hit.kind {
                     AimDrillKind::Flick => {
                         if hit.step < hit.total {
-                            // Immediately spawn next flick target across a wide-angle jump!
-                            self.spawn_flick_step(hit.pos, hit.step + 1, hit.total);
+                            self.spawn_flick_step(hit.pos, hit.step + 1, hit.total, hit.ghost_id, hit.golden);
                         } else {
-                            self.on_aim_drill_completed(AimDrillKind::Flick, hit.pos);
+                            self.on_aim_drill_completed(AimDrillKind::Flick, hit.pos, hit.golden);
                         }
                     }
                     AimDrillKind::Micro => {
                         if self.aim_targets.is_empty() {
-                            self.on_aim_drill_completed(AimDrillKind::Micro, hit.pos);
+                            self.on_aim_drill_completed(AimDrillKind::Micro, hit.pos, hit.golden);
                         }
                     }
                     AimDrillKind::Track => {}
@@ -3987,30 +5166,243 @@ impl Game {
                 return;
             }
 
-            // If a Track Orb is active and cursor is on it, don't penalize initial click-hold!
+            // 4b. Check interactive Boss Weakpoint / Lattice Relay / Mirror Sovereign Counter / Lunar Prism clicks!
+            if self.try_snipe_boss_mechanic(aim_world, hitbox_mult) {
+                self.aim_shots += 1;
+                self.aim_hits += 1;
+                self.aim_combo += 1;
+                self.peak_aim_combo = self.peak_aim_combo.max(self.aim_combo);
+                self.aim_fire_cooldown = 0.07;
+                self.audio_event_bits |= AUDIO_WEAKPOINT_CRIT;
+                self.add_overdrive_charge(0.18);
+                return;
+            }
+
+            // If clicking a Track Hunter to start holding, don't penalize!
             let clicking_track = self.aim_targets.iter().any(|t| {
-                t.kind == AimDrillKind::Track && globe_distance(aim_world, t.pos) <= t.radius * 1.35
+                t.kind == AimDrillKind::Track && globe_distance(aim_world, t.pos) <= t.radius * (hitbox_mult + 0.08)
             });
             if clicking_track {
                 return;
             }
 
-            // Otherwise, fire a Precision Focused Prism Lance at cursor — rewards direct enemy flicking!
+            // 4c. Direct Precision Sniper Lance at cursor (rewards direct enemy/carrier/reflector flicking!).
             self.aim_shots += 1;
-            let hit_enemy = self.fire_precision_lance(aim_world, [0.55, 0.96, 1.0], 1.0);
+            let hit_enemy = self.fire_precision_lance(aim_world, [0.55, 0.96, 1.0], 1.0, true);
             if hit_enemy {
                 self.aim_hits += 1;
                 self.aim_combo += 1;
                 self.peak_aim_combo = self.peak_aim_combo.max(self.aim_combo);
-                self.aim_fire_cooldown = 0.09;
+                self.aim_fire_cooldown = 0.085;
                 self.audio_event_bits |= AUDIO_AIM_HIT;
+                self.add_overdrive_charge(0.08);
             } else {
-                // Slight focus lens cooldown on whiffed click rewards clean aim discipline.
+                // Miss resets active Focus streak (NEVER removes permanent Optical Precision stacks!).
                 self.aim_combo = 0;
-                self.aim_fire_cooldown = 0.22;
+                self.aim_fire_cooldown = 0.20;
                 self.audio_event_bits |= AUDIO_AIM_MISS;
             }
         }
+    }
+
+    fn add_overdrive_charge(&mut self, base: f32) {
+        let core_mult = if self.prism_core == PrismCore::SniperLens {
+            1.35
+        } else {
+            1.0
+        };
+        let stack_mult = 1.0 + self.optical_stacks as f32 * 0.015;
+        self.overdrive_charge = (self.overdrive_charge + base * core_mult * stack_mult).min(1.0);
+    }
+
+    fn execute_deadeye_volley(&mut self) {
+        if self.deadeye_locks.is_empty() {
+            // If player didn't paint specific locks, auto-snap up to 4 nearest threats!
+            let mut nearest: Vec<(Vec2, f32)> = self
+                .enemies
+                .iter()
+                .filter(|e| e.hp > 0.0)
+                .map(|e| (e.pos, globe_distance(self.player.pos, e.pos)))
+                .collect();
+            nearest.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            for (p, _) in nearest.into_iter().take(4) {
+                self.deadeye_locks.push(p);
+            }
+            if let Some(boss) = &self.boss {
+                if boss.state == BossState::Active {
+                    self.deadeye_locks.push(boss.pos);
+                }
+            }
+        }
+        let locks = std::mem::take(&mut self.deadeye_locks);
+        if locks.is_empty() {
+            return;
+        }
+        self.audio_event_bits |= AUDIO_DEADEYE_VOLLEY;
+        self.screen_flash = self.screen_flash.max(0.85);
+        self.hit_stop_pulse = self.hit_stop_pulse.max(0.75);
+        self.shake_amount = (self.shake_amount + 14.0).min(20.0);
+
+        let cols = [
+            [1.0, 0.88, 0.30],
+            [0.35, 1.0, 0.92],
+            [1.0, 0.36, 0.82],
+            [0.62, 0.78, 1.0],
+            [0.52, 1.0, 0.56],
+            [1.0, 0.58, 0.28],
+        ];
+        for (i, pos) in locks.into_iter().enumerate() {
+            let col = cols[i % cols.len()];
+            self.fire_precision_lance(pos, col, 3.6, false);
+            self.damage_area(
+                pos,
+                145.0,
+                (380.0 + self.rank as f32 * 45.0) * self.global_damage_mult(),
+                220.0,
+                0.0,
+                2.5,
+            );
+            // Also obliterate any Ghost Phantom caught near a Dead-Eye lock!
+            let mut ghost_done: Option<(AimDrillKind, Vec2, bool)> = None;
+            let mut idx_rm: Option<usize> = None;
+            for (ti, t) in self.aim_targets.iter().enumerate() {
+                if globe_distance(pos, t.pos) <= t.radius * 2.2 {
+                    idx_rm = Some(ti);
+                    break;
+                }
+            }
+            if let Some(ti) = idx_rm {
+                let hit = self.aim_targets.remove(ti);
+                ghost_done = Some((hit.kind, hit.pos, hit.golden));
+            }
+            if let Some((kind, gpos, golden)) = ghost_done {
+                self.aim_targets.clear();
+                self.on_aim_drill_completed(kind, gpos, golden);
+            }
+        }
+    }
+
+    fn try_snipe_boss_mechanic(&mut self, aim_world: Vec2, hitbox_mult: f32) -> bool {
+        let dmg_base = (220.0 + self.rank as f32 * 28.0 + self.aim_tier as f32 * 35.0)
+            * self.global_damage_mult()
+            * (1.0 + self.inventory.level(ShardKind::Lens) as f32 * 0.20);
+        let reach_pad = 24.0 * (hitbox_mult / 1.28);
+
+        let mut hit_pos: Option<Vec2> = None;
+        let mut dealt_val = 0.0_f32;
+        let mut boss_burst_pos: Option<Vec2> = None;
+
+        if let Some(boss) = &mut self.boss {
+            if boss.state != BossState::Active {
+                return false;
+            }
+            // 1. PrismLattice spoke Relay Node click -> shorts out that laser spoke & staggers!
+            if boss.kind == BossKind::PrismLattice {
+                let count = Self::lattice_spoke_count(boss);
+                for i in 0..count {
+                    if boss.spoke_disabled[i] <= 0.0 {
+                        let rp = Self::lattice_relay_pos(boss, i);
+                        if globe_distance(aim_world, rp) <= reach_pad {
+                            boss.spoke_disabled[i] = 5.5;
+                            let dealt = dmg_base * 3.0;
+                            boss.hp -= dealt;
+                            hit_pos = Some(rp);
+                            dealt_val = dealt;
+                            boss_burst_pos = Some(rp);
+                            break;
+                        }
+                    }
+                }
+            }
+            // 2. MirrorSovereign counter-snipe while charging -> shatters clones & STAGGERS 3.0s!
+            if hit_pos.is_none()
+                && boss.kind == BossKind::MirrorSovereign
+                && globe_distance(aim_world, boss.pos) <= boss.radius + 16.0
+            {
+                let bonus = if boss.aim_charge > 0.05 { 3.5 } else { 2.0 };
+                let dealt = dmg_base * bonus;
+                boss.hp -= dealt;
+                if boss.aim_charge > 0.05 {
+                    boss.aim_charge = 0.0;
+                    boss.stun_timer = 3.0;
+                    boss_burst_pos = Some(boss.pos);
+                }
+                hit_pos = Some(boss.pos);
+                dealt_val = dealt;
+            }
+            // 3. ChronoEclipse Lunar Curtain prism detonation -> carves safe pocket & reflects 4% max HP!
+            if hit_pos.is_none() && boss.kind == BossKind::ChronoEclipse && boss.phase == 1 {
+                for i in 0..6 {
+                    if boss.lunar_prisms[i].1
+                        && globe_distance(aim_world, boss.lunar_prisms[i].0) <= reach_pad + 4.0
+                    {
+                        let lp = boss.lunar_prisms[i].0;
+                        boss.lunar_prisms[i].1 = false;
+                        let dealt = (boss.max_hp * 0.04).max(dmg_base * 3.2);
+                        boss.hp -= dealt;
+                        hit_pos = Some(lp);
+                        dealt_val = dealt;
+                        boss_burst_pos = Some(lp);
+                        break;
+                    }
+                }
+            }
+            // 4. Universal Orbiting Boss Weakpoint Core (Weakpoint Sight @ 3 stacks, or Sentinel/VoidPrism)!
+            if hit_pos.is_none()
+                && (self.optical_stacks >= 3
+                    || matches!(boss.kind, BossKind::Sentinel | BossKind::VoidPrism))
+                && boss.weakpoint_cooldown <= 0.0
+            {
+                let wp = Self::boss_weakpoint_pos(boss);
+                if globe_distance(aim_world, wp) <= reach_pad {
+                    boss.weakpoint_cooldown = 1.6;
+                    let dealt = dmg_base * 3.2;
+                    if boss.kind == BossKind::Hydra {
+                        for h in &mut boss.lobe_hp {
+                            if *h > 0.0 {
+                                *h = (*h - dealt * 0.5).max(0.0);
+                            }
+                        }
+                        boss.hp = boss.lobe_hp.iter().sum();
+                    } else {
+                        boss.hp -= dealt;
+                    }
+                    hit_pos = Some(wp);
+                    dealt_val = dealt;
+                    boss_burst_pos = Some(wp);
+                }
+            }
+        }
+
+        if let Some(pos) = hit_pos {
+            self.total_damage_dealt += dealt_val;
+            self.hit_flash_positions.push(pos);
+            self.push_popup(pos, dealt_val, POPUP_BREAK);
+            self.beams.push(Beam {
+                start: self.player.pos,
+                end: pos,
+                life: 0.0,
+                max_life: 0.20,
+                thickness: 5.5,
+                color: [1.0, 0.90, 0.34],
+                is_echo: false,
+            });
+            if let Some(bp) = boss_burst_pos {
+                self.screen_flash = self.screen_flash.max(0.45);
+                self.hit_stop_pulse = self.hit_stop_pulse.max(0.42);
+                self.shake_amount = (self.shake_amount + 6.0).min(15.0);
+                self.pulses.push(InterferencePulse {
+                    pos: bp,
+                    life: 0.0,
+                    max_life: 0.36,
+                    max_radius: 130.0,
+                    kind: PulseKind::DashBlast,
+                    damage_multiplier: 0.8,
+                });
+            }
+            return true;
+        }
+        false
     }
 
     fn pick_aim_viewport_pos(&mut self, avoid: Option<Vec2>, min_jump: f32) -> Vec2 {
@@ -4045,6 +5437,20 @@ impl Game {
         self.aim_last_hit_pos = None;
         let tier = self.aim_tier.clamp(1, 10) as f32;
 
+        // Pick a real/seeded Ghost Player Phantom from the live Ghost Roster!
+        let ghost_id = if self.ghost_profiles.is_empty() {
+            0
+        } else {
+            let idx = (self.rng.next_u32() as usize) % self.ghost_profiles.len();
+            self.ghost_profiles[idx].id as i32
+        };
+        // Luck shard scales Golden Ace Phantom spawn chance (12% + 5%/lvl)!
+        let luck_lvl = self.inventory.level(ShardKind::Luck) as u32;
+        let golden_chance = (12 + luck_lvl * 5).min(55);
+        let golden = (self.rng.next_u32() % 100) < golden_chance;
+        self.active_ghost_id = ghost_id;
+        self.active_ghost_golden = golden;
+
         match kind {
             AimDrillKind::Flick => {
                 let total = if self.aim_tier >= 8 {
@@ -4054,7 +5460,7 @@ impl Game {
                 } else {
                     3
                 };
-                self.spawn_flick_step(self.player.pos, 1, total);
+                self.spawn_flick_step(self.player.pos, 1, total, ghost_id, golden);
             }
             AimDrillKind::Track => {
                 let angle = self.rng.angle();
@@ -4065,10 +5471,10 @@ impl Game {
                 );
                 self.aim_targets.push(AimTarget {
                     pos,
-                    radius: (29.0 - tier * 1.05).max(17.5),
+                    radius: (29.0 - tier * 1.0).max(18.0),
                     kind: AimDrillKind::Track,
                     life: 0.0,
-                    max_life: (6.2 - tier * 0.16).max(4.4),
+                    max_life: (6.4 - tier * 0.16).max(4.5),
                     progress: 0.0,
                     step: 1,
                     total: 1,
@@ -4076,14 +5482,17 @@ impl Game {
                     orbit_radius,
                     strafe_phase: self.rng.angle(),
                     strafe_sign: if self.rng.next_u32() % 2 == 0 { 1.0 } else { -1.0 },
+                    ghost_id,
+                    golden,
+                    warned: false,
                 });
             }
             AimDrillKind::Micro => {
                 let center = self.pick_aim_viewport_pos(None, 0.0);
-                let radius = (20.0 - tier * 0.72).max(12.5);
+                let radius = (20.5 - tier * 0.70).max(13.0);
                 let spacing = (56.0 - tier * 1.8).max(36.0);
                 let base_ang = self.rng.angle();
-                let max_life = (5.0 - tier * 0.22).max(2.6);
+                let max_life = (5.2 - tier * 0.20).max(2.8);
                 for i in 0..3u32 {
                     let a = base_ang + (i as f32) * std::f32::consts::TAU / 3.0;
                     let pos =
@@ -4101,22 +5510,32 @@ impl Game {
                         orbit_radius: 0.0,
                         strafe_phase: 0.0,
                         strafe_sign: 1.0,
+                        ghost_id,
+                        golden,
+                        warned: false,
                     });
                 }
             }
         }
     }
 
-    fn spawn_flick_step(&mut self, prev_pos: Vec2, step: u32, total: u32) {
+    fn spawn_flick_step(
+        &mut self,
+        prev_pos: Vec2,
+        step: u32,
+        total: u32,
+        ghost_id: i32,
+        golden: bool,
+    ) {
         let tier = self.aim_tier.clamp(1, 10) as f32;
         let min_jump = (135.0 + tier * 14.0).min(265.0);
         let pos = self.pick_aim_viewport_pos(Some(prev_pos), min_jump);
         self.aim_targets.push(AimTarget {
             pos,
-            radius: (25.5 - tier * 1.1).max(14.5),
+            radius: (25.5 - tier * 1.05).max(15.0),
             kind: AimDrillKind::Flick,
             life: 0.0,
-            max_life: (4.6 - tier * 0.22).max(2.2),
+            max_life: (4.6 - tier * 0.20).max(2.3),
             progress: (step.saturating_sub(1)) as f32 / total.max(1) as f32,
             step,
             total,
@@ -4124,16 +5543,20 @@ impl Game {
             orbit_radius: 0.0,
             strafe_phase: 0.0,
             strafe_sign: 1.0,
+            ghost_id,
+            golden,
+            warned: false,
         });
     }
 
-    /// Fires a high-precision piercing Focused Prism Lance from the player through `target_world`.
-    /// Returns true if any enemy or boss took damage.
+    /// Fires a Shard-Augmented Precision Prism Lance from the player through `target_world`.
+    /// Wired directly into Lens, Split, Chromatic, Refract, Echo, and SniperLens core!
     fn fire_precision_lance(
         &mut self,
         target_world: Vec2,
         color: [f32; 3],
         mult: f32,
+        allow_shard_procs: bool,
     ) -> bool {
         let delta = nearest_globe_delta(self.player.pos, target_world);
         let dist = delta.length();
@@ -4142,58 +5565,180 @@ impl Game {
         } else {
             Vec2::X
         };
-        let reach = dist.max(240.0) + 120.0;
-        let end = tangent_endpoint_on_globe(self.player.pos, dir * reach);
-        let tier = self.aim_tier.clamp(1, 10) as f32;
-        let combo_mult = 1.0 + (self.aim_combo.min(20) as f32) * 0.05;
-        let damage = (125.0 + self.rank as f32 * 18.0 + tier * 20.0) * mult * combo_mult;
+        let lens_lvl = self.inventory.level(ShardKind::Lens) as f32;
+        let split_lvl = self.inventory.level(ShardKind::Split);
+        let chrom_lvl = self.inventory.level(ShardKind::Chromatic);
+        let refract_lvl = self.inventory.level(ShardKind::Refract);
+        let echo_lvl = self.inventory.level(ShardKind::Echo);
+        let core_mult = if self.prism_core == PrismCore::SniperLens {
+            1.25
+        } else {
+            1.0
+        };
 
-        self.beams.push(Beam {
-            start: self.player.pos,
-            end,
-            life: 0.0,
-            max_life: 0.16,
-            thickness: 4.2 + tier * 0.25,
-            color,
-            is_echo: false,
-        });
+        let reach = dist.max(255.0) + 135.0 + lens_lvl * 22.0;
+        let tier = self.aim_tier.clamp(1, 10) as f32;
+        let combo_mult = 1.0 + (self.aim_combo.min(20) as f32) * 0.06;
+        let damage = (135.0 + self.rank as f32 * 20.0 + tier * 24.0)
+            * (1.0 + lens_lvl * 0.18)
+            * mult
+            * combo_mult
+            * core_mult
+            * self.global_damage_mult();
+        let thickness = 4.4 + tier * 0.25 + lens_lvl * 0.95;
+
+        // Split shard adds precision flanking wing-lances (±6°)!
+        let mut dirs = vec![dir];
+        if allow_shard_procs && split_lvl >= 2 {
+            let pairs = (split_lvl / 2).min(2);
+            let base_a = dir.y.atan2(dir.x);
+            for p in 1..=pairs {
+                let off = (p as f32) * 0.105;
+                dirs.push(Vec2::new((base_a + off).cos(), (base_a + off).sin()));
+                dirs.push(Vec2::new((base_a - off).cos(), (base_a - off).sin()));
+            }
+        }
 
         let mut hit_any = false;
-        let a_local = Vec2::ZERO;
-        let b_local = nearest_globe_delta(self.player.pos, end);
-        let mut candidates = Vec::new();
-        self.spatial.query_segment(a_local, b_local, 14.0, |idx| {
-            if idx < self.enemies.len() {
-                candidates.push(idx);
+        let mut first_hit_pos: Option<Vec2> = None;
+
+        for (beam_i, &bdir) in dirs.iter().enumerate() {
+            let end = tangent_endpoint_on_globe(self.player.pos, bdir * reach);
+            let b_dmg = if beam_i == 0 { damage } else { damage * 0.65 };
+            self.beams.push(Beam {
+                start: self.player.pos,
+                end,
+                life: 0.0,
+                max_life: 0.17,
+                thickness: if beam_i == 0 { thickness } else { thickness * 0.68 },
+                color,
+                is_echo: !allow_shard_procs,
+            });
+
+            let a_local = Vec2::ZERO;
+            let b_local = nearest_globe_delta(self.player.pos, end);
+            let mut candidates = Vec::new();
+            self.spatial.query_segment(a_local, b_local, 14.0 + lens_lvl * 2.0, |idx| {
+                if idx < self.enemies.len() {
+                    candidates.push(idx);
+                }
+            });
+            for idx in candidates {
+                let e = &mut self.enemies[idx];
+                if e.hp <= 0.0 {
+                    continue;
+                }
+                let direct_click = globe_distance(target_world, e.pos) <= e.radius + 16.0 + lens_lvl * 2.0;
+                let on_ray = capsule_circle_intersect_globe(
+                    self.player.pos,
+                    end,
+                    9.0 + lens_lvl * 1.4,
+                    e.pos,
+                    e.radius,
+                );
+                if direct_click || on_ray {
+                    let dealt = if direct_click { b_dmg * 1.45 } else { b_dmg };
+                    e.hp -= dealt;
+                    // Precision sniper hits shatter Reflector shields & apply Chromatic Prism Mark!
+                    if e.kind == EnemyKind::Reflector {
+                        e.shield_broken_timer = 5.0;
+                    }
+                    if chrom_lvl > 0 {
+                        e.prism_mark_timer = 5.0;
+                    }
+                    let epos = e.pos;
+                    self.total_damage_dealt += dealt;
+                    self.hit_flash_positions.push(epos);
+                    self.push_popup(epos, dealt, POPUP_CRIT);
+                    if first_hit_pos.is_none() {
+                        first_hit_pos = Some(epos);
+                    }
+                    hit_any = true;
+                }
             }
-        });
-        for idx in candidates {
-            let e = &mut self.enemies[idx];
-            if e.hp <= 0.0 {
-                continue;
-            }
-            let direct_click = globe_distance(target_world, e.pos) <= e.radius + 16.0;
-            let on_ray =
-                capsule_circle_intersect_globe(self.player.pos, end, 9.0, e.pos, e.radius);
-            if direct_click || on_ray {
-                let dealt = if direct_click { damage * 1.35 } else { damage };
-                e.hp -= dealt;
-                let epos = e.pos;
-                self.total_damage_dealt += dealt;
-                self.hit_flash_positions.push(epos);
-                self.push_popup(epos, dealt, POPUP_CRIT);
+            if let Some((impact, shield_broken)) =
+                self.damage_boss_with_beam(self.player.pos, end, 10.0 + lens_lvl, b_dmg * 1.55)
+            {
+                self.total_damage_dealt += b_dmg * 1.55;
+                self.push_popup(impact, b_dmg * 1.55, POPUP_CRIT);
+                if shield_broken {
+                    self.fire_shield_break_burst(impact);
+                }
+                if first_hit_pos.is_none() {
+                    first_hit_pos = Some(impact);
+                }
                 hit_any = true;
             }
         }
-        if let Some((impact, shield_broken)) =
-            self.damage_boss_with_beam(self.player.pos, end, 10.0, damage * 1.45)
-        {
-            self.total_damage_dealt += damage * 1.45;
-            self.push_popup(impact, damage * 1.45, POPUP_CRIT);
-            if shield_broken {
-                self.fire_shield_break_burst(impact);
+
+        // Refract shard / 7-Stack Prism Ricochet perk / SniperLens core: bounce sniper shot into nearby threats!
+        let ricochet_hops = (refract_lvl as usize)
+            + if self.optical_stacks >= 7 { 1 } else { 0 }
+            + if self.prism_core == PrismCore::SniperLens { 1 } else { 0 };
+        if allow_shard_procs && ricochet_hops > 0 {
+            let mut cur = first_hit_pos.unwrap_or(target_world);
+            let mut visited: Vec<usize> = Vec::with_capacity(ricochet_hops);
+            let r_dmg = damage * 0.85;
+            for _ in 0..ricochet_hops.min(6) {
+                let mut best: Option<(usize, f32)> = None;
+                for (i, e) in self.enemies.iter().enumerate() {
+                    if e.hp <= 0.0 || visited.contains(&i) {
+                        continue;
+                    }
+                    let d = globe_distance(cur, e.pos);
+                    if d > 10.0 && d < 280.0 && best.map_or(true, |(_, bd)| d < bd) {
+                        best = Some((i, d));
+                    }
+                }
+                if let Some((idx, _)) = best {
+                    visited.push(idx);
+                    let epos = self.enemies[idx].pos;
+                    self.enemies[idx].hp -= r_dmg;
+                    if chrom_lvl > 0 {
+                        self.enemies[idx].prism_mark_timer = 5.0;
+                    }
+                    self.total_damage_dealt += r_dmg;
+                    self.hit_flash_positions.push(epos);
+                    self.push_popup(epos, r_dmg, POPUP_CRIT);
+                    self.beams.push(Beam {
+                        start: cur,
+                        end: epos,
+                        life: 0.0,
+                        max_life: 0.18,
+                        thickness: 3.4,
+                        color: [0.55, 0.92, 1.0],
+                        is_echo: true,
+                    });
+                    cur = epos;
+                    hit_any = true;
+                } else if let Some(bpos) = self.boss.as_ref().filter(|b| b.state == BossState::Active).map(|b| b.pos) {
+                    if globe_distance(cur, bpos) < 340.0 {
+                        self.damage_boss_with_secondary_beam(cur, bpos, 10.0, r_dmg * 1.4);
+                        self.beams.push(Beam {
+                            start: cur,
+                            end: bpos,
+                            life: 0.0,
+                            max_life: 0.20,
+                            thickness: 3.8,
+                            color: [1.0, 0.86, 0.36],
+                            is_echo: true,
+                        });
+                        hit_any = true;
+                    }
+                    break;
+                } else {
+                    break;
+                }
             }
-            hit_any = true;
+        }
+
+        // Echo shard queues a delayed 0.12s Ghost-Echo second sniper strike!
+        if allow_shard_procs && echo_lvl > 0 && hit_any {
+            self.pending_sniper_echoes.push((
+                self.time + 0.12,
+                first_hit_pos.unwrap_or(target_world),
+                0.65 + echo_lvl as f32 * 0.06,
+            ));
         }
 
         // Crisp spark burst at impact point.
@@ -4209,18 +5754,54 @@ impl Game {
             });
         }
 
-        // Small local refraction splash on direct hit.
+        // Refraction splash on direct hit (widened by Split/Lens).
         if hit_any {
-            self.damage_area(target_world, 56.0, damage * 0.45, 70.0, 0.0, 0.6);
+            self.damage_area(
+                target_world,
+                60.0 + split_lvl as f32 * 8.0 + lens_lvl * 6.0,
+                damage * 0.48,
+                75.0,
+                0.0,
+                0.7,
+            );
             self.shake_amount = (self.shake_amount + 2.5).min(12.0);
         }
         hit_any
     }
 
-    fn on_aim_drill_completed(&mut self, kind: AimDrillKind, pos: Vec2) {
+    fn on_aim_drill_completed(&mut self, kind: AimDrillKind, pos: Vec2, golden: bool) {
         self.aim_drills_completed += 1;
-        self.aim_drill_cooldown = 1.65;
+        self.ghost_duels_won += 1;
+        self.aim_drill_cooldown = 1.75;
         self.aim_last_hit_pos = None;
+        self.active_ghost_id = -1;
+        self.active_ghost_golden = false;
+
+        // Permanent Cumulative Optical Precision Stacks (NEVER lost on miss!).
+        let base_stacks = if self.prism_core == PrismCore::ResonanceConduit { 2 } else { 1 };
+        let gained_stacks = if golden { base_stacks + 1 } else { base_stacks };
+        self.optical_stacks += gained_stacks;
+        self.add_overdrive_charge(if golden { 0.45 } else { 0.28 });
+
+        // Golden Ace Phantom OR every 4th Ghost Duel awards Reroll + Banish economy!
+        if golden {
+            self.reroll_charges += 1;
+            self.banish_charges += 1;
+            self.player.hp = (self.player.hp + 20.0).min(self.player.max_hp);
+            self.drop_xp_burst(pos, 8, 4 + (self.aim_tier / 2), 38.0);
+        } else if self.ghost_duels_won % 3 == 0 {
+            self.reroll_charges += 1;
+            if self.prism_core == PrismCore::ResonanceConduit {
+                self.banish_charges += 1;
+            }
+        }
+
+        // Cascade shard triggers bonus chain detonation on Ghost Phantom defeat!
+        let cascade_lvl = self.inventory.level(ShardKind::Cascade);
+        if cascade_lvl > 0 {
+            self.fire_cascade_beams(pos, cascade_lvl + 2, 2, [1.0, 0.38, 0.82]);
+        }
+
         self.aim_tier_progress += 1;
         if self.aim_tier_progress >= 2 && self.aim_tier < 10 {
             self.aim_tier += 1;
@@ -4228,17 +5809,17 @@ impl Game {
         }
 
         let tier = self.aim_tier as f32;
-        let blast_dmg = 240.0 + self.rank as f32 * 32.0 + tier * 55.0;
-        let blast_r = 185.0 + tier * 16.0;
+        let blast_dmg = (260.0 + self.rank as f32 * 36.0 + tier * 60.0) * self.global_damage_mult();
+        let blast_r = 195.0 + tier * 16.0;
 
         self.audio_event_bits |= AUDIO_AIM_COMPLETE;
-        self.screen_flash = self.screen_flash.max(0.52);
+        self.screen_flash = self.screen_flash.max(0.55);
         self.hit_stop_pulse = self.hit_stop_pulse.max(0.45);
         self.shake_amount = (self.shake_amount + 6.5).min(16.0);
         self.push_popup(pos, blast_dmg, POPUP_BREAK);
 
         // Reward XP gems proportional to Aim Tier!
-        self.drop_xp_burst(pos, 3 + (self.aim_tier / 2), 2 + (self.aim_tier / 3), 26.0);
+        self.drop_xp_burst(pos, 4 + (self.aim_tier / 2), 2 + (self.aim_tier / 3), 26.0);
 
         match kind {
             AimDrillKind::Flick => {
@@ -4565,24 +6146,6 @@ impl Game {
         if let Some(boss) = &self.boss {
             if boss.state == BossState::Active {
                 match boss.kind {
-                    BossKind::Sentinel => {
-                        local_enemies.push(Enemy {
-                            pos: nearest_globe_pos(origin, boss.pos),
-                            radius: boss.radius,
-                            hp: boss.hp,
-                            speed: 0.0,
-                            kind: EnemyKind::Brute,
-                            state: EnemyState::Drifting,
-                            state_timer: 0.0,
-                            charge_dir: Vec2::ZERO,
-                            color: [1.0, 1.0, 1.0],
-                            contact_damage: 0.0,
-                            slow_timer: 0.0,
-                            no_xp: true,
-                            spawn_grace: 0.0,
-                            mini_boss: None,
-                        });
-                    }
                     BossKind::Hydra => {
                         for i in 0..3usize {
                             if boss.lobe_alive[i] {
@@ -4602,11 +6165,18 @@ impl Game {
                                     no_xp: true,
                                     spawn_grace: 0.0,
                                     mini_boss: None,
+                                    prism_mark_timer: 0.0,
+                                    link_id: 0,
+                                    shield_broken_timer: 0.0,
                                 });
                             }
                         }
                     }
-                    BossKind::VoidPrism => {
+                    BossKind::Sentinel
+                    | BossKind::VoidPrism
+                    | BossKind::PrismLattice
+                    | BossKind::MirrorSovereign
+                    | BossKind::ChronoEclipse => {
                         local_enemies.push(Enemy {
                             pos: nearest_globe_pos(origin, boss.pos),
                             radius: boss.radius,
@@ -4622,6 +6192,9 @@ impl Game {
                             no_xp: true,
                             spawn_grace: 0.0,
                             mini_boss: None,
+                            prism_mark_timer: 0.0,
+                            link_id: 0,
+                            shield_broken_timer: 0.0,
                         });
                     }
                 }
@@ -4699,13 +6272,36 @@ impl Game {
                 }
             });
         let heavy_shot = req.damage >= 90.0;
+        let global_dmg = self.global_damage_mult();
+        let crit_chance = self.global_crit_chance();
+        let beam_dir = nearest_globe_delta(start, end).normalize_or_zero();
+        let mut reflected_rays: Vec<(Vec2, Vec2)> = Vec::new();
         for idx in candidates {
             let e = &mut self.enemies[idx];
             if capsule_circle_intersect_globe(start, end, req.thickness * 0.5, e.pos, e.radius) {
                 let is_blizzard_crit = blizzard && e.slow_timer > 0.0;
-                let mut dmg = req.damage;
+                let is_optical_crit = crit_chance > 0.0 && self.rng.unit() < crit_chance;
+                let mut dmg = req.damage * global_dmg;
                 if is_blizzard_crit {
                     dmg *= 1.4;
+                }
+                if is_optical_crit {
+                    dmg *= 1.85;
+                }
+                if e.prism_mark_timer > 0.0 {
+                    dmg *= 1.35;
+                }
+                // Reflector: frontal mirror shield deflects auto-beams coming straight from the front!
+                if e.kind == EnemyKind::Reflector && e.shield_broken_timer <= 0.0 {
+                    let shield_fwd = e.charge_dir.normalize_or_zero();
+                    // Beam travels along beam_dir; incoming hits front when (-beam_dir) aligns with shield_fwd.
+                    if shield_fwd.length_squared() > 0.1 && (-beam_dir).dot(shield_fwd) > 0.42 {
+                        dmg *= 0.22;
+                        if reflected_rays.len() < 4 {
+                            let refl = beam_dir - 2.0 * beam_dir.dot(shield_fwd) * shield_fwd;
+                            reflected_rays.push((e.pos, refl.normalize_or_zero()));
+                        }
+                    }
                 }
                 e.hp -= dmg;
                 let epos = e.pos;
@@ -4716,7 +6312,7 @@ impl Game {
                 self.total_damage_dealt += dmg;
                 hit_count += 1;
                 self.hit_flash_positions.push(epos);
-                let pkind = if is_blizzard_crit || heavy_shot {
+                let pkind = if is_blizzard_crit || is_optical_crit || heavy_shot {
                     POPUP_CRIT
                 } else {
                     POPUP_NORMAL
@@ -4727,11 +6323,23 @@ impl Game {
                 }
             }
         }
+        for (rpos, rdir) in reflected_rays {
+            self.beams.push(Beam {
+                start: rpos,
+                end: tangent_endpoint_on_globe(rpos, rdir * 52.0),
+                life: 0.0,
+                max_life: 0.10,
+                thickness: 2.2,
+                color: [0.85, 0.96, 1.0],
+                is_echo: true,
+            });
+        }
+        let boss_beam_dmg = req.damage * global_dmg;
         if let Some((impact, shield_broken)) =
-            self.damage_boss_with_beam(start, end, req.thickness * 0.5, req.damage)
+            self.damage_boss_with_beam(start, end, req.thickness * 0.5, boss_beam_dmg)
         {
-            self.total_damage_dealt += req.damage;
-            self.push_popup(impact, req.damage, POPUP_CRIT);
+            self.total_damage_dealt += boss_beam_dmg;
+            self.push_popup(impact, boss_beam_dmg, POPUP_CRIT);
             hit_count += 1;
             if diffract > 0 {
                 impacts.push(impact);
@@ -4847,9 +6455,12 @@ impl Game {
         no_xp: bool,
         was_frozen: bool,
         mini_boss: Option<MiniBossKind>,
+        was_prism_marked: bool,
+        link_id: u32,
     ) {
         self.kills_total += 1;
-        self.kills_by_kind[kind as usize] = self.kills_by_kind[kind as usize].saturating_add(1);
+        let kind_idx = (kind as usize).min(ENEMY_KIND_COUNT - 1);
+        self.kills_by_kind[kind_idx] = self.kills_by_kind[kind_idx].saturating_add(1);
         self.audio_kill_count += 1;
         self.kill_streak = self.kill_streak.saturating_add(1);
         self.kill_streak_timer = KILL_STREAK_WINDOW;
@@ -4861,6 +6472,38 @@ impl Game {
             self.screen_flash = self.screen_flash.max(0.32);
         }
         self.spawn_death_particles(pos, kind);
+
+        // Chromatic Sniper Mark detonation: bursts in RGB shards on death!
+        if was_prism_marked && cascade_depth < 3 {
+            let burst_dmg = (110.0 + self.rank as f32 * 14.0) * self.global_damage_mult();
+            self.damage_area(pos, 95.0, burst_dmg, 90.0, 0.0, 1.0);
+            self.fire_cascade_beams(pos, 2, 1, [1.0, 0.45, 0.90]);
+        }
+
+        // Weaver Tether Snap: killing one linked anchor blasts its partner!
+        if kind == EnemyKind::Weaver && link_id > 0 {
+            for e in &mut self.enemies {
+                if e.link_id == link_id && e.hp > 0.0 {
+                    e.link_id = 0;
+                    e.hp -= e.hp.max(200.0) * 0.55;
+                }
+            }
+        }
+
+        // Golden Carrier Loot Beetle: vacuums ALL gems on the globe + awards +1 Reroll + XP burst!
+        if kind == EnemyKind::Carrier && !no_xp {
+            self.reroll_charges += 1;
+            self.audio_event_bits |= AUDIO_OBELISK_CAPTURE;
+            self.screen_flash = self.screen_flash.max(0.45);
+            self.drop_xp_burst(pos, 10, 3 + self.rank / 10, 32.0);
+            // Vacuum all active XP gems straight into player orbit!
+            for g in &mut self.gems {
+                let dir = nearest_globe_delta(g.pos, self.player.pos);
+                if dir.length() > 14.0 {
+                    g.pos = tangent_endpoint_on_globe(self.player.pos, -dir.normalize_or_zero() * 14.0);
+                }
+            }
+        }
 
         if let Some(mini_boss) = mini_boss {
             self.on_miniboss_death(pos, mini_boss);
@@ -4884,7 +6527,7 @@ impl Game {
             }
         }
 
-        // Drop XP gem unless this is a mini-drone (Splitter offspring).
+        // Drop XP gem unless this is a mini-drone (Splitter offspring) or escaped Carrier.
         if !no_xp {
             let gem_value = match kind {
                 EnemyKind::Drone => 1,
@@ -4895,6 +6538,11 @@ impl Game {
                 EnemyKind::Emitter => 3,
                 EnemyKind::Pulsar => 4,
                 EnemyKind::Umbra => 4,
+                EnemyKind::Weaver => 4,
+                EnemyKind::Reflector => 5,
+                EnemyKind::Anchor => 5,
+                EnemyKind::Stalker => 4,
+                EnemyKind::Carrier => 8,
             };
             self.gems.push(XpGem {
                 pos,
@@ -4927,6 +6575,9 @@ impl Game {
                     no_xp: true,
                     spawn_grace: SPAWN_GRACE,
                     mini_boss: None,
+                    prism_mark_timer: 0.0,
+                    link_id: 0,
+                    shield_broken_timer: 0.0,
                 });
             }
         }
@@ -5164,6 +6815,19 @@ impl Game {
         if self.leveling_up {
             return;
         }
+        // Relic Chests (from Bosses or Prism Obelisks) open first with double upgrades!
+        if self.pending_relic_chests > 0 {
+            self.pending_relic_chests -= 1;
+            self.level_choices = self
+                .inventory
+                .roll_choices_with_overclock(&mut self.rng, self.endless_mode);
+            if self.level_choices.iter().any(|c| c.is_some()) {
+                self.relic_chest_active = true;
+                self.leveling_up = true;
+                self.audio_event_bits |= AUDIO_OBELISK_CAPTURE;
+                return;
+            }
+        }
         while self.xp >= xp_for_rank(self.rank + 1) {
             let needed = xp_for_rank(self.rank + 1);
             self.xp -= needed;
@@ -5173,11 +6837,14 @@ impl Game {
             self.audio_event_bits |= AUDIO_RANK_UP;
             self.screen_flash = self.screen_flash.max(0.55);
             let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
-            let heal = (20.0 - self.rank as f32 * 1.0).max(5.0)
+            let heal = (20.0 - self.rank as f32 * 0.6).max(6.0)
                 * (1.0 + prism_heart * PRISM_HEART_HEAL_MULT_PER_LEVEL);
             self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
-            self.level_choices = self.inventory.roll_choices(&mut self.rng);
+            self.level_choices = self
+                .inventory
+                .roll_choices_with_overclock(&mut self.rng, self.endless_mode);
             if self.level_choices.iter().any(|c| c.is_some()) {
+                self.relic_chest_active = false;
                 self.leveling_up = true;
                 break;
             }
@@ -5468,6 +7135,14 @@ impl Game {
         } else {
             Vec2::ZERO
         };
+        // Weaver spawns as a linked laser-tether pair separated by ~130 px!
+        let link_id = if kind == EnemyKind::Weaver {
+            let id = self.next_weaver_link_id;
+            self.next_weaver_link_id = self.next_weaver_link_id.wrapping_add(1).max(1);
+            id
+        } else {
+            0
+        };
         self.enemies.push(Enemy {
             pos,
             radius,
@@ -5483,7 +7158,33 @@ impl Game {
             no_xp: false,
             spawn_grace: SPAWN_GRACE,
             mini_boss: None,
+            prism_mark_timer: 0.0,
+            link_id,
+            shield_broken_timer: 0.0,
         });
+        if kind == EnemyKind::Weaver {
+            let perp = Vec2::new(-dir.y, dir.x);
+            let partner_pos = tangent_endpoint_on_globe(pos, perp * 128.0);
+            self.enemies.push(Enemy {
+                pos: partner_pos,
+                radius,
+                hp,
+                speed,
+                kind,
+                state: EnemyState::Drifting,
+                state_timer: 0.5,
+                charge_dir: Vec2::ZERO,
+                color,
+                contact_damage,
+                slow_timer: 0.0,
+                no_xp: false,
+                spawn_grace: SPAWN_GRACE,
+                mini_boss: None,
+                prism_mark_timer: 0.0,
+                link_id,
+                shield_broken_timer: 0.0,
+            });
+        }
     }
 
     fn maybe_fire_wave_event(&mut self) {
@@ -5572,6 +7273,26 @@ impl Game {
             _ => {}
         }
 
+        // Rare Golden Prism Carrier loot beetle (~1.2% chance from wave 2+, max 1 active).
+        if self.wave >= 2
+            && self.rng.next_u32() % 85 == 0
+            && !self.enemies.iter().any(|e| e.kind == EnemyKind::Carrier)
+        {
+            return EnemyKind::Carrier;
+        }
+        // Tactical specialist injection starting from wave 2+: Weaver, Reflector, Anchor, Stalker!
+        if self.wave >= 2 && self.rng.next_u32() % 7 == 0 {
+            let pool = [
+                (EnemyKind::Weaver, 4u32),
+                (EnemyKind::Reflector, if self.wave >= 3 { 4 } else { 1 }),
+                (EnemyKind::Anchor, if self.wave >= 4 { 3 } else { 0 }),
+                (EnemyKind::Stalker, if self.wave >= 5 { 4 } else { 0 }),
+            ];
+            if let Some(k) = weighted_pick(&pool, &mut self.rng) {
+                return k;
+            }
+        }
+
         if self.wave >= 20 && self.rng.next_u32() % 4 == 0 {
             let pool = [
                 (EnemyKind::Brute, 3u32),
@@ -5581,6 +7302,10 @@ impl Game {
                 (EnemyKind::Emitter, 4),
                 (EnemyKind::Pulsar, 3),
                 (EnemyKind::Umbra, 3),
+                (EnemyKind::Weaver, 3),
+                (EnemyKind::Reflector, 3),
+                (EnemyKind::Anchor, 2),
+                (EnemyKind::Stalker, 3),
             ];
             if let Some(kind) = weighted_pick(&pool, &mut self.rng) {
                 return kind;
@@ -5805,10 +7530,21 @@ impl Game {
         self.aim_target_buf.clear();
         let camera = self.camera;
 
-        // Pack FPS Aim-Trainer Resonance Nodes for both WebGL2 bloom & 2D crisp gauges.
+        // Pack Pink Ghost Player Snipers + Aim-Trainer Targets for WebGL2 bloom & 2D sniper gauges!
+        let player_screen = nearest_globe_pos(camera, self.player.pos);
         for t in &self.aim_targets {
             let pos = nearest_globe_pos(camera, t.pos);
             let life_frac = (1.0 - t.life / t.max_life).clamp(0.0, 1.0);
+            let mut flags = 0u32;
+            if t.golden {
+                flags |= 1 << 0;
+            }
+            if self.deadeye_locks.iter().any(|&p| globe_distance(p, t.pos) < t.radius * 2.0) {
+                flags |= 1 << 1;
+            }
+            if life_frac < 0.30 {
+                flags |= 1 << 2;
+            }
             self.aim_target_buf.push(AimTargetInstance {
                 x: pos.x,
                 y: pos.y,
@@ -5818,13 +7554,39 @@ impl Game {
                 life_frac,
                 step: t.step as f32,
                 total: t.total as f32,
+                ghost_id: t.ghost_id as f32,
+                flags: flags as f32,
             });
-            let (r, g, b, core_shape) = match t.kind {
-                AimDrillKind::Flick => (1.0, 0.84, 0.28, SHAPE_DIAMOND),
-                AimDrillKind::Track => (0.55, 0.78, 1.0, SHAPE_STAR),
-                AimDrillKind::Micro => (1.0, 0.45, 0.72, SHAPE_HEX),
+            // Pink/Magenta Ghost Sniper aesthetic (Golden-Rose for Ace Phantoms!).
+            let (r, g, b, core_shape) = if t.golden {
+                (1.0_f32, 0.86, 0.28, SHAPE_PRISM)
+            } else {
+                match t.kind {
+                    AimDrillKind::Flick => (1.0, 0.28, 0.78, SHAPE_PRISM),
+                    AimDrillKind::Track => (0.96, 0.32, 0.94, SHAPE_STAR),
+                    AimDrillKind::Micro => (1.0, 0.22, 0.62, SHAPE_HEX),
+                }
             };
-            // Outer glowing optical ring (shrinks smoothly with remaining time!).
+            // Hostile narrowing sniper laser sightline painted onto the player!
+            let threat = (1.0 - life_frac).clamp(0.0, 1.0);
+            let pulse = if life_frac < 0.30 {
+                0.65 + 0.35 * (self.time * 28.0).sin().abs()
+            } else {
+                1.0
+            };
+            self.beam_buf.push(BeamInstance {
+                x0: pos.x,
+                y0: pos.y,
+                x1: player_screen.x,
+                y1: player_screen.y,
+                thickness: (0.8 + threat * 2.1) * pulse,
+                r: 1.0,
+                g: if t.golden { 0.82 } else { 0.22 + (1.0 - threat) * 0.28 },
+                b: if t.golden { 0.32 } else { 0.72 },
+                a: (0.16 + threat * 0.56) * pulse,
+                glow: (0.8 + threat * 2.2) * pulse,
+            });
+            // Outer glowing optical ring (shrinks smoothly as the Ghost locks on!).
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
@@ -5832,21 +7594,89 @@ impl Game {
                 r,
                 g,
                 b,
-                a: 0.72,
-                glow: 2.2,
+                a: 0.76,
+                glow: 2.3 + threat * 1.4,
                 shape: SHAPE_RING,
             });
-            // Luminous crystalline bullseye core.
+            // Luminous crystalline Ghost Prism silhouette.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: t.radius * 0.56,
+                radius: t.radius * 0.58,
                 r,
                 g,
                 b,
                 a: 0.94,
-                glow: 2.6 + t.progress * 2.0,
+                glow: 2.6 + t.progress * 2.0 + threat * 1.2,
                 shape: core_shape,
+            });
+        }
+
+        // Dead-Eye Overdrive locked-on orbital target reticles!
+        for &lp in &self.deadeye_locks {
+            let pos = nearest_globe_pos(camera, lp);
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: 26.0,
+                r: 1.0,
+                g: 0.90,
+                b: 0.32,
+                a: 0.92,
+                glow: 3.4,
+                shape: SHAPE_DIAMOND,
+            });
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: 34.0,
+                r: 1.0,
+                g: 0.72,
+                b: 0.22,
+                a: 0.65,
+                glow: 2.2,
+                shape: SHAPE_RING,
+            });
+        }
+
+        // Capturable Prism Obelisk monolith + filling capture ring!
+        if let Some(ob) = &self.obelisk {
+            let opos = nearest_globe_pos(camera, ob.pos);
+            let pulse = 0.8 + 0.2 * (self.time * 4.5).sin();
+            self.circle_buf.push(CircleInstance {
+                x: opos.x,
+                y: opos.y,
+                radius: ob.radius,
+                r: 1.0,
+                g: 0.84,
+                b: 0.34,
+                a: 0.34 + ob.progress * 0.38,
+                glow: 1.5 + ob.progress * 2.4,
+                shape: SHAPE_RING,
+            });
+            if ob.progress > 0.01 {
+                self.circle_buf.push(CircleInstance {
+                    x: opos.x,
+                    y: opos.y,
+                    radius: ob.radius * ob.progress,
+                    r: 0.42,
+                    g: 1.0,
+                    b: 0.88,
+                    a: 0.38,
+                    glow: 2.2,
+                    shape: SHAPE_RING,
+                });
+            }
+            self.circle_buf.push(CircleInstance {
+                x: opos.x,
+                y: opos.y,
+                radius: 20.0 * pulse,
+                r: 1.0,
+                g: 0.88,
+                b: 0.42,
+                a: 0.95,
+                glow: 3.4,
+                shape: SHAPE_PRISM,
             });
         }
 
@@ -6533,6 +8363,273 @@ impl Game {
                         }
                     }
                 }
+                BossKind::PrismLattice => {
+                    let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
+                    let count = Self::lattice_spoke_count(boss);
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius + 12.0,
+                        r: 0.35,
+                        g: 0.95,
+                        b: 1.0,
+                        a: 0.52 * dying_alpha,
+                        glow: 3.4 * dying_alpha,
+                        shape: SHAPE_RING,
+                    });
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius,
+                        r: 0.25,
+                        g: 0.78,
+                        b: 1.0,
+                        a: (0.78 + hp_pct * 0.2) * dying_alpha,
+                        glow: 3.6 * dying_alpha,
+                        shape: SHAPE_HEX,
+                    });
+                    if boss.state == BossState::Active {
+                        for i in 0..count {
+                            let a = boss.spoke_angle
+                                + (i as f32) * std::f32::consts::TAU / count as f32;
+                            let end_w = tangent_endpoint_on_globe(
+                                boss.pos,
+                                Vec2::new(a.cos(), a.sin()) * LATTICE_SPOKE_LENGTH,
+                            );
+                            let end_s = nearest_globe_pos(camera, end_w);
+                            let disabled = boss.spoke_disabled[i] > 0.0;
+                            self.beam_buf.push(BeamInstance {
+                                x0: pos.x,
+                                y0: pos.y,
+                                x1: end_s.x,
+                                y1: end_s.y,
+                                thickness: if disabled { 1.2 } else { 5.2 },
+                                r: if disabled { 0.35 } else { 1.0 },
+                                g: if disabled { 0.55 } else { 0.34 },
+                                b: if disabled { 0.7 } else { 0.22 },
+                                a: if disabled { 0.22 } else { 0.85 },
+                                glow: if disabled { 0.4 } else { 2.8 },
+                            });
+                            if !disabled {
+                                let rp = nearest_globe_pos(camera, Self::lattice_relay_pos(boss, i));
+                                self.circle_buf.push(CircleInstance {
+                                    x: rp.x,
+                                    y: rp.y,
+                                    radius: 13.0,
+                                    r: 1.0,
+                                    g: 0.86,
+                                    b: 0.28,
+                                    a: 0.92,
+                                    glow: 3.0,
+                                    shape: SHAPE_DIAMOND,
+                                });
+                                self.aim_target_buf.push(AimTargetInstance {
+                                    x: rp.x,
+                                    y: rp.y,
+                                    radius: 17.0,
+                                    kind: 3.0,
+                                    progress: 0.0,
+                                    life_frac: 1.0,
+                                    step: (i + 1) as f32,
+                                    total: count as f32,
+                                    ghost_id: -1.0,
+                                    flags: 1.0,
+                                });
+                            }
+                        }
+                    }
+                }
+                BossKind::MirrorSovereign => {
+                    let stunned = boss.stun_timer > 0.0;
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius + 10.0,
+                        r: if stunned { 1.0 } else { 1.0 },
+                        g: if stunned { 0.92 } else { 0.26 },
+                        b: if stunned { 0.36 } else { 0.84 },
+                        a: 0.62 * dying_alpha,
+                        glow: (if stunned { 4.4 } else { 3.2 }) * dying_alpha,
+                        shape: SHAPE_RING,
+                    });
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius,
+                        r: 1.0,
+                        g: if stunned { 0.94 } else { 0.36 },
+                        b: if stunned { 0.48 } else { 0.88 },
+                        a: 0.92 * dying_alpha,
+                        glow: 3.8 * dying_alpha,
+                        shape: SHAPE_PRISM,
+                    });
+                    if boss.state == BossState::Active && !stunned {
+                        // 2 translucent Mirror Decoys orbiting the Sovereign!
+                        for &da in &boss.decoy_angles {
+                            let dp = nearest_globe_pos(
+                                camera,
+                                tangent_endpoint_on_globe(
+                                    boss.pos,
+                                    Vec2::new(da.cos(), da.sin()) * SOVEREIGN_DECOY_ORBIT,
+                                ),
+                            );
+                            self.circle_buf.push(CircleInstance {
+                                x: dp.x,
+                                y: dp.y,
+                                radius: boss.radius * 0.82,
+                                r: 0.92,
+                                g: 0.38,
+                                b: 0.96,
+                                a: 0.44,
+                                glow: 2.0,
+                                shape: SHAPE_PRISM,
+                            });
+                        }
+                        // Visible boss sniper lock sightline while charging!
+                        if boss.aim_charge > 0.01 {
+                            let aim_end = nearest_globe_pos(
+                                camera,
+                                tangent_endpoint_on_globe(boss.pos, boss.aim_dir * 520.0),
+                            );
+                            self.beam_buf.push(BeamInstance {
+                                x0: pos.x,
+                                y0: pos.y,
+                                x1: aim_end.x,
+                                y1: aim_end.y,
+                                thickness: 1.4 + boss.aim_charge * 3.2,
+                                r: 1.0,
+                                g: 0.22 + (1.0 - boss.aim_charge) * 0.5,
+                                b: 0.72,
+                                a: 0.35 + boss.aim_charge * 0.55,
+                                glow: 2.4 + boss.aim_charge * 2.2,
+                            });
+                            self.aim_target_buf.push(AimTargetInstance {
+                                x: pos.x,
+                                y: pos.y,
+                                radius: boss.radius + 8.0,
+                                kind: 3.0,
+                                progress: boss.aim_charge,
+                                life_frac: (1.0 - boss.aim_charge).clamp(0.0, 1.0),
+                                step: 1.0,
+                                total: 1.0,
+                                ghost_id: -1.0,
+                                flags: 5.0,
+                            });
+                        }
+                    }
+                }
+                BossKind::ChronoEclipse => {
+                    let is_lunar = boss.phase == 1;
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius + 14.0,
+                        r: if is_lunar { 0.56 } else { 1.0 },
+                        g: if is_lunar { 0.42 } else { 0.76 },
+                        b: if is_lunar { 1.0 } else { 0.22 },
+                        a: 0.60 * dying_alpha,
+                        glow: 3.8 * dying_alpha,
+                        shape: SHAPE_RING,
+                    });
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x,
+                        y: pos.y,
+                        radius: boss.radius,
+                        r: if is_lunar { 0.28 } else { 1.0 },
+                        g: if is_lunar { 0.16 } else { 0.56 },
+                        b: if is_lunar { 0.72 } else { 0.14 },
+                        a: 0.90 * dying_alpha,
+                        glow: 4.0 * dying_alpha,
+                        shape: SHAPE_STAR,
+                    });
+                    if boss.state == BossState::Active {
+                        if !is_lunar {
+                            // Solar Flare scorching corridors!
+                            for i in 0..3 {
+                                let a = boss.spoke_angle + (i as f32) * std::f32::consts::TAU / 3.0;
+                                let end_s = nearest_globe_pos(
+                                    camera,
+                                    tangent_endpoint_on_globe(boss.pos, Vec2::new(a.cos(), a.sin()) * 290.0),
+                                );
+                                self.beam_buf.push(BeamInstance {
+                                    x0: pos.x,
+                                    y0: pos.y,
+                                    x1: end_s.x,
+                                    y1: end_s.y,
+                                    thickness: 8.5,
+                                    r: 1.0,
+                                    g: 0.68,
+                                    b: 0.18,
+                                    a: 0.80,
+                                    glow: 3.4,
+                                });
+                            }
+                        } else {
+                            // Click-to-detonate converging Lunar Prisms!
+                            for (i, &(lp_w, alive)) in boss.lunar_prisms.iter().enumerate() {
+                                if !alive {
+                                    continue;
+                                }
+                                let lp = nearest_globe_pos(camera, lp_w);
+                                self.circle_buf.push(CircleInstance {
+                                    x: lp.x,
+                                    y: lp.y,
+                                    radius: 17.0,
+                                    r: 0.76,
+                                    g: 0.42,
+                                    b: 1.0,
+                                    a: 0.92,
+                                    glow: 3.2,
+                                    shape: SHAPE_DIAMOND,
+                                });
+                                self.aim_target_buf.push(AimTargetInstance {
+                                    x: lp.x,
+                                    y: lp.y,
+                                    radius: 20.0,
+                                    kind: 3.0,
+                                    progress: 0.0,
+                                    life_frac: 1.0,
+                                    step: (i + 1) as f32,
+                                    total: 6.0,
+                                    ghost_id: -1.0,
+                                    flags: 1.0,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Universal Orbiting Boss Weakpoint Core (Weakpoint Sight @3+ Optical Stacks, or Sentinel/VoidPrism)!
+            if boss.state == BossState::Active
+                && boss.weakpoint_cooldown <= 0.0
+                && (self.optical_stacks >= 3
+                    || matches!(boss.kind, BossKind::Sentinel | BossKind::VoidPrism))
+            {
+                let wp = nearest_globe_pos(camera, Self::boss_weakpoint_pos(boss));
+                self.circle_buf.push(CircleInstance {
+                    x: wp.x,
+                    y: wp.y,
+                    radius: 13.0,
+                    r: 1.0,
+                    g: 0.92,
+                    b: 0.30,
+                    a: 0.95,
+                    glow: 3.8,
+                    shape: SHAPE_DIAMOND,
+                });
+                self.aim_target_buf.push(AimTargetInstance {
+                    x: wp.x,
+                    y: wp.y,
+                    radius: 18.0,
+                    kind: 3.0,
+                    progress: 0.0,
+                    life_frac: 1.0,
+                    step: 1.0,
+                    total: 1.0,
+                    ghost_id: -1.0,
+                    flags: 1.0,
+                });
             }
         }
 
@@ -6596,6 +8693,32 @@ impl Game {
             });
         }
 
+        // Weaver laser-tether beams drawn cleanly between linked pairs!
+        let mut drawn_weavers: Vec<(u32, Vec2)> = Vec::new();
+        for e in &self.enemies {
+            if e.kind == EnemyKind::Weaver && e.link_id > 0 {
+                let p = nearest_globe_pos(camera, e.pos);
+                if let Some((_, other)) = drawn_weavers.iter().find(|(id, _)| *id == e.link_id) {
+                    if (*other - p).length() < 320.0 {
+                        self.beam_buf.push(BeamInstance {
+                            x0: other.x,
+                            y0: other.y,
+                            x1: p.x,
+                            y1: p.y,
+                            thickness: 4.0,
+                            r: 1.0,
+                            g: 0.34,
+                            b: 0.16,
+                            a: 0.86,
+                            glow: 2.6,
+                        });
+                    }
+                } else {
+                    drawn_weavers.push((e.link_id, p));
+                }
+            }
+        }
+
         // Enemies — distinct geometric SDF silhouettes by combat role.
         let hit_set: Vec<Vec2> = self.hit_flash_positions.clone();
         for e in &self.enemies {
@@ -6605,11 +8728,97 @@ impl Game {
                 SHAPE_STAR
             } else {
                 match e.kind {
-                    EnemyKind::Drone | EnemyKind::Dasher | EnemyKind::Umbra => SHAPE_CHEVRON,
-                    EnemyKind::Brute | EnemyKind::Splitter => SHAPE_HEX,
-                    EnemyKind::Orbiter | EnemyKind::Emitter | EnemyKind::Pulsar => SHAPE_STAR,
+                    EnemyKind::Drone | EnemyKind::Dasher | EnemyKind::Umbra | EnemyKind::Stalker => {
+                        SHAPE_CHEVRON
+                    }
+                    EnemyKind::Brute | EnemyKind::Splitter | EnemyKind::Reflector => SHAPE_HEX,
+                    EnemyKind::Carrier => SHAPE_DIAMOND,
+                    EnemyKind::Orbiter
+                    | EnemyKind::Emitter
+                    | EnemyKind::Pulsar
+                    | EnemyKind::Weaver
+                    | EnemyKind::Anchor => SHAPE_STAR,
                 }
             };
+            // Role-specific tactical telegraphs & auras!
+            if e.kind == EnemyKind::Anchor && e.state == EnemyState::Anchored {
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x,
+                    y: pos.y,
+                    radius: 135.0,
+                    r: 0.45,
+                    g: 0.28,
+                    b: 1.0,
+                    a: 0.22,
+                    glow: 1.1,
+                    shape: SHAPE_RING,
+                });
+            } else if e.kind == EnemyKind::Stalker && e.state == EnemyState::Blinking {
+                let dest = nearest_globe_pos(camera, e.charge_dir);
+                self.circle_buf.push(CircleInstance {
+                    x: dest.x,
+                    y: dest.y,
+                    radius: 18.0 * (0.5 + e.state_timer),
+                    r: 1.0,
+                    g: 0.28,
+                    b: 0.96,
+                    a: 0.72,
+                    glow: 2.4,
+                    shape: SHAPE_RING,
+                });
+            } else if e.kind == EnemyKind::Reflector && e.shield_broken_timer <= 0.0 {
+                // Gleaming front mirror shield arc + glowing amber dorsal weakpoint!
+                let fwd = e.charge_dir.normalize_or_zero();
+                let sp = pos + fwd * (e.radius * 0.92);
+                self.circle_buf.push(CircleInstance {
+                    x: sp.x,
+                    y: sp.y,
+                    radius: e.radius * 0.72,
+                    r: 0.85,
+                    g: 0.97,
+                    b: 1.0,
+                    a: 0.82,
+                    glow: 2.4,
+                    shape: SHAPE_RING,
+                });
+                let weak = pos - fwd * (e.radius * 0.78);
+                self.circle_buf.push(CircleInstance {
+                    x: weak.x,
+                    y: weak.y,
+                    radius: 5.5,
+                    r: 1.0,
+                    g: 0.82,
+                    b: 0.22,
+                    a: 0.92,
+                    glow: 2.8,
+                    shape: SHAPE_DIAMOND,
+                });
+            } else if e.kind == EnemyKind::Carrier {
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x,
+                    y: pos.y,
+                    radius: e.radius * 1.9,
+                    r: 1.0,
+                    g: 0.88,
+                    b: 0.28,
+                    a: 0.55,
+                    glow: 2.6,
+                    shape: SHAPE_RING,
+                });
+            }
+            if e.prism_mark_timer > 0.0 {
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x,
+                    y: pos.y,
+                    radius: e.radius + 7.0,
+                    r: 1.0,
+                    g: 0.42,
+                    b: 0.92,
+                    a: 0.65,
+                    glow: 2.2,
+                    shape: SHAPE_RING,
+                });
+            }
 
             if is_hit {
                 self.circle_buf.push(CircleInstance {

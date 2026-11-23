@@ -7,12 +7,13 @@ import { Input } from './input.js';
 import { AudioManager } from './audio.js';
 import { OverlayRenderer } from './overlay.js';
 import { getEvolutionSvg, getShardSvg } from './shardIcons.js';
+import { GhostNetwork, getSavedCallsign, saveCallsign } from './ghosts.js';
 
 const CIRCLE_STRIDE_FLOATS = 9;
 const BEAM_STRIDE_FLOATS = 10;       // layout from WASM (read only)
 const BEAM_AUGMENTED_STRIDE = 11;    // +1 form_progress float injected before upload
 const POPUP_STRIDE_FLOATS = 4;
-const AIM_TARGET_STRIDE_FLOATS = 8;
+const AIM_TARGET_STRIDE_FLOATS = 10;
 
 const AUDIO_BOSS_SPAWN = 1 << 2;
 const AUDIO_SHIELD_BREAK = 1 << 4;
@@ -21,6 +22,12 @@ const AUDIO_EVOLUTION = 1 << 8;
 const AUDIO_AIM_HIT = 1 << 9;
 const AUDIO_AIM_COMPLETE = 1 << 10;
 const AUDIO_AIM_MISS = 1 << 11;
+const AUDIO_GHOST_LOCK = 1 << 12;
+const AUDIO_GHOST_SHOT = 1 << 13;
+const AUDIO_DEADEYE_START = 1 << 14;
+const AUDIO_DEADEYE_VOLLEY = 1 << 15;
+const AUDIO_OBELISK_CAPTURE = 1 << 16;
+const AUDIO_WEAKPOINT_CRIT = 1 << 17;
 
 // Must stay in index-lock with Rust's SYNERGIES const (src/shards.rs).
 const SYNERGY_NAMES: string[] = [
@@ -39,38 +46,76 @@ const SYNERGY_PAIRS: [number, number, string][] = [
   [21, 19, 'PHASE WAKE'], [22, 4, 'RAIL FOCUS'], [22, 10, 'SURGICAL DRAIN'],
 ];
 
-const BOSS_NAMES: string[] = ['PRISM SENTINEL', 'HYDRA', 'VOID PRISM — FINAL BOSS'];
-const DAMAGE_SOURCE_NAMES: string[] = ['ENEMY CONTACT', 'PROJECTILE', 'BOSS CONTACT', 'VOID SHOCKWAVE'];
+// Must stay in index-lock with Rust's BossKind enum (src/entities.rs).
+const BOSS_NAMES: string[] = [
+  'PRISM SENTINEL',
+  'CHROMATIC HYDRA',
+  'VOID PRISM — APEX FINALE',
+  'THE PRISM LATTICE',
+  'THE MIRROR SOVEREIGN',
+  'THE CHRONO ECLIPSE',
+];
+const DAMAGE_SOURCE_NAMES: string[] = [
+  'ENEMY CONTACT',
+  'PROJECTILE / GHOST SNIPE',
+  'BOSS CONTACT',
+  'VOID SHOCKWAVE',
+];
 const RANK_TIMELINE_BUCKETS = 16;
+
+// Must stay in index-lock with Rust's PrismCore enum (src/entities.rs).
+interface CoreMeta { name: string; color: string; loadout: string; bonus: string }
+const PRISM_CORES: CoreMeta[] = [
+  { name: 'SNIPER LENS',       color: '#7df4ff', loadout: 'LENS + REFRACT',            bonus: '+25% Sniper DMG · Built-in Ricochet · Faster Dead-Eye' },
+  { name: 'PHASE BLADE',       color: '#5fffff', loadout: 'PHASE STEP L2 + MOMENTUM',  bonus: '+25% Dash Reach · 2× Chromatic Warp-Slice DMG' },
+  { name: 'REFRACTION NOVA',   color: '#c99bff', loadout: 'SPLIT + MIRROR',            bonus: '+15% Auto-Salvo Cadence · Wide Bullet-Heaven Fan' },
+  { name: 'RESONANCE CONDUIT', color: '#ff73d2', loadout: 'CASCADE + ARC · 2 STACKS',  bonus: '2× Optical Stacks & Bonus Reroll/Banish on Ghost Duels' },
+];
+
+// Must stay in index-lock with Rust's OverclockKind enum (src/shards.rs).
+interface OverclockMeta { name: string; color: string; desc: string }
+const OVERCLOCKS: OverclockMeta[] = [
+  { name: 'PRISM AMPLIFY',   color: '#ffe58e', desc: '+12% permanent Global Prism & Sniper Damage' },
+  { name: 'CADENCE BOOST',   color: '#7df4ff', desc: '+12% permanent Auto-Salvo Fire Rate' },
+  { name: 'HULL ASCENSION',  color: '#66ffaa', desc: '+30 Max Hull + Instant Full Hull Restore' },
+  { name: 'HYPER PHASE',     color: '#ff8df2', desc: '+14% Move Speed & +36 px Phase Dash Reach' },
+];
+
+const OPTICAL_PERKS: { name: string; desc: string; color: string }[] = [
+  { name: 'WEAKPOINT SIGHT',     desc: 'ALL BOSS WEAKPOINTS & REFLECTORS TAKE +40% SNIPER CRIT', color: '#7df4ff' },
+  { name: 'PRISM RICOCHET',      desc: 'EVERY MANUAL SNIPER SHOT BOUNCES TO AN EXTRA TARGET',    color: '#c99bff' },
+  { name: 'PHASE REFUND',        desc: 'COUNTER-SNIPING A GHOST INSTANTLY RESETS PHASE DASH',    color: '#5fffff' },
+  { name: 'SPECTRAL OVERCLOCK',  desc: '+25% GLOBAL DAMAGE & ULTRA-WIDE GOLDEN DEAD-EYE',        color: '#ffe875' },
+];
 
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
 type Rarity = 'common' | 'rare' | 'legendary' | 'evolution';
-interface ShardMeta { name: string; color: string; desc: string; synergies: string[]; rarity: Rarity }
+interface ShardMeta { name: string; color: string; desc: string; synergies: string[]; rarity: Rarity; mouseTip?: string }
 interface EvolutionMeta { name: string; color: string; desc: string; recipe: string }
 const SHARDS: ShardMeta[] = [
-  { name: 'SPLIT',        color: '#8effa3', rarity: 'common',    desc: 'Fan out more beams per volley',          synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
-  { name: 'REFRACT',      color: '#7fd3ff', rarity: 'rare',      desc: 'Beams curve toward nearest enemy',       synergies: ['ECHO → TRACKING ECHO'] },
-  { name: 'MIRROR',       color: '#c9a3ff', rarity: 'common',    desc: 'Fire symmetrically in every direction',  synergies: ['DIFFRACT → SUPERNOVA'] },
-  { name: 'CHROMATIC',    color: '#ffa3c9', rarity: 'common',    desc: 'Split into red / green / blue sub-rays', synergies: ['LENS → PRISM CANNON'] },
-  { name: 'LENS',         color: '#ffe58e', rarity: 'common',    desc: 'Focus thicker, heavier optical beams',   synergies: ['CHROMATIC → PRISM CANNON'] },
-  { name: 'DIFFRACT',     color: '#8efff4', rarity: 'rare',      desc: 'Impacts scatter into radial starbursts', synergies: ['MIRROR → SUPERNOVA'] },
-  { name: 'ECHO',         color: '#ff9d6c', rarity: 'rare',      desc: 'Delayed reverberating second salvo',     synergies: ['REFRACT → TRACKING ECHO'] },
-  { name: 'HALO',         color: '#f5f5bc', rarity: 'rare',      desc: 'Orbital crystal beads slice on contact', synergies: ['FROST → FROZEN ORBIT', 'MOMENTUM → EVENT HORIZON'] },
-  { name: 'CASCADE',      color: '#ff6f91', rarity: 'legendary', desc: 'Kills fork into chain-reaction rays',    synergies: ['SPLIT → CHAIN REACTION', 'THORNS → MARTYRDOM'] },
-  { name: 'INTERFERENCE', color: '#9a9dff', rarity: 'legendary', desc: 'Standing-wave rings ripple outward',     synergies: ['BARRIER → RESONANCE', 'MAGNET → GRAVITY WELL', 'MINEFIELD → SEISMIC FIELD'] },
-  { name: 'SIPHON',       color: '#a3ffdb', rarity: 'common',    desc: 'Beams siphon hull health on hit',        synergies: ['THORNS → BLOOD PACT'] },
-  { name: 'FROST',        color: '#b3e5fc', rarity: 'common',    desc: 'Cryo-chill enemies slowed by beams',     synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
-  { name: 'BARRIER',      color: '#64b5f6', rarity: 'common',    desc: 'Regenerating shield absorbs + burns',    synergies: ['INTERFERENCE → RESONANCE'] },
-  { name: 'THORNS',       color: '#ef5350', rarity: 'rare',      desc: 'Hull damage triggers retaliatory rays',  synergies: ['SIPHON → BLOOD PACT', 'CASCADE → MARTYRDOM'] },
-  { name: 'MAGNET',       color: '#7cffd4', rarity: 'common',    desc: 'Vacuum radiance crystals from afar',     synergies: ['INTERFERENCE → GRAVITY WELL', 'MINEFIELD → GRAVITY MINES'] },
-  { name: 'MOMENTUM',     color: '#d7ff6f', rarity: 'common',    desc: 'Faster glide & quicker phase dash',      synergies: ['HALO → EVENT HORIZON'] },
-  { name: 'ARMOR',        color: '#9ab8d0', rarity: 'common',    desc: 'Reduce all incoming damage 8% / level',  synergies: [] },
-  { name: 'LUCK',         color: '#ffd740', rarity: 'rare',      desc: 'Boost rare & legendary shard rolls',     synergies: [] },
-  { name: 'PRISM HEART',  color: '#ff7eb3', rarity: 'common',    desc: '+15 max hull & stronger rank-up heal',   synergies: [] },
-  { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: 'Longer dash i-frames; L3 afterimage',    synergies: ['MINEFIELD → PHASE WAKE'] },
-  { name: 'ARC',          color: '#b58cff', rarity: 'rare',      desc: 'Chain lightning arcs across crowds',     synergies: ['FROST → STATIC FREEZE', 'CASCADE → STORM FRONT', 'MINEFIELD → TRIPWIRE GRID'] },
-  { name: 'MINEFIELD',    color: '#7dff98', rarity: 'legendary', desc: 'Seed faceted charges that pull & burst', synergies: ['MAGNET → GRAVITY MINES', 'INTERFERENCE → SEISMIC FIELD', 'ARC → TRIPWIRE GRID', 'PHASE STEP → PHASE WAKE'] },
-  { name: 'LANCE',        color: '#fff06a', rarity: 'rare',      desc: 'Periodic heavy piercing rail shot',      synergies: ['LENS → RAIL FOCUS', 'SIPHON → SURGICAL DRAIN'] },
+  { name: 'SPLIT',        color: '#8effa3', rarity: 'common',    desc: 'Fan out more beams per volley',              mouseTip: 'Sniper shots fire dual wing-lances',                     synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
+  { name: 'REFRACT',      color: '#7fd3ff', rarity: 'rare',      desc: 'Beams curve toward nearest enemy',           mouseTip: 'Sniper shots ricochet to nearby enemies',                synergies: ['ECHO → TRACKING ECHO'] },
+  { name: 'MIRROR',       color: '#c9a3ff', rarity: 'common',    desc: 'Fire symmetrically in every direction',      synergies: ['DIFFRACT → SUPERNOVA'] },
+  { name: 'CHROMATIC',    color: '#ffa3c9', rarity: 'common',    desc: 'Split into red / green / blue sub-rays',     mouseTip: 'Applies Prism Mark (+35% DMG & RGB burst on death)',     synergies: ['LENS → PRISM CANNON'] },
+  { name: 'LENS',         color: '#ffe58e', rarity: 'common',    desc: 'Focus thicker, heavier optical beams',       mouseTip: '+12% larger Ghost/Weakpoint hitboxes & wider lance',     synergies: ['CHROMATIC → PRISM CANNON'] },
+  { name: 'DIFFRACT',     color: '#8efff4', rarity: 'rare',      desc: 'Impacts scatter into radial starbursts',     synergies: ['MIRROR → SUPERNOVA'] },
+  { name: 'ECHO',         color: '#ff9d6c', rarity: 'rare',      desc: 'Delayed reverberating second salvo',         mouseTip: 'Fires a delayed 120ms ghost-strike sniper echo',         synergies: ['REFRACT → TRACKING ECHO'] },
+  { name: 'HALO',         color: '#f5f5bc', rarity: 'rare',      desc: 'Orbital crystal beads slice on contact',     synergies: ['FROST → FROZEN ORBIT', 'MOMENTUM → EVENT HORIZON'] },
+  { name: 'CASCADE',      color: '#ff6f91', rarity: 'legendary', desc: 'Kills fork into chain-reaction rays',        mouseTip: 'Ghost Duel wins detonate a chain starburst',             synergies: ['SPLIT → CHAIN REACTION', 'THORNS → MARTYRDOM'] },
+  { name: 'INTERFERENCE', color: '#9a9dff', rarity: 'legendary', desc: 'Standing-wave rings ripple outward',         synergies: ['BARRIER → RESONANCE', 'MAGNET → GRAVITY WELL', 'MINEFIELD → SEISMIC FIELD'] },
+  { name: 'SIPHON',       color: '#a3ffdb', rarity: 'common',    desc: 'Beams siphon hull health on hit',            synergies: ['THORNS → BLOOD PACT'] },
+  { name: 'FROST',        color: '#b3e5fc', rarity: 'common',    desc: 'Cryo-chill enemies slowed by beams',         mouseTip: 'Slows Pink Ghost strafing & extends lock timer',         synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
+  { name: 'BARRIER',      color: '#64b5f6', rarity: 'common',    desc: 'Regenerating shield absorbs + burns',        synergies: ['INTERFERENCE → RESONANCE'] },
+  { name: 'THORNS',       color: '#ef5350', rarity: 'rare',      desc: 'Hull damage triggers retaliatory rays',      synergies: ['SIPHON → BLOOD PACT', 'CASCADE → MARTYRDOM'] },
+  { name: 'MAGNET',       color: '#7cffd4', rarity: 'common',    desc: 'Vacuum radiance crystals from afar',         synergies: ['INTERFERENCE → GRAVITY WELL', 'MINEFIELD → GRAVITY MINES'] },
+  { name: 'MOMENTUM',     color: '#d7ff6f', rarity: 'common',    desc: 'Faster glide & +12 px longer Phase Dash',    synergies: ['HALO → EVENT HORIZON'] },
+  { name: 'ARMOR',        color: '#9ab8d0', rarity: 'common',    desc: 'Reduce all incoming damage 8% / level',      synergies: [] },
+  { name: 'LUCK',         color: '#ffd740', rarity: 'rare',      desc: 'Boost rare & legendary shard rolls',         mouseTip: 'Spawns Golden Ace Phantoms (3× rewards & Relic loot)',   synergies: [] },
+  { name: 'PRISM HEART',  color: '#ff7eb3', rarity: 'common',    desc: '+15 max hull & stronger rank-up heal',       synergies: [] },
+  { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: '+32 px Dash reach/lvl + Warp Ribbon slice',  mouseTip: 'Counter-sniping Ghosts instantly refunds Phase Dash',    synergies: ['MINEFIELD → PHASE WAKE'] },
+  { name: 'ARC',          color: '#b58cff', rarity: 'rare',      desc: 'Chain lightning arcs across crowds',         synergies: ['FROST → STATIC FREEZE', 'CASCADE → STORM FRONT', 'MINEFIELD → TRIPWIRE GRID'] },
+  { name: 'MINEFIELD',    color: '#7dff98', rarity: 'legendary', desc: 'Seed faceted charges that pull & burst',     synergies: ['MAGNET → GRAVITY MINES', 'INTERFERENCE → SEISMIC FIELD', 'ARC → TRIPWIRE GRID', 'PHASE STEP → PHASE WAKE'] },
+  { name: 'LANCE',        color: '#fff06a', rarity: 'rare',      desc: 'Periodic heavy piercing rail shot',          mouseTip: 'Boosts manual sniper rail damage & boss weakpoint crit', synergies: ['LENS → RAIL FOCUS', 'SIPHON → SURGICAL DRAIN'] },
 ];
 
 // Must stay in index-lock with Rust's EvolutionKind enum (src/shards.rs).
@@ -114,6 +159,7 @@ interface StoredRunSummary {
 const BEST_RUNS_STORAGE_KEY = 'prism.bestRuns.v1';
 const QUALITY_STORAGE_KEY = 'prism.visualQuality.v1';
 const NUMBERS_STORAGE_KEY = 'prism.damageNumbers.v1';
+const CORE_STORAGE_KEY = 'prism.selectedCore.v1';
 const MAX_STORED_RUNS = 5;
 
 const formatTime = (secondsRaw: number): string => {
@@ -267,6 +313,7 @@ async function main(): Promise<void> {
   const xpFillEl = getEl('xp-fill');
   const trayEl = getEl('shards-tray');
   const levelupEl = getEl('levelup');
+  const levelupTitleEl = getEl('levelup-title');
   const levelupRankEl = getEl('levelup-rank');
   const levelupCardsEl = getEl('levelup-cards');
   const levelupFooterEl = getEl('levelup-footer');
@@ -296,10 +343,18 @@ async function main(): Promise<void> {
   const aimHudEl = getEl('aim-hud');
   const aimTierValEl = getEl('aim-tier-val');
   const aimComboValEl = getEl('aim-combo-val');
+  const aimStacksValEl = getEl('aim-stacks-val');
+  const perkPipEls = [getEl('perk-0'), getEl('perk-1'), getEl('perk-2'), getEl('perk-3')];
+  const overdriveTextEl = getEl('overdrive-text');
+  const overdrivePctEl = getEl('overdrive-pct');
+  const overdriveFillEl = getEl('overdrive-fill');
   const aimDrillValEl = getEl('aim-drill-val');
   const aimAccValEl = getEl('aim-acc-val');
 
   const titleScreenEl = getEl('title-screen');
+  const callsignInputEl = getEl('callsign-input') as HTMLInputElement;
+  const ghostNetStatusEl = getEl('ghost-net-status');
+  const coreGridEl = getEl('core-grid');
   const btnPlay = getEl('btn-play') as HTMLButtonElement;
   const btnDaily = getEl('btn-daily') as HTMLButtonElement;
   const titleBestEl = getEl('title-best');
@@ -360,6 +415,83 @@ async function main(): Promise<void> {
   const overlay = new OverlayRenderer(overlayCanvas);
   const input = new Input(canvas);
   const audio = new AudioManager();
+  const ghostNet = new GhostNetwork();
+
+  // Pilot Callsign & Live Ghost Network Roster sync!
+  let playerCallsign = getSavedCallsign();
+  callsignInputEl.value = playerCallsign;
+  callsignInputEl.addEventListener('change', () => {
+    playerCallsign = saveCallsign(callsignInputEl.value);
+    callsignInputEl.value = playerCallsign;
+  });
+  callsignInputEl.addEventListener('blur', () => {
+    playerCallsign = saveCallsign(callsignInputEl.value);
+    callsignInputEl.value = playerCallsign;
+  });
+
+  const updateGhostNetBadge = (): void => {
+    const roster = ghostNet.getRoster();
+    if (ghostNet.online) {
+      const pilotWord = ghostNet.humanCount === 1 ? 'PILOT' : 'PILOTS';
+      ghostNetStatusEl.textContent = `● LIVE GHOST NET · ${ghostNet.humanCount} ${pilotWord} · ${roster.length} SNIPERS`;
+    } else {
+      ghostNetStatusEl.textContent = `● GHOST ROSTER · ${roster.length} ACE PHANTOMS READY`;
+    }
+  };
+  updateGhostNetBadge();
+
+  // Playable Prism Core selector!
+  let selectedCore = 0;
+  try {
+    const savedCore = Number(window.localStorage.getItem(CORE_STORAGE_KEY));
+    if (Number.isInteger(savedCore) && savedCore >= 0 && savedCore < PRISM_CORES.length) {
+      selectedCore = savedCore;
+    }
+  } catch { /* ignore */ }
+
+  const renderCoreCards = (): void => {
+    coreGridEl.innerHTML = '';
+    PRISM_CORES.forEach((core, idx) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `core-card${idx === selectedCore ? ' selected' : ''}`;
+      btn.style.setProperty('--cc', core.color);
+      btn.innerHTML =
+        `<div class="core-card-top">` +
+          `<span class="core-card-name">${core.name}</span>` +
+          `<span class="core-card-tag">${core.loadout}</span>` +
+        `</div>` +
+        `<div class="core-card-desc">${core.bonus}</div>`;
+      btn.addEventListener('click', () => {
+        ensureAudio();
+        audio.playUiSelect();
+        selectedCore = idx;
+        try { window.localStorage.setItem(CORE_STORAGE_KEY, String(idx)); } catch { /* ignore */ }
+        renderCoreCards();
+      });
+      coreGridEl.appendChild(btn);
+    });
+  };
+  renderCoreCards();
+
+  const syncGhostsIntoWasm = (targetGame: Game): void => {
+    targetGame.clear_ghost_profiles();
+    for (const g of ghostNet.getRoster()) {
+      targetGame.register_ghost_profile(
+        g.rosterIndex,
+        g.core,
+        g.style,
+        g.peakRank,
+        g.aimTier,
+        g.hue,
+      );
+    }
+  };
+
+  void ghostNet.fetchLiveRoster().then(() => {
+    updateGhostNetBadge();
+    if (game) syncGhostsIntoWasm(game);
+  });
 
   // Restore saved preferences.
   let numbersEnabled = true;
@@ -505,6 +637,7 @@ async function main(): Promise<void> {
   let lastMaxHp = -1;
   let lastHpPct = -1;
   let lastDashReady = false;
+  let lastDashDistPx = -1;
   let lastTimerStr = '';
   let lastWave = -1;
   let lastBossActive = false;
@@ -517,17 +650,21 @@ async function main(): Promise<void> {
   let lastNearBits = -1;
   let announcedSynergyBits = 0;
   let announcedEvoBits = 0;
+  let announcedPerkBits = 0;
+  let lastDuelsWon = 0;
+  let lastGhostAlertId = -1;
 
   const resetHudCache = (): void => {
     lastRank = -1; lastKills = -1; lastScore = -1;
     lastXpPct = -1; lastXp = -1; lastXpNeeded = -1;
     lastHp = -1; lastMaxHp = -1; lastHpPct = -1;
-    lastDashReady = false; lastTimerStr = ''; lastWave = -1;
+    lastDashReady = false; lastDashDistPx = -1; lastTimerStr = ''; lastWave = -1;
     lastBossActive = false; lastBossKind = -2; lastBossPct = -1;
     lastStreak = -1; lastEndless = false;
     lastPipLevels.fill(-1);
     lastActiveBits = -1; lastNearBits = -1;
     announcedSynergyBits = 0; announcedEvoBits = 0;
+    announcedPerkBits = 0; lastDuelsWon = 0; lastGhostAlertId = -1;
   };
 
   const syncCursorVisibility = (): void => {
@@ -538,10 +675,14 @@ async function main(): Promise<void> {
   const startNewRun = (seed: number, dailyMode: boolean): void => {
     ensureAudio();
     audio.playUiSelect();
+    playerCallsign = saveCallsign(callsignInputEl.value);
+    callsignInputEl.value = playerCallsign;
     currentSeed = seed >>> 0;
     isDailyRun = dailyMode;
     game.free();
     game = new Game(viewW, viewH, currentSeed);
+    game.set_prism_core(selectedCore);
+    syncGhostsIntoWasm(game);
     resetWasmViews();
     resetHudCache();
     overlay.clear();
@@ -556,23 +697,27 @@ async function main(): Promise<void> {
     levelupEl.classList.remove('shown');
     deathScreenEl.classList.remove('shown');
     hudEl.classList.remove('hidden');
-    aimHudEl.classList.remove('shown');
+    aimHudEl.classList.add('shown');
     audio.duck(false);
+    const coreName = PRISM_CORES[selectedCore]?.name ?? 'SNIPER LENS';
     sysBarMidEl.textContent = dailyMode
-      ? `DAILY ${daily.dateLabel} · SEED #${currentSeed}`
-      : `SPHERICAL ARENA · SEED #${currentSeed}`;
+      ? `DAILY ${daily.dateLabel} · ${coreName} · SEED #${currentSeed}`
+      : `${coreName} · ${playerCallsign} · SEED #${currentSeed}`;
     overlay.announce(
-      dailyMode ? `DAILY ${daily.dateLabel}` : 'PRISM ENGAGED',
-      '#7df4ff',
-      'COLLECT GEMS TO EVOLVE · CLICK & TRACK GOLDEN NODES FOR OVERDRIVE',
+      dailyMode ? `DAILY · ${coreName}` : `${coreName} ENGAGED`,
+      PRISM_CORES[selectedCore]?.color ?? '#7df4ff',
+      'COUNTER-SNIPE PINK GHOSTS · CHARGE RMB DEAD-EYE OVERDRIVE',
     );
     last = performance.now();
   };
 
   if (autoStart) {
+    game.set_prism_core(selectedCore);
+    syncGhostsIntoWasm(game);
     titleScreenEl.classList.remove('shown');
     hudEl.classList.remove('hidden');
-    sysBarMidEl.textContent = `SPHERICAL ARENA · SEED #${currentSeed}`;
+    aimHudEl.classList.add('shown');
+    sysBarMidEl.textContent = `${PRISM_CORES[selectedCore]?.name ?? 'SNIPER LENS'} · SEED #${currentSeed}`;
   }
 
   btnPlay.addEventListener('click', () => startNewRun((Math.random() * 0xffffffff) >>> 0, false));
@@ -607,13 +752,12 @@ async function main(): Promise<void> {
     const evoLine = activeEvo.length > 0
       ? `<div style="margin-top:4px;color:#ffba49">★ EVOLUTIONS · ${activeEvo.map(escapeHtml).join(' / ')}</div>`
       : '';
-    const aimLine = shots > 0 || game.aim_drills_completed() > 0
-      ? `<div style="margin-top:6px;color:#7df4ff">AIM MASTERY · TIER ${game.aim_tier()} · ${acc}% ACC · ${game.aim_drills_completed()} DRILLS</div>`
-      : '';
+    const aimLine =
+      `<div style="margin-top:6px;color:#ff8df2">OPTICAL MASTERY · ${game.optical_stacks()} STACKS (+${game.optical_stacks() * 6}% DMG) · ${game.ghost_duels_won()} GHOST DUELS · ${acc}% ACC · DASH ${Math.round(game.dash_distance_px())}M</div>`;
 
     pauseBuildEl.innerHTML =
       `<div style="display:flex;justify-content:space-between;color:#eefaff;margin-bottom:10px">` +
-        `<span>BUILD SPECTRUM · SEED #${game.seed()}${isDailyRun ? ' (DAILY)' : ''}</span>` +
+        `<span>${escapeHtml(PRISM_CORES[game.prism_core()]?.name ?? 'PRISM CORE')} · SEED #${game.seed()}${isDailyRun ? ' (DAILY)' : ''}</span>` +
         `<span>${formatCompact(dps)} DPS · PEAK ×${game.peak_kill_streak()}</span>` +
       `</div>` +
       shardBars + synLine + evoLine + aimLine;
@@ -724,6 +868,15 @@ async function main(): Promise<void> {
     levelupFooterEl.innerHTML = '';
     modalFocusIdx = 0;
 
+    const isRelic = game.relic_chest_active();
+    levelupEl.classList.toggle('relic-chest', isRelic);
+    levelupTitleEl.textContent = isRelic
+      ? '★ RELIC CHEST · +2 SHARD LEVELS + FULL HULL RESTORE'
+      : 'REFRACTION UPGRADE · SELECT A SHARD';
+    levelupRankEl.textContent = isRelic ? 'RELIC CACHE' : `RANK ${game.rank()}`;
+
+    const banishCharges = game.banish_charges();
+
     for (let slot = 0; slot < 3; slot++) {
       const offerType = game.level_choice_type(slot);
       const offerIdx = game.level_choice(slot);
@@ -748,22 +901,45 @@ async function main(): Promise<void> {
           `<div class="shard-name">${meta.name}</div>` +
           `<div class="shard-syn-callout ready">${meta.recipe}</div>` +
           `<div class="shard-desc">${meta.desc}</div>`;
+      } else if (offerType === 2) {
+        if (offerIdx >= OVERCLOCKS.length) continue;
+        const meta = OVERCLOCKS[offerIdx]!;
+        card.classList.add('overclock');
+        card.style.setProperty('--sc', meta.color);
+        card.innerHTML =
+          `<div class="shard-top-row">` +
+            `<div class="shard-emblem">${getEvolutionSvg(offerIdx % EVOLUTIONS.length, meta.color)}</div>` +
+            `<div class="shard-tag-col">` +
+              `<span class="shard-rarity overclock">✦ OVERCLOCK</span>` +
+              `<span class="shard-hotkey-badge">[${slot + 1}]</span>` +
+            `</div>` +
+          `</div>` +
+          `<div class="shard-name">${meta.name}</div>` +
+          `<div class="shard-syn-callout ready">HYPER-PRISM LIMIT BREAK · STACKABLE</div>` +
+          `<div class="shard-desc">${meta.desc}</div>`;
       } else {
         if (offerIdx >= SHARDS.length) continue;
         const meta = SHARDS[offerIdx]!;
         const currentLevel = game.inventory_level(offerIdx);
-        const nextLevel = currentLevel + 1;
+        const levelGain = isRelic ? 2 : 1;
+        const nextLevel = Math.min(6, currentLevel + levelGain);
         card.style.setProperty('--sc', meta.color);
 
         const diamonds = Array.from({ length: 6 }, (_, n) => {
           const lvl = n + 1;
-          const cls = lvl <= currentLevel ? 'owned' : lvl === nextLevel ? 'next' : '';
+          const cls = lvl <= currentLevel ? 'owned' : lvl <= nextLevel ? 'next' : '';
           return `<span class="shard-diamond ${cls}"></span>`;
         }).join('');
 
         const syn = getSmartSynergyCallout(offerIdx, nextLevel);
         const synHtml = syn
           ? `<div class="shard-syn-callout${syn.ready ? ' ready' : ''}">${escapeHtml(syn.text)}</div>`
+          : '';
+        const mouseHtml = meta.mouseTip
+          ? `<div class="shard-mouse-tag">⌖ SNIPER · ${escapeHtml(meta.mouseTip)}</div>`
+          : '';
+        const banishHtml = banishCharges > 0
+          ? `<div class="shard-card-foot"><span class="shard-banish-btn" data-banish-slot="${slot}">BANISH ×${banishCharges}</span></div>`
           : '';
 
         card.innerHTML =
@@ -777,7 +953,19 @@ async function main(): Promise<void> {
           `<div class="shard-name">${meta.name}</div>` +
           `<div class="shard-diamonds">${diamonds}<span class="shard-level-txt">L${currentLevel}→${nextLevel}</span></div>` +
           `<div class="shard-desc">${meta.desc}</div>` +
-          synHtml;
+          mouseHtml +
+          synHtml +
+          banishHtml;
+
+        const banishEl = card.querySelector<HTMLElement>('.shard-banish-btn');
+        if (banishEl) {
+          banishEl.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            audio.playUiSelect();
+            game.banish_level_choice(slot);
+            renderLevelUpCards();
+          });
+        }
       }
 
       attachHoloTilt(card);
@@ -936,16 +1124,23 @@ async function main(): Promise<void> {
         buildRankSparklineSvg(game, t / 60) +
       `</div>`;
 
+    const coreName = PRISM_CORES[game.prism_core()]?.name ?? 'SNIPER LENS';
+    const duelsWon = game.ghost_duels_won();
+    const opticalStacks = game.optical_stacks();
+    const obelisksCap = game.obelisks_captured();
+    const overclocks = game.overclock_count();
+
     const rightCol =
       `<div>` +
-        `<div class="recap-section-title">RUN DOSSIER · SEED #${game.seed()}</div>` +
+        `<div class="recap-section-title">RUN DOSSIER · ${escapeHtml(coreName)} · #${game.seed()}</div>` +
         `<div class="dossier-row"><span class="dossier-label">SURVIVAL TIME</span><span class="dossier-val">${timeStr} (RANK ${game.rank()})</span></div>` +
         `<div class="dossier-row"><span class="dossier-label">HOSTILES SHATTERED</span><span class="dossier-val">${game.kills_total()} (PEAK ×${peakStreak})</span></div>` +
         `<div class="dossier-row"><span class="dossier-label">AVERAGE DPS</span><span class="dossier-val">${formatCompact(avgDps)} / s</span></div>` +
-        `<div class="dossier-row"><span class="dossier-label">BOSSES DEFEATED</span><span class="dossier-val">${bossKills}</span></div>` +
+        `<div class="dossier-row"><span class="dossier-label">BOSSES / OBELISKS</span><span class="dossier-val">${bossKills} BOSS · ${obelisksCap} OBELISK${overclocks > 0 ? ` · ${overclocks} OC` : ''}</span></div>` +
+        `<div class="dossier-row"><span class="dossier-label">GHOST DUELS / STACKS</span><span class="dossier-val" style="color:#ff8df2">${duelsWon} WON · ${opticalStacks} OPTICAL (+${opticalStacks * 6}% DMG)</span></div>` +
         `<div class="dossier-row"><span class="dossier-label">HULL DMG / SHIELD</span><span class="dossier-val">${dmgTaken} / ${barrierAbs}</span></div>` +
         (aimShots > 0 || game.aim_drills_completed() > 0
-          ? `<div class="dossier-row"><span class="dossier-label">AIM MASTERY</span><span class="dossier-val" style="color:#ffd95e">TIER ${game.aim_tier()} · ${aimAcc}% ACC · ${game.aim_drills_completed()} DRILLS</span></div>`
+          ? `<div class="dossier-row"><span class="dossier-label">AIM MASTERY</span><span class="dossier-val" style="color:#ffd95e">TIER ${game.aim_tier()} · ${aimAcc}% ACC · PEAK ×${game.peak_aim_combo()}</span></div>`
           : '') +
         (deathCause ? `<div class="dossier-row"><span class="dossier-label">FINAL BLOW</span><span class="dossier-val" style="color:#ff6b8b">${escapeHtml(deathCause)}</span></div>` : '') +
         `<div class="best-run-panel"><div class="recap-section-title" style="margin-bottom:4px">${isNewBest ? '★ NEW PERSONAL BEST' : 'LEADERBOARD'}</div>${lbHtml}</div>` +
@@ -959,12 +1154,29 @@ async function main(): Promise<void> {
     if (victory) audio.playVictory();
     else audio.playDeath();
 
+    // Publish this run's Ghost Sniper profile to the live Cloudflare Ghost Roster!
+    if (game.rank() >= 2 || game.score() >= 150) {
+      const topShardStr = ownedShards[0] ? `${ownedShards[0].name} ${ownedShards[0].level}` : coreName;
+      const inferredStyle = game.aim_drills_completed() >= 3 ? 2 : game.aim_tier() >= 3 ? 1 : 0;
+      void ghostNet.submitRunGhost({
+        callsign: playerCallsign,
+        core: game.prism_core(),
+        style: inferredStyle,
+        peakRank: game.peak_rank(),
+        aimTier: game.aim_tier(),
+        aimCombo: game.peak_aim_combo(),
+        score: game.score(),
+        wave: game.wave() + 1,
+        topShard: topShardStr,
+      }).then(() => updateGhostNetBadge());
+    }
+
     const shardText = ownedShards.map((s) => `${s.name} L${s.level}`).join(', ');
     lastRunTelemetryText =
-      `PRISM ${victory ? 'VICTORY' : 'RUN'} | Seed #${game.seed()}${isDailyRun ? ` (Daily ${daily.dateLabel})` : ''}\n` +
+      `PRISM 2.0 ${victory ? 'VICTORY' : 'RUN'} | ${playerCallsign} (${coreName}) | Seed #${game.seed()}${isDailyRun ? ` (Daily ${daily.dateLabel})` : ''}\n` +
       `Score: ${game.score()} | Time: ${timeStr} | Rank: ${game.rank()} | Kills: ${game.kills_total()} (Peak ×${peakStreak})\n` +
-      `Avg DPS: ${Math.round(avgDps)} | Aim Tier: ${game.aim_tier()} (${aimAcc}% acc, ${game.aim_drills_completed()} drills)\n` +
-      `Shards: ${shardText || 'none'} | Synergies: ${activeSynergies.join(', ') || 'none'}`;
+      `Avg DPS: ${Math.round(avgDps)} | Bosses: ${bossKills} | Obelisks: ${obelisksCap} | Ghost Duels: ${duelsWon} (${opticalStacks} Optical Stacks)\n` +
+      `Aim Tier: ${game.aim_tier()} (${aimAcc}% acc, Peak ×${game.peak_aim_combo()}) | Shards: ${shardText || 'none'}`;
   };
 
   const hideDeathScreen = (): void => {
@@ -1000,6 +1212,13 @@ async function main(): Promise<void> {
   deathRestartEl.addEventListener('click', doRestart);
 
   window.addEventListener('keydown', (e) => {
+    const targetEl = e.target as HTMLElement | null;
+    if (targetEl && (targetEl.tagName === 'INPUT' || targetEl.tagName === 'TEXTAREA')) {
+      if (e.key === 'Enter') {
+        targetEl.blur();
+      }
+      return;
+    }
     if (!isStarted) {
       if (e.key === 'Enter' || e.key === ' ') {
         startNewRun((Math.random() * 0xffffffff) >>> 0, false);
@@ -1158,8 +1377,20 @@ async function main(): Promise<void> {
 
     const [ix, iy] = input.direction();
     const aim = input.consumeAim();
+    let dashPressed = input.consumeDash();
+    const wantOverdrive = input.consumeOverdrive();
+    let overdrivePressed = false;
+    if (wantOverdrive && !modalShown && !deathShown) {
+      if (game.overdrive_charge() >= 1.0 && !game.deadeye_active()) {
+        overdrivePressed = true;
+      } else if (!game.deadeye_active()) {
+        // Fallback: RMB dashes seamlessly while Dead-Eye is charging!
+        dashPressed = true;
+      }
+    }
     game.set_input(ix, iy);
-    game.set_dash_input(input.consumeDash());
+    game.set_dash_input(dashPressed);
+    game.set_overdrive_input(overdrivePressed);
     game.set_aim_input(aim.offsetX, aim.offsetY, aim.active, aim.clicked && !modalShown && !deathShown, aim.held && !modalShown && !deathShown);
     game.update(simDt);
 
@@ -1177,6 +1408,16 @@ async function main(): Promise<void> {
     const aimTracking = game.aim_tracking_active();
     const aimTrackProgress = game.aim_track_progress();
     const aimCombo = game.aim_combo();
+    const opticalStacks = game.optical_stacks();
+    const opticalPerkBits = game.optical_perk_bits();
+    const focusMult = game.focus_multiplier();
+    const overdriveCharge = game.overdrive_charge();
+    const deadeyeActive = game.deadeye_active();
+    const deadeyeTimerPct = game.deadeye_timer_pct();
+    const deadeyeLocks = game.deadeye_locks_count();
+    const duelsWon = game.ghost_duels_won();
+    const activeGhostId = game.active_ghost_id();
+    const activeGhostGolden = game.active_ghost_is_golden();
 
     if (!deathShown && !modalShown) {
       audio.tick(
@@ -1195,18 +1436,57 @@ async function main(): Promise<void> {
       );
     }
 
-    // Visual hit-marker & callout banners.
-    if (eventBits & AUDIO_AIM_HIT) overlay.pulseHitMarker();
-    if (eventBits & AUDIO_AIM_MISS) overlay.pulseMissMarker();
+    // Visual hit-marker & tactical callout banners.
+    if (eventBits & (AUDIO_AIM_HIT | AUDIO_WEAKPOINT_CRIT | AUDIO_DEADEYE_VOLLEY)) overlay.pulseHitMarker();
+    if (eventBits & (AUDIO_AIM_MISS | AUDIO_GHOST_SHOT)) overlay.pulseMissMarker();
     if (eventBits & AUDIO_AIM_COMPLETE) {
       overlay.pulseHitMarker();
-      overlay.announce(`PRISM OVERDRIVE · TIER ${game.aim_tier()}`, '#ffe066', `AIM CHAIN ×${aimCombo}`);
+      const wonGhost = activeGhostId >= 0 ? ghostNet.getByIndex(activeGhostId) : null;
+      overlay.announce(
+        wonGhost ? `GHOST COUNTER-SNIPED · ${wonGhost.callsign}` : `GHOST DUEL WON · TIER ${game.aim_tier()}`,
+        activeGhostGolden ? '#ffe875' : '#ff73d2',
+        `OPTICAL STACKS ${opticalStacks} · +${opticalStacks * 6}% DMG`,
+      );
+    }
+    if ((eventBits & AUDIO_GHOST_LOCK) && activeGhostId >= 0 && activeGhostId !== lastGhostAlertId) {
+      lastGhostAlertId = activeGhostId;
+      const g = ghostNet.getByIndex(activeGhostId);
+      const label = g ? `${g.callsign}${g.isHuman ? ' (PILOT)' : ' (ACE)'}` : 'SPECTRAL SNIPER';
+      overlay.announce(
+        activeGhostGolden ? `★ GOLDEN ACE PHANTOM · ${label}` : `GHOST SNIPER LOCK · ${label}`,
+        activeGhostGolden ? '#ffe875' : '#ff5cc8',
+        'COUNTER-SNIPE THE PINK TARGET BEFORE LASER FIRES!',
+      );
+    } else if (activeGhostId < 0) {
+      lastGhostAlertId = -1;
+    }
+    if (eventBits & AUDIO_DEADEYE_START) {
+      overlay.announce('PRISMATIC DEAD-EYE', '#ffe875', 'SWEEP CURSOR TO PAINT UP TO 6 ORBITAL RAIL LOCKS');
+    }
+    if (eventBits & AUDIO_OBELISK_CAPTURE) {
+      overlay.announce('PRISM OBELISK CAPTURED', '#ffe875', 'RELIC CHEST DROPPED · +2 LEVELS + FULL HEAL');
     }
     if (eventBits & AUDIO_BOSS_SPAWN) {
-      overlay.announce(`WARNING · ${BOSS_NAMES[game.boss_kind_index()] ?? 'ANCIENT PRISM'}`, '#ffad5c', 'ARENA CROWD CLEARED');
+      overlay.announce(`WARNING · ${BOSS_NAMES[game.boss_kind_index()] ?? 'ANCIENT PRISM'}`, '#ffad5c', 'CLICK GLOWING WEAKPOINTS TO SHATTER BOSS ARMOR');
     }
-    if (eventBits & AUDIO_SHIELD_BREAK) overlay.announce('SHIELD SHATTERED', '#ffe26a', 'SENTINEL CORE EXPOSED');
+    if (eventBits & AUDIO_SHIELD_BREAK) overlay.announce('SHIELD SHATTERED', '#ffe26a', 'BOSS CORE EXPOSED');
     if (eventBits & AUDIO_STREAK_MILESTONE) overlay.announce(`×${streak} KILL STREAK`, streak >= 100 ? '#ff8df2' : '#ffd95e');
+
+    if (duelsWon > lastDuelsWon) {
+      ghostNet.reportDuelWins(duelsWon - lastDuelsWon);
+      lastDuelsWon = duelsWon;
+    }
+
+    const newPerks = opticalPerkBits & ~announcedPerkBits;
+    if (newPerks !== 0) {
+      for (let i = 0; i < OPTICAL_PERKS.length; i++) {
+        if ((newPerks >>> i) & 1) {
+          const p = OPTICAL_PERKS[i]!;
+          overlay.announce(`✦ PERK UNLOCKED · ${p.name}`, p.color, p.desc);
+        }
+      }
+      announcedPerkBits = opticalPerkBits;
+    }
 
     const newSynergies = activeBits & ~announcedSynergyBits;
     if (newSynergies !== 0) {
@@ -1233,16 +1513,39 @@ async function main(): Promise<void> {
     if (isLeveling && !modalShown) showLevelUpModal();
     if (!isLeveling && modalShown) hideLevelUpModal();
 
-    // Update live Aim-Trainer HUD badge.
-    if (aim.active) {
+    // Update live Optical Mastery / Ghost Duel / Dead-Eye HUD panel.
+    if (aim.active || activeGhostId >= 0 || opticalStacks > 0 || overdriveCharge > 0 || deadeyeActive) {
       aimHudEl.classList.add('shown');
-      aimTierValEl.textContent = `AIM TIER ${game.aim_tier()}`;
-      aimComboValEl.textContent = `CHAIN ×${aimCombo}`;
+      aimHudEl.classList.toggle('ghost-alert', activeGhostId >= 0);
+      aimHudEl.classList.toggle('deadeye-ready', overdriveCharge >= 1.0 || deadeyeActive);
+      aimTierValEl.textContent = `FOCUS ×${focusMult.toFixed(1)}`;
+      aimComboValEl.textContent = `DUELS ${duelsWon} · T${game.aim_tier()}`;
+      aimStacksValEl.textContent = `OPTICAL ${opticalStacks} · +${opticalStacks * 6}% DMG · +${Math.min(50, opticalStacks * 2)}% CRIT`;
+      for (let i = 0; i < 4; i++) {
+        perkPipEls[i]!.classList.toggle('unlocked', ((opticalPerkBits >>> i) & 1) === 1);
+      }
+      const odPct = deadeyeActive ? Math.round(deadeyeTimerPct * 100) : Math.round(overdriveCharge * 100);
+      overdriveFillEl.style.width = `${odPct}%`;
+      overdriveFillEl.classList.toggle('ready', overdriveCharge >= 1.0 || deadeyeActive);
+      if (deadeyeActive) {
+        overdriveTextEl.textContent = `DEAD-EYE ACTIVE · LOCKS ${deadeyeLocks}/6`;
+        overdrivePctEl.textContent = `${odPct}%`;
+      } else if (overdriveCharge >= 1.0) {
+        overdriveTextEl.textContent = '★ DEAD-EYE READY [RMB / Q]';
+        overdrivePctEl.textContent = '100%';
+      } else {
+        overdriveTextEl.textContent = 'DEAD-EYE CHARGE [RMB / Q]';
+        overdrivePctEl.textContent = `${odPct}%`;
+      }
+
       const shots = game.aim_shots();
       aimAccValEl.textContent = shots > 0 ? `${Math.round((game.aim_hits() / shots) * 100)}% ACC` : 'READY';
-      if (aimTargetsLen > 0) {
+      if (activeGhostId >= 0) {
+        const g = ghostNet.getByIndex(activeGhostId);
+        aimDrillValEl.textContent = `⌖ ${g ? g.callsign : 'GHOST'}${activeGhostGolden ? ' ★ACE' : ' LOCK'}`;
+      } else if (aimTargetsLen > 0) {
         const k = Math.round(aimTargetsView[3]!);
-        aimDrillValEl.textContent = k === 0 ? 'FLICK CHAIN' : k === 1 ? 'SMOOTH TRACK' : 'MICRO CLUSTER';
+        aimDrillValEl.textContent = k === 3 ? '⌖ BOSS WEAKPOINT' : k === 0 ? 'FLICK DUELIST' : k === 1 ? 'TRACK HUNTER' : 'TRI-CLONE SNIPER';
       } else {
         aimDrillValEl.textContent = 'PRECISION LANCE';
       }
@@ -1296,9 +1599,11 @@ async function main(): Promise<void> {
     }
 
     const dashReady = dashPct === 0;
-    if (dashReady !== lastDashReady) {
-      dashStatusEl.textContent = dashReady ? 'READY' : 'RECHARGING';
+    const dashDistPx = Math.round(game.dash_distance_px());
+    if (dashReady !== lastDashReady || dashDistPx !== lastDashDistPx) {
+      dashStatusEl.textContent = `${dashReady ? 'READY' : 'CHARGING'} · ${dashDistPx}M`;
       lastDashReady = dashReady;
+      lastDashDistPx = dashDistPx;
     }
 
     const timerStr = formatTime(game.timer());
@@ -1426,6 +1731,16 @@ async function main(): Promise<void> {
         lastHitY: game.aim_last_hit_y(),
         targetsView: aimTargetsView,
         targetsLen: aimTargetsLen,
+        focusMult,
+        overdriveCharge,
+        deadeyeActive,
+        deadeyeTimerPct,
+        deadeyeLocks,
+        obeliskActive: game.obelisk_active(),
+        obeliskX: game.obelisk_world_x(),
+        obeliskY: game.obelisk_world_y(),
+        obeliskProgress: game.obelisk_progress(),
+        lookupGhost: (id: number) => ghostNet.getByIndex(id),
       },
     );
 

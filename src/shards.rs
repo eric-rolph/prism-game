@@ -75,9 +75,36 @@ impl EvolutionKind {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OverclockKind {
+    /// +12% permanent Global Prism & Sniper Damage
+    PrismAmplify = 0,
+    /// +12% permanent Auto-Salvo Fire Rate
+    CadenceBoost = 1,
+    /// +30 Max Hull + Full Hull Restore
+    HullAscension = 2,
+    /// +14% Move Speed & +36 px Dash Reach
+    HyperPhase = 3,
+}
+
+pub const OVERCLOCK_COUNT: usize = 4;
+
+impl OverclockKind {
+    pub fn from_index(i: u8) -> Option<Self> {
+        match i {
+            0 => Some(Self::PrismAmplify),
+            1 => Some(Self::CadenceBoost),
+            2 => Some(Self::HullAscension),
+            3 => Some(Self::HyperPhase),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UpgradeOffer {
     Shard(ShardKind),
     Evolution(EvolutionKind),
+    Overclock(OverclockKind),
 }
 
 impl ShardKind {
@@ -119,11 +146,30 @@ impl ShardKind {
 pub struct Inventory {
     pub levels: [u8; SHARD_COUNT],
     pub evolutions: [bool; EVOLUTION_COUNT],
+    pub banished: [bool; SHARD_COUNT],
 }
 
 impl Inventory {
     pub fn level(&self, kind: ShardKind) -> u8 {
         self.levels[kind.as_index()]
+    }
+
+    pub fn banish(&mut self, kind: ShardKind) -> bool {
+        let i = kind.as_index();
+        if self.banished[i] {
+            false
+        } else {
+            self.banished[i] = true;
+            true
+        }
+    }
+
+    pub fn is_banished(&self, kind: ShardKind) -> bool {
+        self.banished[kind.as_index()]
+    }
+
+    pub fn maxed_shard_count(&self) -> usize {
+        self.levels.iter().filter(|&&l| l >= MAX_SHARD_LEVEL).count()
     }
 
     pub fn upgrade(&mut self, kind: ShardKind) -> bool {
@@ -195,8 +241,18 @@ impl Inventory {
     }
 
     /// Three upgrade offers for the next level-up. Ready evolutions occupy one
-    /// slot, then remaining slots are filled with normal shard offers.
+    /// slot, then remaining slots are filled with normal shard offers, and any
+    /// remaining slots (or Endless / high-maxed pools) offer Hyper-Prism Overclocks!
+    #[allow(dead_code)]
     pub fn roll_choices(&self, rng: &mut Rng) -> [Option<UpgradeOffer>; 3] {
+        self.roll_choices_with_overclock(rng, false)
+    }
+
+    pub fn roll_choices_with_overclock(
+        &self,
+        rng: &mut Rng,
+        endless_mode: bool,
+    ) -> [Option<UpgradeOffer>; 3] {
         let mut result = [None, None, None];
         let mut slot = 0usize;
         let evolutions = self.available_evolutions();
@@ -206,14 +262,38 @@ impl Inventory {
             slot += 1;
         }
 
+        // In Endless Mode or once 5+ shards are maxed, occasionally surface a Hyper-Prism Overclock!
+        let offer_overclock_slot =
+            slot < 3 && (endless_mode || self.maxed_shard_count() >= 5) && (rng.next_u32() % 3 == 0);
+
         for shard in self.roll_shard_choices(rng) {
             if slot >= result.len() {
+                break;
+            }
+            if offer_overclock_slot && slot == 2 {
                 break;
             }
             if let Some(kind) = shard {
                 result[slot] = Some(UpgradeOffer::Shard(kind));
                 slot += 1;
             }
+        }
+
+        // Fill any open slot (e.g. maxed pool or endless overclock slot) with distinct Hyper-Prism Overclocks.
+        let mut used_oc = [false; OVERCLOCK_COUNT];
+        while slot < result.len() {
+            let mut pick = (rng.next_u32() as usize) % OVERCLOCK_COUNT;
+            for _ in 0..OVERCLOCK_COUNT {
+                if !used_oc[pick] {
+                    break;
+                }
+                pick = (pick + 1) % OVERCLOCK_COUNT;
+            }
+            used_oc[pick] = true;
+            if let Some(oc) = OverclockKind::from_index(pick as u8) {
+                result[slot] = Some(UpgradeOffer::Overclock(oc));
+            }
+            slot += 1;
         }
 
         result
@@ -251,7 +331,7 @@ impl Inventory {
 
         let mut candidates: Vec<(ShardKind, f32)> = (0..SHARD_COUNT as u8)
             .filter_map(ShardKind::from_index)
-            .filter(|s| !self.is_maxed(*s))
+            .filter(|s| !self.is_maxed(*s) && !self.is_banished(*s))
             .map(|s| {
                 let weight = if matches!(s, ShardKind::Siphon | ShardKind::Barrier)
                     && self.levels[s.as_index()] >= 2
@@ -301,7 +381,7 @@ impl Inventory {
         {
             let active: Vec<(ShardKind, f32)> = (0..SHARD_COUNT as u8)
                 .filter_map(ShardKind::from_index)
-                .filter(|s| !self.is_maxed(*s) && !defensive.contains(s))
+                .filter(|s| !self.is_maxed(*s) && !self.is_banished(*s) && !defensive.contains(s))
                 .map(|s| {
                     let w = if legendary_shards.contains(&s) {
                         1.0 + luck as f32 * 0.50
