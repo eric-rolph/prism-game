@@ -25,6 +25,7 @@ const AUDIO_DEADEYE_START = 1 << 14;
 const AUDIO_DEADEYE_VOLLEY = 1 << 15;
 const AUDIO_OBELISK_CAPTURE = 1 << 16;
 const AUDIO_WEAKPOINT_CRIT = 1 << 17;
+const AUDIO_SURGE_TIER_UP = 1 << 18;
 
 export class AudioManager {
   private ctx: AudioContext | null = null;
@@ -424,6 +425,7 @@ export class AudioManager {
     if (eventBits & AUDIO_DEADEYE_VOLLEY) this.playDeadeyeVolley();
     if (eventBits & AUDIO_OBELISK_CAPTURE) this.playObeliskCapture();
     if (eventBits & AUDIO_WEAKPOINT_CRIT) this.playWeakpointCrit(aimCombo);
+    if (eventBits & AUDIO_SURGE_TIER_UP) this.playSurgeTierUp(aimCombo);
 
     // 7. Combat & milestone SFX.
     if (eventBits & AUDIO_DASH_BLAST) this.playDashWhoosh();
@@ -582,6 +584,17 @@ export class AudioManager {
     this.playGlassBell(note, 0.125, 0.34, -0.25, true);
     this.playGlassBell(note * 1.5, 0.09, 0.26, 0.25, true);
     this.playFilteredNoise('highpass', 3600, 9600, 2.0, 0.08, 0.09);
+  }
+
+  /** Rising resonant harmonic swell when Resonance Surge Power-Up ignites or climbs tiers! */
+  private playSurgeTierUp(combo: number): void {
+    const base = 5 + Math.min(6, Math.floor(combo / 2));
+    [0, 2, 4, 7].forEach((off, i) => {
+      setTimeout(() => {
+        this.playGlassBell(this.harmonicNote(base + off), 0.095, 0.42, (i - 1.5) * 0.28, true);
+      }, i * 32);
+    });
+    this.playFilteredNoise('bandpass', 1200, 5600, 1.4, 0.075, 0.16);
   }
 
   private playKillShatter(count: number, streak: number): void {

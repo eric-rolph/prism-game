@@ -231,8 +231,35 @@ impl Game {
     pub fn optical_stacks(&self) -> u32 {
         self.inner.optical_stacks()
     }
+    pub fn optical_damage_bonus_pct(&self) -> u32 {
+        self.inner.optical_damage_bonus_pct()
+    }
+    pub fn optical_crit_bonus_pct(&self) -> u32 {
+        self.inner.optical_crit_bonus_pct()
+    }
     pub fn optical_perk_bits(&self) -> u32 {
         self.inner.optical_perk_bits()
+    }
+    pub fn surge_tier(&self) -> u32 {
+        self.inner.surge_tier()
+    }
+    pub fn surge_energy_pct(&self) -> f32 {
+        self.inner.surge_energy_pct()
+    }
+    pub fn surge_hold_pct(&self) -> f32 {
+        self.inner.surge_hold_pct()
+    }
+    pub fn surge_peak_tier(&self) -> u32 {
+        self.inner.surge_peak_tier()
+    }
+    pub fn surge_damage_bonus_pct(&self) -> u32 {
+        self.inner.surge_damage_bonus_pct()
+    }
+    pub fn surge_fire_rate_bonus_pct(&self) -> u32 {
+        self.inner.surge_fire_rate_bonus_pct()
+    }
+    pub fn surge_magnet_mult(&self) -> f32 {
+        self.inner.surge_magnet_mult()
     }
     pub fn focus_multiplier(&self) -> f32 {
         self.inner.focus_multiplier()

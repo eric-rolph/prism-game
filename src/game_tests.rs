@@ -1298,3 +1298,98 @@ fn banish_excludes_shard_and_deadeye_activates_when_charged() {
     assert!(g.deadeye_active(), "full overdrive charge must activate Dead-Eye slow-mo");
     assert!(g.banish_charges() >= 2);
 }
+
+#[test]
+fn resonance_surge_ignites_immediately_and_scales_with_levels_and_shards() {
+    let mut low = Game::new(1280.0, 720.0, 505);
+    low.set_aim_input(0.0, 0.0, true, false, false);
+    for _ in 0..100 {
+        low.update(DT);
+        if !low.aim_targets().is_empty() {
+            break;
+        }
+    }
+    assert_eq!(low.surge_tier(), 0);
+    let base_cd = low.effective_beam_cooldown();
+    let base_dmg = low.global_damage_mult();
+
+    // First click on an aim-trainer target MUST immediately ignite Resonance Surge Power-Up!
+    let t = low.aim_targets()[0];
+    let rel = Vec2::new(t.x - low.camera().x, t.y - low.camera().y);
+    let d = rel.length();
+    let theta = d / GLOBE_RADIUS;
+    let screen_off = if theta > 1e-4 { rel * (theta.sin() / theta) } else { rel };
+    low.set_aim_input(screen_off.x, screen_off.y, true, true, false);
+    low.update(DT);
+
+    assert!(low.surge_tier() >= 1, "first aim hit must immediately ignite Resonance Surge");
+    assert!(
+        low.effective_beam_cooldown() < base_cd,
+        "Resonance Surge must immediately accelerate auto-salvo fire rate"
+    );
+    assert!(
+        low.global_damage_mult() > base_dmg * 1.15,
+        "Resonance Surge must boost global build damage immediately"
+    );
+    assert!(
+        low.surge_magnet_mult() > 1.3,
+        "Resonance Surge must expand XP gem vacuum radius"
+    );
+    let low_surge_dmg_pct = low.surge_damage_bonus_pct();
+    let low_surge_rate_pct = low.surge_fire_rate_bonus_pct();
+    let low_surge_mag = low.surge_magnet_mult();
+
+    // Now build a late-game high-rank / high-shard character with Split, Echo, Magnet, Siphon, Barrier, Minefield, Diffract!
+    let mut high = Game::new(1280.0, 720.0, 505);
+    high.rank = 25;
+    for _ in 0..5 {
+        high.inventory.upgrade(ShardKind::Split);
+        high.inventory.upgrade(ShardKind::Mirror);
+        high.inventory.upgrade(ShardKind::Diffract);
+        high.inventory.upgrade(ShardKind::Echo);
+        high.inventory.upgrade(ShardKind::Magnet);
+        high.inventory.upgrade(ShardKind::Siphon);
+        high.inventory.upgrade(ShardKind::Barrier);
+        high.inventory.upgrade(ShardKind::Minefield);
+    }
+    high.player.barrier_max = BARRIER_HP_PER_LEVEL * 5.0;
+    high.player.barrier_hp = 10.0;
+    high.player.hp = 50.0;
+
+    high.set_aim_input(0.0, 0.0, true, false, false);
+    for _ in 0..100 {
+        high.update(DT);
+        if !high.aim_targets().is_empty() {
+            break;
+        }
+    }
+    let t2 = high.aim_targets()[0];
+    let rel2 = Vec2::new(t2.x - high.camera().x, t2.y - high.camera().y);
+    let d2 = rel2.length();
+    let theta2 = d2 / GLOBE_RADIUS;
+    let screen_off2 = if theta2 > 1e-4 { rel2 * (theta2.sin() / theta2) } else { rel2 };
+    high.set_aim_input(screen_off2.x, screen_off2.y, true, true, false);
+    high.update(DT);
+
+    assert!(
+        high.surge_damage_bonus_pct() > low_surge_dmg_pct * 2,
+        "Resonance Surge DMG power-up must scale significantly with drafted shards & synergies: low={low_surge_dmg_pct}%, high={}%",
+        high.surge_damage_bonus_pct()
+    );
+    assert!(
+        high.surge_fire_rate_bonus_pct() > low_surge_rate_pct,
+        "Resonance Surge fire rate must scale with Split/Echo levels"
+    );
+    assert!(
+        high.surge_magnet_mult() > low_surge_mag,
+        "Resonance Surge vacuum must scale with Magnet levels"
+    );
+    assert!(
+        high.player.hp > 50.0,
+        "Siphon + aim engagement must restore player hull on hit"
+    );
+    assert!(
+        high.player.barrier_hp > 15.0,
+        "Barrier + aim engagement must recharge player shield on hit"
+    );
+}

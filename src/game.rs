@@ -243,6 +243,10 @@ pub struct Game {
     active_ghost_golden: bool,
     pending_sniper_echoes: Vec<(f32, Vec2, f32)>,
     spectral_salvo_counter: u32,
+    // Active Resonance Surge Power-Up fueled immediately by engaging the Aim Trainer / Ghost Duels.
+    surge_energy: f32,
+    surge_hold_timer: f32,
+    surge_peak_tier: u32,
 
     // Draw buffers, rebuilt every frame.
     circle_buf: Vec<CircleInstance>,
@@ -274,6 +278,10 @@ const DASH_BLAST_BOSS_DAMAGE_MULT: f32 = 0.45;
 const DEADEYE_DURATION: f32 = 3.2;
 const DEADEYE_TIME_SCALE: f32 = 0.32;
 const DEADEYE_MAX_LOCKS: usize = 6;
+const SURGE_MAX_ENERGY: f32 = 4.0;
+const SURGE_DECAY_RATE: f32 = 0.52;
+const SURGE_HOLD_HIT: f32 = 5.0;
+const SURGE_HOLD_COMPLETE: f32 = 8.0;
 const OBELISK_FIRST_TIME: f32 = 75.0;
 const OBELISK_INTERVAL: f32 = 95.0;
 const OBELISK_RADIUS: f32 = 115.0;
@@ -395,6 +403,7 @@ pub const AUDIO_DEADEYE_START: u32 = 1 << 14;
 pub const AUDIO_DEADEYE_VOLLEY: u32 = 1 << 15;
 pub const AUDIO_OBELISK_CAPTURE: u32 = 1 << 16;
 pub const AUDIO_WEAKPOINT_CRIT: u32 = 1 << 17;
+pub const AUDIO_SURGE_TIER_UP: u32 = 1 << 18;
 
 // GPU SDF shape identifiers packed into CircleInstance::shape.
 const SHAPE_ORB: f32 = 0.0;
@@ -1001,6 +1010,9 @@ impl Game {
             active_ghost_golden: false,
             pending_sniper_echoes: Vec::new(),
             spectral_salvo_counter: 0,
+            surge_energy: 0.0,
+            surge_hold_timer: 0.0,
+            surge_peak_tier: 0,
             halo_trail_timer: 0.0,
             wave_event_fired: false,
             prism_cannon_timer: 0.0,
@@ -1153,7 +1165,9 @@ impl Game {
     fn effective_player_speed(&self) -> f32 {
         let momentum = self.inventory.level(ShardKind::Momentum) as f32;
         let phase_oc = 1.0 + self.overclock_phase_stacks as f32 * 0.14;
-        self.player.speed * (1.0 + momentum * MOMENTUM_SPEED_PER_LEVEL) * phase_oc
+        let surge_tier = self.surge_tier() as f32;
+        let surge_speed = 1.0 + surge_tier * (0.075 + momentum * 0.015);
+        self.player.speed * (1.0 + momentum * MOMENTUM_SPEED_PER_LEVEL) * phase_oc * surge_speed
     }
 
     pub fn dash_distance_px(&self) -> f32 {
@@ -1214,14 +1228,102 @@ impl Game {
         bits
     }
 
+    pub fn total_shard_levels(&self) -> u32 {
+        let mut s = 0u32;
+        for i in 0..crate::shards::SHARD_COUNT {
+            s += self.inventory.levels[i] as u32;
+        }
+        s
+    }
+
+    /// Unified build-power multiplier scaling with player Rank, total shard levels,
+    /// active synergies, and evolutions so Aim-Trainer & Resonance Surge stay potent
+    /// and transformative all the way through Rank 50+ Endless waves!
+    pub fn build_power_scale(&self) -> f32 {
+        let syns = self.inventory.active_synergy_bits().count_ones() as f32;
+        let evos = self.inventory.active_evolution_bits().count_ones() as f32;
+        1.0 + self.rank as f32 * 0.08
+            + self.total_shard_levels() as f32 * 0.06
+            + syns * 0.16
+            + evos * 0.35
+    }
+
+    /// Active Resonance Surge power-up tier (0 = dormant, 1..=4 = Focused / Amplified / Supercharged / Hyper-Prism).
+    pub fn surge_tier(&self) -> u32 {
+        if self.surge_energy >= 3.25 {
+            4
+        } else if self.surge_energy >= 2.25 {
+            3
+        } else if self.surge_energy >= 1.25 {
+            2
+        } else if self.surge_energy >= 0.25 {
+            1
+        } else {
+            0
+        }
+    }
+
+    pub fn surge_energy_pct(&self) -> f32 {
+        (self.surge_energy / SURGE_MAX_ENERGY).clamp(0.0, 1.0)
+    }
+
+    pub fn surge_hold_pct(&self) -> f32 {
+        (self.surge_hold_timer / SURGE_HOLD_COMPLETE).clamp(0.0, 1.0)
+    }
+
+    pub fn surge_peak_tier(&self) -> u32 {
+        self.surge_peak_tier
+    }
+
+    /// Live Surge global damage bonus %, scaling up with total drafted shard levels & synergies!
+    pub fn surge_damage_bonus_pct(&self) -> u32 {
+        let tier = self.surge_tier() as f32;
+        if tier <= 0.0 {
+            return 0;
+        }
+        let shard_scale = self.total_shard_levels() as f32 * 0.85
+            + self.inventory.active_synergy_bits().count_ones() as f32 * 3.0;
+        (tier * (22.0 + shard_scale)).round() as u32
+    }
+
+    /// Live Surge auto-salvo fire-rate bonus %, scaling further with Split & Echo levels!
+    pub fn surge_fire_rate_bonus_pct(&self) -> u32 {
+        let tier = self.surge_tier() as f32;
+        if tier <= 0.0 {
+            return 0;
+        }
+        let cadence_shards = self.inventory.level(ShardKind::Split) as f32
+            + self.inventory.level(ShardKind::Echo) as f32;
+        (tier * (22.0 + cadence_shards * 2.0)).round() as u32
+    }
+
+    /// Live Surge Radiance Vacuum multiplier (scales with Magnet shard level!).
+    pub fn surge_magnet_mult(&self) -> f32 {
+        let tier = self.surge_tier() as f32;
+        if tier <= 0.0 {
+            return 1.0;
+        }
+        let mag_lvl = self.inventory.level(ShardKind::Magnet) as f32;
+        1.0 + tier * (0.55 + mag_lvl * 0.14)
+    }
+
+    pub fn optical_damage_bonus_pct(&self) -> u32 {
+        self.optical_stacks * 5
+    }
+
+    pub fn optical_crit_bonus_pct(&self) -> u32 {
+        (self.global_crit_chance() * 100.0).round() as u32
+    }
+
     pub fn focus_multiplier(&self) -> f32 {
         (1.0 + (self.aim_combo.min(20) as f32) * 0.20).min(5.0)
     }
 
     pub fn global_damage_mult(&self) -> f32 {
-        let optical = 1.0 + self.optical_stacks as f32 * 0.025;
+        let optical = 1.0 + self.optical_stacks as f32 * 0.05;
         let overclock = 1.0 + self.overclock_dmg_stacks as f32 * 0.12;
-        optical * overclock
+        let surge = 1.0 + self.surge_damage_bonus_pct() as f32 * 0.01;
+        optical * overclock * surge
     }
 
     pub fn global_crit_chance(&self) -> f32 {
@@ -1230,18 +1332,21 @@ impl Game {
         } else {
             0.0
         };
-        (core_bonus + self.optical_stacks as f32 * 0.015).min(0.65)
+        let surge_crit = self.surge_tier() as f32 * 0.04;
+        (core_bonus + self.optical_stacks as f32 * 0.02 + surge_crit).min(0.75)
     }
 
     pub fn effective_beam_cooldown(&self) -> f32 {
-        let focus_boost = 1.0 + (self.focus_multiplier() - 1.0) * 0.105; // up to +42% fire rate at 5x Focus!
+        let focus_boost = 1.0 + (self.focus_multiplier() - 1.0) * 0.105; // up to +42% fire rate at 5x Focus
+        let surge_boost = 1.0 + self.surge_fire_rate_bonus_pct() as f32 * 0.01;
         let core_boost = if self.prism_core == PrismCore::RefractionNova {
             1.15
         } else {
             1.0
         };
         let oc_boost = 1.0 + self.overclock_cadence_stacks as f32 * 0.12;
-        (BEAM_COOLDOWN / (focus_boost * core_boost * oc_boost)).max(0.085)
+        let floor = if self.surge_tier() >= 3 { 0.055 } else { 0.085 };
+        (BEAM_COOLDOWN / (focus_boost * surge_boost * core_boost * oc_boost)).max(floor)
     }
 
     pub fn overdrive_charge(&self) -> f32 {
@@ -1308,11 +1413,15 @@ impl Game {
     }
 
     fn gem_magnet_radius(&self) -> f32 {
-        GEM_MAGNET_RADIUS + self.inventory.level(ShardKind::Magnet) as f32 * MAGNET_RADIUS_PER_LEVEL
+        let base =
+            GEM_MAGNET_RADIUS + self.inventory.level(ShardKind::Magnet) as f32 * MAGNET_RADIUS_PER_LEVEL;
+        base * self.surge_magnet_mult()
     }
 
     fn gem_magnet_speed(&self) -> f32 {
-        GEM_MAGNET_SPEED + self.inventory.level(ShardKind::Magnet) as f32 * MAGNET_SPEED_PER_LEVEL
+        let base =
+            GEM_MAGNET_SPEED + self.inventory.level(ShardKind::Magnet) as f32 * MAGNET_SPEED_PER_LEVEL;
+        base * (1.0 + self.surge_tier() as f32 * 0.25)
     }
 
     pub fn wave_clear_timer(&self) -> f32 {
@@ -2079,9 +2188,18 @@ impl Game {
             self.player.iframe_timer -= dt;
         }
 
-        // Dash cooldown.
+        // Decay Resonance Surge hold window & energy smoothly when not engaging aim targets.
+        if self.surge_hold_timer > 0.0 {
+            self.surge_hold_timer = (self.surge_hold_timer - dt).max(0.0);
+        } else if self.surge_energy > 0.0 {
+            self.surge_energy = (self.surge_energy - SURGE_DECAY_RATE * dt).max(0.0);
+        }
+
+        // Dash cooldown (ticks faster while Resonance Surge is active!).
         if self.player.dash_cooldown > 0.0 {
-            self.player.dash_cooldown -= dt;
+            let surge_dash_rate = 1.0 + self.surge_tier() as f32 * 0.25;
+            self.player.dash_cooldown =
+                (self.player.dash_cooldown - dt * surge_dash_rate).max(0.0);
         }
 
         // Dash active — distance scales strongly with PhaseStep + Momentum + PhaseBlade core,
@@ -2925,8 +3043,10 @@ impl Game {
         }
         self.beams.retain(|b| b.life < b.max_life);
 
-        // Halos: orbit + contact damage.
+        // Halos: orbit + contact damage (accelerated & expanded by Resonance Surge!).
         // Synergy: FROZEN ORBIT (Halo+Frost 3+) — halo beads slow enemies.
+        let surge_tier_f = self.surge_tier() as f32;
+        let global_aura_dmg = self.global_damage_mult();
         let frozen_orbit = self
             .inventory
             .has_synergy(ShardKind::Halo, ShardKind::Frost);
@@ -2934,8 +3054,8 @@ impl Game {
             .inventory
             .has_synergy(ShardKind::Halo, ShardKind::Momentum);
         let solar_crown = self.inventory.has_evolution(EvolutionKind::SolarCrown);
-        let halo_speed_mult = if event_horizon { 1.65 } else { 1.0 };
-        let halo_radius_mult = if event_horizon { 0.72 } else { 1.0 };
+        let halo_speed_mult = (if event_horizon { 1.65 } else { 1.0 }) * (1.0 + surge_tier_f * 0.35);
+        let halo_radius_mult = (if event_horizon { 0.72 } else { 1.0 }) * (1.0 + surge_tier_f * 0.06);
         for h in &mut self.halos {
             h.angle += h.angular_speed * halo_speed_mult * dt;
         }
@@ -2948,13 +3068,14 @@ impl Game {
                     &mut p,
                     Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius * halo_radius_mult,
                 );
-                (p, h.size)
+                (p, h.size * (1.0 + surge_tier_f * 0.08))
             })
             .collect();
+        let halo_dps = HALO_DPS * global_aura_dmg;
         for (hpos, hsize) in &halo_snapshots {
             for e in &mut self.enemies {
                 if globe_distance(e.pos, *hpos) < hsize + e.radius {
-                    e.hp -= HALO_DPS * dt;
+                    e.hp -= halo_dps * dt;
                     if frozen_orbit {
                         e.slow_timer = e.slow_timer.max(FROST_SLOW_DURATION);
                     }
@@ -2980,14 +3101,14 @@ impl Game {
                                     let lp = Game::hydra_lobe_pos(boss, i);
                                     if globe_distance(lp, *hpos) < HYDRA_LOBE_RADIUS + hsize {
                                         boss.lobe_hp[i] -=
-                                            HALO_DPS * AURA_BOSS_DAMAGE_MULT * dt;
+                                            halo_dps * AURA_BOSS_DAMAGE_MULT * dt;
                                     }
                                 }
                             }
                         }
                         _ => {
                             if globe_distance(boss.pos, *hpos) < boss.radius + hsize {
-                                boss.hp -= HALO_DPS * AURA_BOSS_DAMAGE_MULT * dt;
+                                boss.hp -= halo_dps * AURA_BOSS_DAMAGE_MULT * dt;
                             }
                         }
                     }
@@ -3012,17 +3133,19 @@ impl Game {
             }
         }
 
-        // Barrier: shield regen + contact damage to nearby enemies.
+        // Barrier: shield regen + contact damage to nearby enemies (supercharged by Resonance Surge!).
         let barrier_level = self.inventory.level(ShardKind::Barrier);
         if barrier_level > 0 {
             self.player.barrier_max = BARRIER_HP_PER_LEVEL * barrier_level as f32;
+            let barrier_regen = BARRIER_REGEN_PER_SEC * (1.0 + surge_tier_f * 0.35);
+            let barrier_dps = BARRIER_CONTACT_DPS * global_aura_dmg;
             self.player.barrier_hp =
-                (self.player.barrier_hp + BARRIER_REGEN_PER_SEC * dt).min(self.player.barrier_max);
+                (self.player.barrier_hp + barrier_regen * dt).min(self.player.barrier_max);
             // Contact damage to enemies within barrier radius.
             for e in &mut self.enemies {
                 let dist = globe_distance(e.pos, self.player.pos);
                 if dist < BARRIER_RADIUS + e.radius {
-                    e.hp -= BARRIER_CONTACT_DPS * dt;
+                    e.hp -= barrier_dps * dt;
                 }
             }
             if let Some(boss) = &mut self.boss {
@@ -3038,7 +3161,7 @@ impl Game {
                             if globe_distance(boss.pos, self.player.pos)
                                 < BARRIER_RADIUS + boss.radius
                             {
-                                boss.hp -= BARRIER_CONTACT_DPS * AURA_BOSS_DAMAGE_MULT * dt;
+                                boss.hp -= barrier_dps * AURA_BOSS_DAMAGE_MULT * dt;
                             }
                         }
                         BossKind::Hydra => {
@@ -3049,7 +3172,7 @@ impl Game {
                                         < BARRIER_RADIUS + HYDRA_LOBE_RADIUS
                                     {
                                         boss.lobe_hp[i] -=
-                                            BARRIER_CONTACT_DPS * AURA_BOSS_DAMAGE_MULT * dt;
+                                            barrier_dps * AURA_BOSS_DAMAGE_MULT * dt;
                                     }
                                 }
                             }
@@ -3059,16 +3182,16 @@ impl Game {
             }
         }
 
-        // Interference: emit + expand + damage.
+        // Interference: emit + expand + damage (accelerated & widened by Resonance Surge!).
         let interf_level = self.inventory.level(ShardKind::Interference);
         if interf_level > 0 {
-            self.interference_timer -= dt;
+            self.interference_timer -= dt * (1.0 + surge_tier_f * 0.25);
             if self.interference_timer <= 0.0 {
                 self.pulses.push(InterferencePulse {
                     pos: self.player.pos,
                     life: 0.0,
                     max_life: 0.9,
-                    max_radius: 320.0 + 40.0 * interf_level as f32,
+                    max_radius: (320.0 + 40.0 * interf_level as f32) * (1.0 + surge_tier_f * 0.06),
                     kind: PulseKind::Interference,
                     damage_multiplier: 1.0,
                 });
@@ -3131,8 +3254,11 @@ impl Game {
                 PulseKind::Mine => 1.45,
                 PulseKind::DashBlast => 0.95,
             };
-            let pulse_damage =
-                INTERFERENCE_DPS * interference_dmg_mult * kind_damage_mult * *damage_multiplier;
+            let pulse_damage = INTERFERENCE_DPS
+                * interference_dmg_mult
+                * kind_damage_mult
+                * *damage_multiplier
+                * global_aura_dmg;
             let pulse_pull = match kind {
                 PulseKind::Interference => gravity_pull,
                 PulseKind::Mine => gravity_pull.map(|pull| pull * 1.35),
@@ -5084,13 +5210,15 @@ impl Game {
             }
         }
 
-        // Continuous burn around Track Hunter while locked.
+        // Continuous burn around Track Hunter while locked — immediately charges Resonance Surge!
         if self.aim_tracking_active {
+            self.add_surge_energy(dt * 1.15, SURGE_HOLD_HIT);
             if let Some(orb_pos) = self.aim_targets.first().map(|t| t.pos) {
-                let burn_dps = (125.0 + self.rank as f32 * 18.0 + tier * 22.0)
+                let burn_dps = (135.0 + self.rank as f32 * 22.0 + tier * 26.0)
+                    * self.build_power_scale()
                     * self.global_damage_mult()
                     * dt;
-                self.damage_area(orb_pos, 92.0 + lens_lvl * 8.0, burn_dps, 0.0, 0.0, 1.8);
+                self.damage_area(orb_pos, 96.0 + lens_lvl * 10.0, burn_dps, 0.0, 0.0, 1.8);
             }
         }
 
@@ -5131,12 +5259,15 @@ impl Game {
 
                 let hit = self.aim_targets.remove(idx);
                 self.aim_last_hit_pos = Some(hit.pos);
+                // Immediately ignite/escalate Resonance Surge Power-Up & trigger equipped shard procs!
+                self.add_surge_energy(if hit.golden { 0.90 } else { 0.65 }, SURGE_HOLD_HIT);
                 let lance_col = if hit.golden {
                     [1.0, 0.90, 0.30]
                 } else {
                     [1.0, 0.42, 0.86]
                 };
-                self.fire_precision_lance(hit.pos, lance_col, 1.25, true);
+                self.fire_precision_lance(hit.pos, lance_col, 1.35, true);
+                self.apply_aim_ability_procs(hit.pos, false);
 
                 // PhaseStep / 12-stack Phase Refund cuts Dash cooldown immediately on Ghost counter-snipe!
                 let phase_lvl = self.inventory.level(ShardKind::PhaseStep) as f32;
@@ -5175,6 +5306,8 @@ impl Game {
                 self.aim_fire_cooldown = 0.07;
                 self.audio_event_bits |= AUDIO_WEAKPOINT_CRIT;
                 self.add_overdrive_charge(0.18);
+                self.add_surge_energy(1.15, SURGE_HOLD_COMPLETE);
+                self.apply_aim_ability_procs(aim_world, false);
                 return;
             }
 
@@ -5196,11 +5329,244 @@ impl Game {
                 self.aim_fire_cooldown = 0.085;
                 self.audio_event_bits |= AUDIO_AIM_HIT;
                 self.add_overdrive_charge(0.08);
+                self.add_surge_energy(0.38, SURGE_HOLD_HIT);
+                self.apply_aim_ability_procs(aim_world, false);
             } else {
-                // Miss resets active Focus streak (NEVER removes permanent Optical Precision stacks!).
+                // Miss resets active Focus streak (NEVER removes permanent Optical Precision stacks or Surge!).
                 self.aim_combo = 0;
                 self.aim_fire_cooldown = 0.20;
                 self.audio_event_bits |= AUDIO_AIM_MISS;
+            }
+        }
+    }
+
+    /// Fuels the active Resonance Surge Power-Up immediately as the player engages aim targets.
+    fn add_surge_energy(&mut self, base_amount: f32, hold_sec: f32) {
+        let prev_tier = self.surge_tier();
+        let luck_bonus = 1.0 + self.inventory.level(ShardKind::Luck) as f32 * 0.05;
+        let core_bonus = if self.prism_core == PrismCore::ResonanceConduit {
+            1.20
+        } else {
+            1.0
+        };
+        self.surge_energy =
+            (self.surge_energy + base_amount * luck_bonus * core_bonus).min(SURGE_MAX_ENERGY);
+        self.surge_hold_timer = self.surge_hold_timer.max(hold_sec);
+        let new_tier = self.surge_tier();
+        if new_tier > self.surge_peak_tier {
+            self.surge_peak_tier = new_tier;
+        }
+        if new_tier > prev_tier {
+            self.audio_event_bits |= AUDIO_SURGE_TIER_UP;
+            self.screen_flash = self.screen_flash.max(0.18 + new_tier as f32 * 0.08);
+            for i in 0..(8 + new_tier * 3) {
+                let a = (i as f32) * std::f32::consts::TAU / (8 + new_tier * 3) as f32;
+                let col = match new_tier {
+                    1 => [0.42, 0.96, 1.0],
+                    2 => [0.80, 0.56, 1.0],
+                    3 => [1.0, 0.86, 0.32],
+                    _ => [1.0, 0.52, 0.92],
+                };
+                self.particles.push(Particle {
+                    pos: self.player.pos,
+                    vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(90.0, 210.0),
+                    life: 0.0,
+                    max_life: 0.34,
+                    color: col,
+                    size: 2.8 + new_tier as f32 * 0.45,
+                });
+            }
+        }
+    }
+
+    /// Scales every aim-trainer engagement with ALL selected shards & evolutions so engaging
+    /// the aim trainer fires tangible build-wide power-ups from Rank 1 through Rank 50+!
+    fn apply_aim_ability_procs(&mut self, pos: Vec2, is_completion: bool) {
+        let surge_tier = self.surge_tier();
+        let build_scale = self.build_power_scale();
+        let global_dmg = self.global_damage_mult();
+
+        // 1. Siphon / PrismHeart / Surge II+ instant Hull restoration!
+        let siphon_lvl = self.inventory.level(ShardKind::Siphon) as f32;
+        let heart_lvl = self.inventory.level(ShardKind::PrismHeart) as f32;
+        if siphon_lvl > 0.0 || is_completion || surge_tier >= 2 {
+            let base_heal = if is_completion { 4.0 } else { 1.4 };
+            let heal = (base_heal + siphon_lvl * 1.6 + heart_lvl * 0.55)
+                * if is_completion { 1.45 } else { 1.0 };
+            let before = self.player.hp;
+            self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
+            let actual = self.player.hp - before;
+            if actual >= 1.0 {
+                self.push_popup(self.player.pos, actual, POPUP_HEAL);
+            }
+        }
+
+        // 2. Barrier instant Shield recharge!
+        let barrier_lvl = self.inventory.level(ShardKind::Barrier) as f32;
+        if barrier_lvl > 0.0 && self.player.barrier_max > 0.0 {
+            let pct = (0.10 + barrier_lvl * 0.03) * if is_completion { 2.0 } else { 1.0 };
+            self.player.barrier_hp =
+                (self.player.barrier_hp + self.player.barrier_max * pct).min(self.player.barrier_max);
+        }
+
+        // 3. Lance cooldown acceleration (shaves timer on every precision hit!).
+        let lance_lvl = self.inventory.level(ShardKind::Lance);
+        if lance_lvl > 0 {
+            self.lance_timer =
+                (self.lance_timer - if is_completion { 0.90 } else { 0.40 }).max(0.0);
+        }
+
+        // 4. Frost (+ Whiteout) cryo nova & frost field right at target!
+        let frost_lvl = self.inventory.level(ShardKind::Frost);
+        if frost_lvl > 0 {
+            let cryo_r = 105.0 + frost_lvl as f32 * 18.0 + if is_completion { 45.0 } else { 0.0 };
+            let cryo_dmg = (55.0 + frost_lvl as f32 * 22.0) * build_scale * global_dmg;
+            self.damage_area(pos, cryo_r, cryo_dmg, 40.0, 0.0, 1.0);
+            for e in &mut self.enemies {
+                if globe_distance(pos, e.pos) <= cryo_r + e.radius {
+                    e.slow_timer = e.slow_timer.max(FROST_SLOW_DURATION * frost_lvl as f32);
+                }
+            }
+            if self.frost_fields.len() < MAX_FROST_FIELDS {
+                self.frost_fields.push(FrostField {
+                    pos,
+                    life: 0.0,
+                    max_life: if is_completion { 3.5 } else { 1.8 },
+                    radius: cryo_r * 0.72,
+                });
+            }
+        }
+
+        // 5. Diffract (+ Supernova) radial crystal starburst from impact!
+        let diff_lvl = self.inventory.level(ShardKind::Diffract);
+        if diff_lvl > 0 {
+            let supernova = self.inventory.has_synergy(ShardKind::Mirror, ShardKind::Diffract);
+            let spokes = (2 + diff_lvl as usize + if is_completion { 3 } else { 0 }).min(10);
+            let reach = (95.0 + diff_lvl as f32 * 16.0) * if supernova { 1.75 } else { 1.0 };
+            let spoke_dmg = (72.0 + diff_lvl as f32 * 24.0) * build_scale * global_dmg;
+            let col = if supernova { [1.0, 0.82, 1.0] } else { [0.58, 1.0, 0.84] };
+            for i in 0..spokes {
+                let a = self.time * 1.7 + (i as f32) * std::f32::consts::TAU / spokes as f32;
+                let end = tangent_endpoint_on_globe(pos, Vec2::new(a.cos(), a.sin()) * reach);
+                self.beams.push(Beam {
+                    start: pos,
+                    end,
+                    life: 0.0,
+                    max_life: 0.16,
+                    thickness: if supernova { 3.4 } else { 2.4 },
+                    color: col,
+                    is_echo: true,
+                });
+                let local_a = nearest_globe_delta(self.player.pos, pos);
+                let local_b = nearest_globe_delta(self.player.pos, end);
+                let mut hits = Vec::new();
+                self.spatial.query_segment(local_a, local_b, 8.0, |idx| {
+                    if idx < self.enemies.len() {
+                        hits.push(idx);
+                    }
+                });
+                for idx in hits {
+                    let e = &mut self.enemies[idx];
+                    if e.hp > 0.0 && capsule_circle_intersect_globe(pos, end, 6.0, e.pos, e.radius) {
+                        e.hp -= spoke_dmg;
+                        self.total_damage_dealt += spoke_dmg;
+                        self.hit_flash_positions.push(e.pos);
+                    }
+                }
+            }
+        }
+
+        // 6. Arc lightning jump burst from hit target on completion or Surge III+!
+        let arc_lvl = self.inventory.level(ShardKind::Arc);
+        if arc_lvl > 0 && (is_completion || surge_tier >= 3) {
+            let hops = (2 + arc_lvl as usize + if is_completion { 3 } else { 0 }).min(10);
+            let arc_dmg = (ARC_BASE_DAMAGE + ARC_DAMAGE_PER_LEVEL * arc_lvl as f32)
+                * build_scale
+                * global_dmg;
+            let mut cur = pos;
+            let mut used = Vec::with_capacity(hops);
+            for _ in 0..hops {
+                let mut best: Option<(usize, f32)> = None;
+                for (i, e) in self.enemies.iter().enumerate() {
+                    if e.hp <= 0.0 || used.contains(&i) {
+                        continue;
+                    }
+                    let d = globe_distance(cur, e.pos);
+                    if d < 250.0 && best.map_or(true, |(_, bd)| d < bd) {
+                        best = Some((i, d));
+                    }
+                }
+                let Some((idx, _)) = best else { break };
+                used.push(idx);
+                let epos = self.enemies[idx].pos;
+                self.enemies[idx].hp -= arc_dmg;
+                self.total_damage_dealt += arc_dmg;
+                self.hit_flash_positions.push(epos);
+                self.push_popup(epos, arc_dmg, POPUP_CRIT);
+                self.beams.push(Beam {
+                    start: cur,
+                    end: epos,
+                    life: 0.0,
+                    max_life: 0.20,
+                    thickness: 3.0,
+                    color: [0.76, 0.60, 1.0],
+                    is_echo: true,
+                });
+                cur = epos;
+            }
+        }
+
+        // 7. Minefield seeds supercharged mines right at target on completion or Surge III+!
+        let mine_lvl = self.inventory.level(ShardKind::Minefield);
+        if mine_lvl > 0 && (is_completion || surge_tier >= 3) {
+            let r = self.mine_radius(mine_lvl) * 1.12;
+            let dmg = self.mine_damage(mine_lvl) * global_dmg;
+            self.emit_mine(pos, r, dmg, mine_lvl, 1.15);
+        }
+
+        // 8. Interference emits an expanding standing-wave ring from target on completion!
+        let interf_lvl = self.inventory.level(ShardKind::Interference);
+        if interf_lvl > 0 && is_completion {
+            self.pulses.push(InterferencePulse {
+                pos,
+                life: 0.0,
+                max_life: 0.78,
+                max_radius: 260.0 + interf_lvl as f32 * 36.0,
+                kind: PulseKind::Interference,
+                damage_multiplier: 1.35,
+            });
+        }
+
+        // 9. Thorns emits retaliatory crystal darts on completion!
+        let thorns_lvl = self.inventory.level(ShardKind::Thorns);
+        if thorns_lvl > 0 && is_completion {
+            let count = (4 + thorns_lvl as usize).min(10);
+            let tdmg = (75.0 + thorns_lvl as f32 * 25.0) * build_scale * global_dmg;
+            for i in 0..count {
+                let a = (i as f32) * std::f32::consts::TAU / count as f32;
+                let end = tangent_endpoint_on_globe(pos, Vec2::new(a.cos(), a.sin()) * 210.0);
+                self.beams.push(Beam {
+                    start: pos,
+                    end,
+                    life: 0.0,
+                    max_life: 0.16,
+                    thickness: 2.6,
+                    color: [1.0, 0.36, 0.42],
+                    is_echo: true,
+                });
+                self.damage_area(end, 42.0, tdmg * 0.55, 60.0, 0.0, 0.6);
+            }
+        }
+
+        // 10. Magnet + Surge Vacuum Pull on completion: yank gems across a wide radius toward player!
+        if is_completion {
+            let pull_r = 420.0 + self.inventory.level(ShardKind::Magnet) as f32 * 70.0;
+            for g in &mut self.gems {
+                let to_p = nearest_globe_delta(g.pos, self.player.pos);
+                let dist = to_p.length();
+                if dist > 14.0 && dist < pull_r {
+                    move_on_globe(&mut g.pos, to_p * 0.58);
+                }
             }
         }
     }
@@ -5251,17 +5617,20 @@ impl Game {
             [0.52, 1.0, 0.56],
             [1.0, 0.58, 0.28],
         ];
+        let build_scale = self.build_power_scale();
+        self.add_surge_energy(2.0, SURGE_HOLD_COMPLETE);
         for (i, pos) in locks.into_iter().enumerate() {
             let col = cols[i % cols.len()];
-            self.fire_precision_lance(pos, col, 3.6, false);
+            self.fire_precision_lance(pos, col, 3.8, false);
             self.damage_area(
                 pos,
-                145.0,
-                (380.0 + self.rank as f32 * 45.0) * self.global_damage_mult(),
+                160.0,
+                (380.0 + self.rank as f32 * 45.0) * build_scale * self.global_damage_mult(),
                 220.0,
                 0.0,
                 2.5,
             );
+            self.apply_aim_ability_procs(pos, false);
             // Also obliterate any Ghost Phantom caught near a Dead-Eye lock!
             let mut ghost_done: Option<(AimDrillKind, Vec2, bool)> = None;
             let mut idx_rm: Option<usize> = None;
@@ -5283,9 +5652,12 @@ impl Game {
     }
 
     fn try_snipe_boss_mechanic(&mut self, aim_world: Vec2, hitbox_mult: f32) -> bool {
-        let dmg_base = (220.0 + self.rank as f32 * 28.0 + self.aim_tier as f32 * 35.0)
+        let dmg_base = (220.0 + self.rank as f32 * 30.0 + self.aim_tier as f32 * 38.0)
+            * self.build_power_scale()
             * self.global_damage_mult()
-            * (1.0 + self.inventory.level(ShardKind::Lens) as f32 * 0.20);
+            * (1.0
+                + self.inventory.level(ShardKind::Lens) as f32 * 0.20
+                + self.inventory.level(ShardKind::Lance) as f32 * 0.18);
         let reach_pad = 24.0 * (hitbox_mult / 1.28);
 
         let mut hit_pos: Option<Vec2> = None;
@@ -5566,7 +5938,9 @@ impl Game {
             Vec2::X
         };
         let lens_lvl = self.inventory.level(ShardKind::Lens) as f32;
+        let lance_lvl = self.inventory.level(ShardKind::Lance) as f32;
         let split_lvl = self.inventory.level(ShardKind::Split);
+        let mirror_lvl = self.inventory.level(ShardKind::Mirror);
         let chrom_lvl = self.inventory.level(ShardKind::Chromatic);
         let refract_lvl = self.inventory.level(ShardKind::Refract);
         let echo_lvl = self.inventory.level(ShardKind::Echo);
@@ -5576,18 +5950,19 @@ impl Game {
             1.0
         };
 
-        let reach = dist.max(255.0) + 135.0 + lens_lvl * 22.0;
+        let reach = dist.max(255.0) + 145.0 + lens_lvl * 22.0 + lance_lvl * 28.0;
         let tier = self.aim_tier.clamp(1, 10) as f32;
         let combo_mult = 1.0 + (self.aim_combo.min(20) as f32) * 0.06;
-        let damage = (135.0 + self.rank as f32 * 20.0 + tier * 24.0)
-            * (1.0 + lens_lvl * 0.18)
+        let damage = (140.0 + self.rank as f32 * 22.0 + tier * 26.0)
+            * self.build_power_scale()
+            * (1.0 + lens_lvl * 0.20 + lance_lvl * 0.18)
             * mult
             * combo_mult
             * core_mult
             * self.global_damage_mult();
-        let thickness = 4.4 + tier * 0.25 + lens_lvl * 0.95;
+        let thickness = 4.5 + tier * 0.25 + lens_lvl * 0.95 + lance_lvl * 0.55;
 
-        // Split shard adds precision flanking wing-lances (±6°)!
+        // Split shard adds precision flanking wing-lances (±6°), and Mirror adds opposite / quad-cross lances!
         let mut dirs = vec![dir];
         if allow_shard_procs && split_lvl >= 2 {
             let pairs = (split_lvl / 2).min(2);
@@ -5596,6 +5971,14 @@ impl Game {
                 let off = (p as f32) * 0.105;
                 dirs.push(Vec2::new((base_a + off).cos(), (base_a + off).sin()));
                 dirs.push(Vec2::new((base_a - off).cos(), (base_a - off).sin()));
+            }
+        }
+        if allow_shard_procs && mirror_lvl >= 1 {
+            dirs.push(-dir);
+            if mirror_lvl >= 4 {
+                let perp = Vec2::new(-dir.y, dir.x);
+                dirs.push(perp);
+                dirs.push(-perp);
             }
         }
 
@@ -5777,13 +6160,14 @@ impl Game {
         self.active_ghost_id = -1;
         self.active_ghost_golden = false;
 
-        // Permanent Cumulative Optical Precision Stacks (NEVER lost on miss!).
+        // Permanent Cumulative Optical Precision Stacks (NEVER lost on miss!) + Major Resonance Surge Power-Up!
         let base_stacks = if self.prism_core == PrismCore::ResonanceConduit { 2 } else { 1 };
         let gained_stacks = if golden { base_stacks + 1 } else { base_stacks };
         self.optical_stacks += gained_stacks;
         self.add_overdrive_charge(if golden { 0.45 } else { 0.28 });
+        self.add_surge_energy(if golden { 2.30 } else { 1.65 }, SURGE_HOLD_COMPLETE);
 
-        // Golden Ace Phantom OR every 4th Ghost Duel awards Reroll + Banish economy!
+        // Golden Ace Phantom OR every 3rd Ghost Duel awards Reroll + Banish economy!
         if golden {
             self.reroll_charges += 1;
             self.banish_charges += 1;
@@ -5795,6 +6179,12 @@ impl Game {
                 self.banish_charges += 1;
             }
         }
+
+        // Fire a FULL PHANTOM BUILD SALVO directly from the shattered Ghost's position!
+        // Every Split, Mirror, Refract, Chromatic, Lens, Diffract, Kaleidoscope & Prism Cannon you drafted erupts here!
+        let ghost_target = self.find_nearest_enemy_pos_from(pos);
+        self.fire_primary_inner(false, false, ghost_target, Some(pos));
+        self.apply_aim_ability_procs(pos, true);
 
         // Cascade shard triggers bonus chain detonation on Ghost Phantom defeat!
         let cascade_lvl = self.inventory.level(ShardKind::Cascade);
@@ -5809,8 +6199,10 @@ impl Game {
         }
 
         let tier = self.aim_tier as f32;
-        let blast_dmg = (260.0 + self.rank as f32 * 36.0 + tier * 60.0) * self.global_damage_mult();
-        let blast_r = 195.0 + tier * 16.0;
+        let blast_dmg = (260.0 + self.rank as f32 * 38.0 + tier * 64.0)
+            * self.build_power_scale()
+            * self.global_damage_mult();
+        let blast_r = 210.0 + tier * 16.0 + self.inventory.level(ShardKind::Lens) as f32 * 14.0;
 
         self.audio_event_bits |= AUDIO_AIM_COMPLETE;
         self.screen_flash = self.screen_flash.max(0.55);
@@ -5926,9 +6318,10 @@ impl Game {
     }
 
     fn update_extra_weapons(&mut self, dt: f32) {
+        let surge_tier_f = self.surge_tier() as f32;
         let arc = self.inventory.level(ShardKind::Arc);
         if arc > 0 {
-            self.arc_timer -= dt;
+            self.arc_timer -= dt * (1.0 + surge_tier_f * 0.30);
             if self.arc_timer <= 0.0 {
                 self.fire_arc(arc);
                 let storm_front = self
@@ -5943,7 +6336,7 @@ impl Game {
 
         let minefield = self.inventory.level(ShardKind::Minefield);
         if minefield > 0 {
-            self.mine_timer -= dt;
+            self.mine_timer -= dt * (1.0 + surge_tier_f * 0.28);
             if self.mine_timer <= 0.0 {
                 self.drop_minefield(minefield);
                 self.mine_timer += self.mine_interval(minefield);
@@ -5952,7 +6345,7 @@ impl Game {
 
         let lance = self.inventory.level(ShardKind::Lance);
         if lance > 0 {
-            self.lance_timer -= dt;
+            self.lance_timer -= dt * (1.0 + surge_tier_f * 0.30);
             if self.lance_timer <= 0.0 {
                 self.fire_lance(lance);
                 let rail_focus = self
@@ -5972,8 +6365,8 @@ impl Game {
         let storm_front = self
             .inventory
             .has_synergy(ShardKind::Arc, ShardKind::Cascade);
-        let max_chains = 2 + level as usize + if storm_front { 2 } else { 0 };
-        let chain_range = ARC_CHAIN_RANGE + level as f32 * 18.0;
+        let max_chains = 2 + level as usize + self.surge_tier() as usize + if storm_front { 2 } else { 0 };
+        let chain_range = ARC_CHAIN_RANGE + level as f32 * 18.0 + self.surge_tier() as f32 * 16.0;
         let mut from = self.player.pos;
         let mut used: Vec<usize> = Vec::new();
         let mut hits: Vec<(usize, Vec2, Vec2)> = Vec::new();
@@ -6005,7 +6398,7 @@ impl Game {
         }
 
         let mut cascade_origins = Vec::new();
-        let damage = ARC_BASE_DAMAGE + ARC_DAMAGE_PER_LEVEL * level as f32;
+        let damage = (ARC_BASE_DAMAGE + ARC_DAMAGE_PER_LEVEL * level as f32) * self.global_damage_mult();
         for (idx, start, end) in &hits {
             if let Some(e) = self.enemies.get_mut(*idx) {
                 let was_alive = e.hp > 0.0;
@@ -6051,8 +6444,8 @@ impl Game {
             .inventory
             .has_synergy(ShardKind::Minefield, ShardKind::Magnet);
         let count = self.mine_count(level);
-        let radius = self.mine_radius(level);
-        let damage = self.mine_damage(level);
+        let radius = self.mine_radius(level) * (1.0 + self.surge_tier() as f32 * 0.05);
+        let damage = self.mine_damage(level) * self.global_damage_mult();
         let anchor = self
             .find_nearest_enemy_pos_from(self.player.pos)
             .unwrap_or(self.player.pos);
@@ -6227,6 +6620,43 @@ impl Game {
 
         for req in &salvo {
             self.fire_beam(req.clone(), origin, is_echo);
+        }
+
+        // Resonance Surge Tier III+: fire an extra Surging Prismatic Overdrive Beam!
+        if !is_echo && self.surge_tier() >= 3 {
+            let base = &salvo[0];
+            let dir = if self.aim_active && origin == self.player.pos {
+                let aim_t = unproject_globe_offset(self.aim_screen_offset);
+                if aim_t.length_squared() > 4.0 {
+                    aim_t.normalize()
+                } else {
+                    (base.end - base.start).normalize_or_zero()
+                }
+            } else {
+                (base.end - base.start).normalize_or_zero()
+            };
+            let reach = (base.end - base.start).length() * 1.15;
+            let hue = (self.time * 2.4) % 1.0;
+            let surge_col = if self.surge_tier() >= 4 {
+                [
+                    0.55 + 0.45 * (hue * std::f32::consts::TAU).cos(),
+                    0.55 + 0.45 * (hue * std::f32::consts::TAU + 2.094).cos(),
+                    0.55 + 0.45 * (hue * std::f32::consts::TAU + 4.189).cos(),
+                ]
+            } else {
+                [1.0, 0.88, 0.34]
+            };
+            self.fire_beam(
+                BeamRequest {
+                    start: base.start,
+                    end: base.start + dir * reach,
+                    thickness: base.thickness * 1.45,
+                    damage: base.damage * 1.35,
+                    color: surge_col,
+                },
+                origin,
+                false,
+            );
         }
 
         // Kaleidoscope: after every primary salvo, emit a prismatic great-circle ring.
@@ -7916,6 +8346,51 @@ impl Game {
                     glow: 0.7,
                     shape: SHAPE_RING,
                 });
+            }
+
+            // 1a-surge. Live Resonance Surge Power-Up Aura around the player prism!
+            let active_surge = self.surge_tier();
+            if active_surge >= 1 {
+                let pulse = 0.84 + 0.16 * (self.time * (5.0 + active_surge as f32 * 2.0)).sin();
+                let hue = (self.time * 1.8) % 1.0;
+                let (sr, sg, sb) = match active_surge {
+                    1 => (0.38_f32, 0.96, 1.0),
+                    2 => (0.82, 0.54, 1.0),
+                    3 => (1.0, 0.86, 0.32),
+                    _ => (
+                        0.58 + 0.42 * (hue * std::f32::consts::TAU).cos(),
+                        0.58 + 0.42 * (hue * std::f32::consts::TAU + 2.094).cos(),
+                        0.58 + 0.42 * (hue * std::f32::consts::TAU + 4.189).cos(),
+                    ),
+                };
+                let aura_r = visual_r + 15.0 + active_surge as f32 * 4.5;
+                self.circle_buf.push(CircleInstance {
+                    x: pos.x,
+                    y: pos.y,
+                    radius: aura_r * pulse,
+                    r: sr,
+                    g: sg,
+                    b: sb,
+                    a: 0.48 + active_surge as f32 * 0.09,
+                    glow: 1.6 + active_surge as f32 * 0.55,
+                    shape: SHAPE_RING,
+                });
+                // Orbiting Resonance Surge crystal pips visually showing Surge Tier I..IV!
+                for si in 0..active_surge {
+                    let ang = self.time * (2.6 + active_surge as f32 * 0.65)
+                        + (si as f32) * std::f32::consts::TAU / active_surge as f32;
+                    self.circle_buf.push(CircleInstance {
+                        x: pos.x + ang.cos() * (aura_r + 3.0),
+                        y: pos.y + ang.sin() * (aura_r + 3.0),
+                        radius: 4.0 + active_surge as f32 * 0.5,
+                        r: sr,
+                        g: sg,
+                        b: sb,
+                        a: 0.92,
+                        glow: 2.6,
+                        shape: SHAPE_DIAMOND,
+                    });
+                }
             }
 
             // 1b. Defensive shield ring (Barrier or Thorns owned).

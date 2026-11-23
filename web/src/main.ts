@@ -28,6 +28,7 @@ const AUDIO_DEADEYE_START = 1 << 14;
 const AUDIO_DEADEYE_VOLLEY = 1 << 15;
 const AUDIO_OBELISK_CAPTURE = 1 << 16;
 const AUDIO_WEAKPOINT_CRIT = 1 << 17;
+const AUDIO_SURGE_TIER_UP = 1 << 18;
 
 // Must stay in index-lock with Rust's SYNERGIES const (src/shards.rs).
 const SYNERGY_NAMES: string[] = [
@@ -93,29 +94,29 @@ type Rarity = 'common' | 'rare' | 'legendary' | 'evolution';
 interface ShardMeta { name: string; color: string; desc: string; synergies: string[]; rarity: Rarity; mouseTip?: string }
 interface EvolutionMeta { name: string; color: string; desc: string; recipe: string }
 const SHARDS: ShardMeta[] = [
-  { name: 'SPLIT',        color: '#8effa3', rarity: 'common',    desc: 'Fan out more beams per volley',              mouseTip: 'Sniper shots fire dual wing-lances',                     synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
-  { name: 'REFRACT',      color: '#7fd3ff', rarity: 'rare',      desc: 'Beams curve toward nearest enemy',           mouseTip: 'Sniper shots ricochet to nearby enemies',                synergies: ['ECHO → TRACKING ECHO'] },
-  { name: 'MIRROR',       color: '#c9a3ff', rarity: 'common',    desc: 'Fire symmetrically in every direction',      synergies: ['DIFFRACT → SUPERNOVA'] },
-  { name: 'CHROMATIC',    color: '#ffa3c9', rarity: 'common',    desc: 'Split into red / green / blue sub-rays',     mouseTip: 'Applies Prism Mark (+35% DMG & RGB burst on death)',     synergies: ['LENS → PRISM CANNON'] },
-  { name: 'LENS',         color: '#ffe58e', rarity: 'common',    desc: 'Focus thicker, heavier optical beams',       mouseTip: '+12% larger Ghost/Weakpoint hitboxes & wider lance',     synergies: ['CHROMATIC → PRISM CANNON'] },
-  { name: 'DIFFRACT',     color: '#8efff4', rarity: 'rare',      desc: 'Impacts scatter into radial starbursts',     synergies: ['MIRROR → SUPERNOVA'] },
-  { name: 'ECHO',         color: '#ff9d6c', rarity: 'rare',      desc: 'Delayed reverberating second salvo',         mouseTip: 'Fires a delayed 120ms ghost-strike sniper echo',         synergies: ['REFRACT → TRACKING ECHO'] },
-  { name: 'HALO',         color: '#f5f5bc', rarity: 'rare',      desc: 'Orbital crystal beads slice on contact',     synergies: ['FROST → FROZEN ORBIT', 'MOMENTUM → EVENT HORIZON'] },
-  { name: 'CASCADE',      color: '#ff6f91', rarity: 'legendary', desc: 'Kills fork into chain-reaction rays',        mouseTip: 'Ghost Duel wins detonate a chain starburst',             synergies: ['SPLIT → CHAIN REACTION', 'THORNS → MARTYRDOM'] },
-  { name: 'INTERFERENCE', color: '#9a9dff', rarity: 'legendary', desc: 'Standing-wave rings ripple outward',         synergies: ['BARRIER → RESONANCE', 'MAGNET → GRAVITY WELL', 'MINEFIELD → SEISMIC FIELD'] },
-  { name: 'SIPHON',       color: '#a3ffdb', rarity: 'common',    desc: 'Beams siphon hull health on hit',            synergies: ['THORNS → BLOOD PACT'] },
-  { name: 'FROST',        color: '#b3e5fc', rarity: 'common',    desc: 'Cryo-chill enemies slowed by beams',         mouseTip: 'Slows Pink Ghost strafing & extends lock timer',         synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
-  { name: 'BARRIER',      color: '#64b5f6', rarity: 'common',    desc: 'Regenerating shield absorbs + burns',        synergies: ['INTERFERENCE → RESONANCE'] },
-  { name: 'THORNS',       color: '#ef5350', rarity: 'rare',      desc: 'Hull damage triggers retaliatory rays',      synergies: ['SIPHON → BLOOD PACT', 'CASCADE → MARTYRDOM'] },
-  { name: 'MAGNET',       color: '#7cffd4', rarity: 'common',    desc: 'Vacuum radiance crystals from afar',         synergies: ['INTERFERENCE → GRAVITY WELL', 'MINEFIELD → GRAVITY MINES'] },
-  { name: 'MOMENTUM',     color: '#d7ff6f', rarity: 'common',    desc: 'Faster glide & +12 px longer Phase Dash',    synergies: ['HALO → EVENT HORIZON'] },
-  { name: 'ARMOR',        color: '#9ab8d0', rarity: 'common',    desc: 'Reduce all incoming damage 8% / level',      synergies: [] },
-  { name: 'LUCK',         color: '#ffd740', rarity: 'rare',      desc: 'Boost rare & legendary shard rolls',         mouseTip: 'Spawns Golden Ace Phantoms (3× rewards & Relic loot)',   synergies: [] },
-  { name: 'PRISM HEART',  color: '#ff7eb3', rarity: 'common',    desc: '+15 max hull & stronger rank-up heal',       synergies: [] },
-  { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: '+32 px Dash reach/lvl + Warp Ribbon slice',  mouseTip: 'Counter-sniping Ghosts instantly refunds Phase Dash',    synergies: ['MINEFIELD → PHASE WAKE'] },
-  { name: 'ARC',          color: '#b58cff', rarity: 'rare',      desc: 'Chain lightning arcs across crowds',         synergies: ['FROST → STATIC FREEZE', 'CASCADE → STORM FRONT', 'MINEFIELD → TRIPWIRE GRID'] },
-  { name: 'MINEFIELD',    color: '#7dff98', rarity: 'legendary', desc: 'Seed faceted charges that pull & burst',     synergies: ['MAGNET → GRAVITY MINES', 'INTERFERENCE → SEISMIC FIELD', 'ARC → TRIPWIRE GRID', 'PHASE STEP → PHASE WAKE'] },
-  { name: 'LANCE',        color: '#fff06a', rarity: 'rare',      desc: 'Periodic heavy piercing rail shot',          mouseTip: 'Boosts manual sniper rail damage & boss weakpoint crit', synergies: ['LENS → RAIL FOCUS', 'SIPHON → SURGICAL DRAIN'] },
+  { name: 'SPLIT',        color: '#8effa3', rarity: 'common',    desc: 'Fan out more beams per volley',              mouseTip: 'Wing sniper lances + scales Surge fire-rate boost',       synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
+  { name: 'REFRACT',      color: '#7fd3ff', rarity: 'rare',      desc: 'Beams curve toward nearest enemy',           mouseTip: 'Sniper shots ricochet + fires in Ghost Phantom Salvo',    synergies: ['ECHO → TRACKING ECHO'] },
+  { name: 'MIRROR',       color: '#c9a3ff', rarity: 'common',    desc: 'Fire symmetrically in every direction',      mouseTip: 'Sniper fires rear/quad mirror lances + Ghost Salvo',      synergies: ['DIFFRACT → SUPERNOVA'] },
+  { name: 'CHROMATIC',    color: '#ffa3c9', rarity: 'common',    desc: 'Split into red / green / blue sub-rays',     mouseTip: 'Applies Prism Mark (+35% DMG & RGB burst on death)',      synergies: ['LENS → PRISM CANNON'] },
+  { name: 'LENS',         color: '#ffe58e', rarity: 'common',    desc: 'Focus thicker, heavier optical beams',       mouseTip: 'Wider target hitboxes, heavier rail & bigger Ghost nova', synergies: ['CHROMATIC → PRISM CANNON'] },
+  { name: 'DIFFRACT',     color: '#8efff4', rarity: 'rare',      desc: 'Impacts scatter into radial starbursts',     mouseTip: 'Every sniper hit erupts into radial Diffract starbursts', synergies: ['MIRROR → SUPERNOVA'] },
+  { name: 'ECHO',         color: '#ff9d6c', rarity: 'rare',      desc: 'Delayed reverberating second salvo',         mouseTip: 'Delayed 120ms sniper echo + scales Surge fire-rate',      synergies: ['REFRACT → TRACKING ECHO'] },
+  { name: 'HALO',         color: '#f5f5bc', rarity: 'rare',      desc: 'Orbital crystal beads slice on contact',     mouseTip: 'Surge spins Halos up to 2.4× faster & widens orbit',      synergies: ['FROST → FROZEN ORBIT', 'MOMENTUM → EVENT HORIZON'] },
+  { name: 'CASCADE',      color: '#ff6f91', rarity: 'legendary', desc: 'Kills fork into chain-reaction rays',        mouseTip: 'Ghost Duel wins detonate a full chain starburst',         synergies: ['SPLIT → CHAIN REACTION', 'THORNS → MARTYRDOM'] },
+  { name: 'INTERFERENCE', color: '#9a9dff', rarity: 'legendary', desc: 'Standing-wave rings ripple outward',         mouseTip: 'Surge accelerates waves & emits ring from Ghost kills',   synergies: ['BARRIER → RESONANCE', 'MAGNET → GRAVITY WELL', 'MINEFIELD → SEISMIC FIELD'] },
+  { name: 'SIPHON',       color: '#a3ffdb', rarity: 'common',    desc: 'Beams siphon hull health on hit',            mouseTip: 'Every aim hit & Ghost kill siphons instant Hull HP',      synergies: ['THORNS → BLOOD PACT'] },
+  { name: 'FROST',        color: '#b3e5fc', rarity: 'common',    desc: 'Cryo-chill enemies slowed by beams',         mouseTip: 'Slows Ghosts + aim hits unleash Cryo Nova frost fields',  synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
+  { name: 'BARRIER',      color: '#64b5f6', rarity: 'common',    desc: 'Regenerating shield absorbs + burns',        mouseTip: 'Aim hits recharge Shield instantly + Surge boosts regen', synergies: ['INTERFERENCE → RESONANCE'] },
+  { name: 'THORNS',       color: '#ef5350', rarity: 'rare',      desc: 'Hull damage triggers retaliatory rays',      mouseTip: 'Ghost Duel wins fire radial retaliatory crystal darts',   synergies: ['SIPHON → BLOOD PACT', 'CASCADE → MARTYRDOM'] },
+  { name: 'MAGNET',       color: '#7cffd4', rarity: 'common',    desc: 'Vacuum radiance crystals from afar',         mouseTip: 'Surge amplifies XP Vacuum up to 6× + snaps arena gems',   synergies: ['INTERFERENCE → GRAVITY WELL', 'MINEFIELD → GRAVITY MINES'] },
+  { name: 'MOMENTUM',     color: '#d7ff6f', rarity: 'common',    desc: 'Faster glide & +12 px longer Phase Dash',    mouseTip: 'Surge supercharges move speed & cuts Dash cooldown',      synergies: ['HALO → EVENT HORIZON'] },
+  { name: 'ARMOR',        color: '#9ab8d0', rarity: 'common',    desc: 'Reduce all incoming damage 8% / level',      mouseTip: 'Scales global Surge DMG power & mitigates Ghost snipes',  synergies: [] },
+  { name: 'LUCK',         color: '#ffd740', rarity: 'rare',      desc: 'Boost rare & legendary shard rolls',         mouseTip: 'Spawns Golden Ace Phantoms + faster Surge charge rate',   synergies: [] },
+  { name: 'PRISM HEART',  color: '#ff7eb3', rarity: 'common',    desc: '+15 max hull & stronger rank-up heal',       mouseTip: 'Amplifies instant Hull heal triggered by aim hits',       synergies: [] },
+  { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: '+32 px Dash reach/lvl + Warp Ribbon slice',  mouseTip: 'Counter-sniping Ghosts instantly refunds Phase Dash',     synergies: ['MINEFIELD → PHASE WAKE'] },
+  { name: 'ARC',          color: '#b58cff', rarity: 'rare',      desc: 'Chain lightning arcs across crowds',         mouseTip: 'Surge adds +4 Arc jumps + fires lightning from targets',  synergies: ['FROST → STATIC FREEZE', 'CASCADE → STORM FRONT', 'MINEFIELD → TRIPWIRE GRID'] },
+  { name: 'MINEFIELD',    color: '#7dff98', rarity: 'legendary', desc: 'Seed faceted charges that pull & burst',     mouseTip: 'Surge III+ & Ghost wins seed supercharged Mines on hit',  synergies: ['MAGNET → GRAVITY MINES', 'INTERFERENCE → SEISMIC FIELD', 'ARC → TRIPWIRE GRID', 'PHASE STEP → PHASE WAKE'] },
+  { name: 'LANCE',        color: '#fff06a', rarity: 'rare',      desc: 'Periodic heavy piercing rail shot',          mouseTip: 'Scales sniper DMG + every aim hit shaves Lance cooldown', synergies: ['LENS → RAIL FOCUS', 'SIPHON → SURGICAL DRAIN'] },
 ];
 
 // Must stay in index-lock with Rust's EvolutionKind enum (src/shards.rs).
@@ -345,6 +346,11 @@ async function main(): Promise<void> {
   const aimComboValEl = getEl('aim-combo-val');
   const aimStacksValEl = getEl('aim-stacks-val');
   const perkPipEls = [getEl('perk-0'), getEl('perk-1'), getEl('perk-2'), getEl('perk-3')];
+  const surgeWrapEl = getEl('surge-wrap');
+  const surgeLabelEl = getEl('surge-label');
+  const surgeTierBadgeEl = getEl('surge-tier-badge');
+  const surgeFillEl = getEl('surge-fill');
+  const surgeStatsEl = getEl('surge-stats');
   const overdriveTextEl = getEl('overdrive-text');
   const overdrivePctEl = getEl('overdrive-pct');
   const overdriveFillEl = getEl('overdrive-fill');
@@ -753,7 +759,7 @@ async function main(): Promise<void> {
       ? `<div style="margin-top:4px;color:#ffba49">★ EVOLUTIONS · ${activeEvo.map(escapeHtml).join(' / ')}</div>`
       : '';
     const aimLine =
-      `<div style="margin-top:6px;color:#ff8df2">OPTICAL MASTERY · ${game.optical_stacks()} STACKS (+${game.optical_stacks() * 6}% DMG) · ${game.ghost_duels_won()} GHOST DUELS · ${acc}% ACC · DASH ${Math.round(game.dash_distance_px())}M</div>`;
+      `<div style="margin-top:6px;color:#ff8df2">OPTICAL MASTERY · ${game.optical_stacks()} STACKS (+${game.optical_damage_bonus_pct()}% DMG) · PEAK SURGE T${game.surge_peak_tier()} · ${game.ghost_duels_won()} DUELS · ${acc}% ACC · DASH ${Math.round(game.dash_distance_px())}M</div>`;
 
     pauseBuildEl.innerHTML =
       `<div style="display:flex;justify-content:space-between;color:#eefaff;margin-bottom:10px">` +
@@ -936,7 +942,7 @@ async function main(): Promise<void> {
           ? `<div class="shard-syn-callout${syn.ready ? ' ready' : ''}">${escapeHtml(syn.text)}</div>`
           : '';
         const mouseHtml = meta.mouseTip
-          ? `<div class="shard-mouse-tag">⌖ SNIPER · ${escapeHtml(meta.mouseTip)}</div>`
+          ? `<div class="shard-mouse-tag">⌖ AIM SURGE · ${escapeHtml(meta.mouseTip)}</div>`
           : '';
         const banishHtml = banishCharges > 0
           ? `<div class="shard-card-foot"><span class="shard-banish-btn" data-banish-slot="${slot}">BANISH ×${banishCharges}</span></div>`
@@ -1137,7 +1143,7 @@ async function main(): Promise<void> {
         `<div class="dossier-row"><span class="dossier-label">HOSTILES SHATTERED</span><span class="dossier-val">${game.kills_total()} (PEAK ×${peakStreak})</span></div>` +
         `<div class="dossier-row"><span class="dossier-label">AVERAGE DPS</span><span class="dossier-val">${formatCompact(avgDps)} / s</span></div>` +
         `<div class="dossier-row"><span class="dossier-label">BOSSES / OBELISKS</span><span class="dossier-val">${bossKills} BOSS · ${obelisksCap} OBELISK${overclocks > 0 ? ` · ${overclocks} OC` : ''}</span></div>` +
-        `<div class="dossier-row"><span class="dossier-label">GHOST DUELS / STACKS</span><span class="dossier-val" style="color:#ff8df2">${duelsWon} WON · ${opticalStacks} OPTICAL (+${opticalStacks * 6}% DMG)</span></div>` +
+        `<div class="dossier-row"><span class="dossier-label">GHOST DUELS / STACKS</span><span class="dossier-val" style="color:#ff8df2">${duelsWon} WON · ${opticalStacks} OPTICAL (+${game.optical_damage_bonus_pct()}% DMG) · SURGE T${game.surge_peak_tier()}</span></div>` +
         `<div class="dossier-row"><span class="dossier-label">HULL DMG / SHIELD</span><span class="dossier-val">${dmgTaken} / ${barrierAbs}</span></div>` +
         (aimShots > 0 || game.aim_drills_completed() > 0
           ? `<div class="dossier-row"><span class="dossier-label">AIM MASTERY</span><span class="dossier-val" style="color:#ffd95e">TIER ${game.aim_tier()} · ${aimAcc}% ACC · PEAK ×${game.peak_aim_combo()}</span></div>`
@@ -1409,6 +1415,8 @@ async function main(): Promise<void> {
     const aimTrackProgress = game.aim_track_progress();
     const aimCombo = game.aim_combo();
     const opticalStacks = game.optical_stacks();
+    const opticalDmgPct = game.optical_damage_bonus_pct();
+    const opticalCritPct = game.optical_crit_bonus_pct();
     const opticalPerkBits = game.optical_perk_bits();
     const focusMult = game.focus_multiplier();
     const overdriveCharge = game.overdrive_charge();
@@ -1418,6 +1426,11 @@ async function main(): Promise<void> {
     const duelsWon = game.ghost_duels_won();
     const activeGhostId = game.active_ghost_id();
     const activeGhostGolden = game.active_ghost_is_golden();
+    const surgeTier = game.surge_tier();
+    const surgeEnergyPct = game.surge_energy_pct();
+    const surgeDmgPct = game.surge_damage_bonus_pct();
+    const surgeRatePct = game.surge_fire_rate_bonus_pct();
+    const surgeMagMult = game.surge_magnet_mult();
 
     if (!deathShown && !modalShown) {
       audio.tick(
@@ -1439,13 +1452,28 @@ async function main(): Promise<void> {
     // Visual hit-marker & tactical callout banners.
     if (eventBits & (AUDIO_AIM_HIT | AUDIO_WEAKPOINT_CRIT | AUDIO_DEADEYE_VOLLEY)) overlay.pulseHitMarker();
     if (eventBits & (AUDIO_AIM_MISS | AUDIO_GHOST_SHOT)) overlay.pulseMissMarker();
+    if (eventBits & AUDIO_SURGE_TIER_UP) {
+      if (surgeTier === 4) {
+        overlay.announce(
+          '✦ RESONANCE SURGE IV · HYPER-PRISM',
+          '#ff8df2',
+          `+${surgeDmgPct}% BUILD DMG · +${surgeRatePct}% RATE · ${surgeMagMult.toFixed(1)}× VACUUM`,
+        );
+      } else if (surgeTier === 3) {
+        overlay.announce(
+          '⚡ RESONANCE SURGE III · SUPERCHARGED',
+          '#ffe875',
+          `+${surgeDmgPct}% BUILD DMG · +${surgeRatePct}% RATE · BONUS OVERDRIVE BEAM`,
+        );
+      }
+    }
     if (eventBits & AUDIO_AIM_COMPLETE) {
       overlay.pulseHitMarker();
       const wonGhost = activeGhostId >= 0 ? ghostNet.getByIndex(activeGhostId) : null;
       overlay.announce(
         wonGhost ? `GHOST COUNTER-SNIPED · ${wonGhost.callsign}` : `GHOST DUEL WON · TIER ${game.aim_tier()}`,
         activeGhostGolden ? '#ffe875' : '#ff73d2',
-        `OPTICAL STACKS ${opticalStacks} · +${opticalStacks * 6}% DMG`,
+        `PHANTOM SALVO + SURGE T${surgeTier} · OPTICAL +${opticalDmgPct}% DMG`,
       );
     }
     if ((eventBits & AUDIO_GHOST_LOCK) && activeGhostId >= 0 && activeGhostId !== lastGhostAlertId) {
@@ -1513,17 +1541,40 @@ async function main(): Promise<void> {
     if (isLeveling && !modalShown) showLevelUpModal();
     if (!isLeveling && modalShown) hideLevelUpModal();
 
-    // Update live Optical Mastery / Ghost Duel / Dead-Eye HUD panel.
-    if (aim.active || activeGhostId >= 0 || opticalStacks > 0 || overdriveCharge > 0 || deadeyeActive) {
+    // Update live Optical Mastery / Resonance Surge Power-Up / Dead-Eye HUD panel.
+    if (aim.active || activeGhostId >= 0 || opticalStacks > 0 || surgeTier > 0 || overdriveCharge > 0 || deadeyeActive) {
       aimHudEl.classList.add('shown');
       aimHudEl.classList.toggle('ghost-alert', activeGhostId >= 0);
       aimHudEl.classList.toggle('deadeye-ready', overdriveCharge >= 1.0 || deadeyeActive);
       aimTierValEl.textContent = `FOCUS ×${focusMult.toFixed(1)}`;
       aimComboValEl.textContent = `DUELS ${duelsWon} · T${game.aim_tier()}`;
-      aimStacksValEl.textContent = `OPTICAL ${opticalStacks} · +${opticalStacks * 6}% DMG · +${Math.min(50, opticalStacks * 2)}% CRIT`;
+      aimStacksValEl.textContent = `OPTICAL ${opticalStacks} · +${opticalDmgPct}% DMG · ${opticalCritPct}% CRIT`;
       for (let i = 0; i < 4; i++) {
         perkPipEls[i]!.classList.toggle('unlocked', ((opticalPerkBits >>> i) & 1) === 1);
       }
+
+      // Live Build-Scaling Resonance Surge Power-Up readout!
+      surgeWrapEl.className = surgeTier > 0 ? `tier-${surgeTier}` : '';
+      surgeFillEl.style.width = `${Math.round(surgeEnergyPct * 100)}%`;
+      if (surgeTier === 0) {
+        surgeLabelEl.textContent = '⚡ SURGE · SNIPE TO IGNITE';
+        surgeTierBadgeEl.textContent = 'READY';
+        surgeStatsEl.textContent = 'HIT TARGETS → BUILD-SCALED POWER-UP';
+      } else {
+        const tierNames = ['', 'FOCUSED', 'AMPLIFIED', 'SUPERCHARGED', 'HYPER-PRISM'];
+        const romans = ['', 'I', 'II', 'III', 'IV'];
+        surgeLabelEl.textContent = `⚡ SURGE ${romans[surgeTier]} · ${tierNames[surgeTier]}`;
+        surgeTierBadgeEl.textContent = `${Math.round(surgeEnergyPct * 100)}%`;
+        const extras: string[] = [];
+        if (game.inventory_level(7) > 0) extras.push(`HALO ${(1 + surgeTier * 0.35).toFixed(1)}×`);
+        if (game.inventory_level(20) > 0) extras.push(`ARC +${surgeTier}`);
+        if (game.inventory_level(21) > 0 && surgeTier >= 3) extras.push('MINES');
+        if (game.inventory_level(12) > 0) extras.push('SHIELD+');
+        if (surgeTier >= 3) extras.push('+BEAM');
+        const extraStr = extras.length > 0 ? ` · ${extras.slice(0, 2).join(' · ')}` : '';
+        surgeStatsEl.textContent = `+${surgeDmgPct}% DMG · +${surgeRatePct}% RATE · ${surgeMagMult.toFixed(1)}× VAC${extraStr}`;
+      }
+
       const odPct = deadeyeActive ? Math.round(deadeyeTimerPct * 100) : Math.round(overdriveCharge * 100);
       overdriveFillEl.style.width = `${odPct}%`;
       overdriveFillEl.classList.toggle('ready', overdriveCharge >= 1.0 || deadeyeActive);
@@ -1740,6 +1791,8 @@ async function main(): Promise<void> {
         obeliskX: game.obelisk_world_x(),
         obeliskY: game.obelisk_world_y(),
         obeliskProgress: game.obelisk_progress(),
+        surgeTier,
+        surgeEnergyPct,
         lookupGhost: (id: number) => ghostNet.getByIndex(id),
       },
     );

@@ -51,6 +51,8 @@ export interface AimOverlayState {
   obeliskX: number;
   obeliskY: number;
   obeliskProgress: number;
+  surgeTier: number;
+  surgeEnergyPct: number;
   lookupGhost: (id: number) => GhostSniperProfile | null;
 }
 
@@ -605,13 +607,26 @@ export class OverlayRenderer {
       ctx.lineTo(cx, cy);
       ctx.stroke();
 
+      // Inner Resonance Surge Power-Up ring right around the crosshair!
+      if (aim.surgeTier >= 1) {
+        const surgeColors = ['', '#5ef6ff', '#c68aff', '#ffe169', '#ff70dc'];
+        const sc = surgeColors[Math.min(4, aim.surgeTier)]!;
+        ctx.strokeStyle = sc;
+        ctx.shadowColor = sc;
+        ctx.shadowBlur = 10;
+        ctx.lineWidth = 1.6 + aim.surgeTier * 0.25;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 14.5, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * aim.surgeEnergyPct);
+        ctx.stroke();
+      }
+
       // Circular outer Dead-Eye Overdrive charge arc around reticle!
       if (aim.overdriveCharge > 0.01 || aim.deadeyeActive) {
         const arcPct = aim.deadeyeActive ? aim.deadeyeTimerPct : aim.overdriveCharge;
         ctx.strokeStyle = readyDeadeye || aim.deadeyeActive ? '#ffe26a' : 'rgba(255, 120, 210, 0.52)';
         ctx.lineWidth = readyDeadeye || aim.deadeyeActive ? 2.2 : 1.3;
         ctx.beginPath();
-        ctx.arc(cx, cy, 19, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * arcPct);
+        ctx.arc(cx, cy, 19.5, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * arcPct);
         ctx.stroke();
       }
 

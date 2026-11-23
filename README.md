@@ -43,10 +43,13 @@ Auto-firing light, refracted through shards you collect — paired with **hostil
 2. **4 Playable Prism Cores + 13 Tactical Enemy Archetypes:**
    - Choose *Sniper Lens*, *Phase Blade*, *Refraction Nova*, or *Resonance Conduit* on launch.
    - Fight 13 distinct enemy behaviors including **Weaver** laser-tether pairs, **Reflector** directional mirror shields (flank or snipe rear weakpoint), **Anchor** gravity wells, **Stalker** predictive teleporters, and fleeing golden **Carrier** loot beetles.
-3. **Hostile Ghost Player Sniper Network & Cumulative Optical Mastery:**
+3. **Hostile Ghost Player Sniper Network, Resonance Surge Power-Up & Cumulative Optical Mastery:**
    - Completed runs upload asynchronously to a **Cloudflare SQLite Durable Object** (`/api/ghosts`), letting real players' callsigns & builds invade other arenas as hostile Pink Spectral Snipers (plus 8 built-in Ace Phantoms & rare **Golden Ace Phantoms**).
-   - Counter-sniping Ghosts builds permanent **Optical Mastery Stacks** (`+6%` global DMG, `+2%` crit per stack), accelerates auto-salvo cadence via live **Focus Streak (`1×→5×`)**, unlocks **4 Milestone Perks** at `3 / 7 / 12 / 20` stacks (*Weakpoint Sight*, *Prism Ricochet*, *Phase Refund*, *Spectral Overclock*), and charges **RMB Prismatic Dead-Eye Overdrive**.
-   - **Shards Directly Transform Mouse Sniping:** `Split` adds wing-lances, `Refract` bounces shots, `Lens` widens hitboxes & rails, `Chromatic` applies Prism Mark (`+35%` DMG + RGB burst), `Echo` fires a 120ms ghost-strike, `Frost` slows Ghost lock timers, `Cascade` chain-detonates Ghost kills, `Phase Step` refunds Dash on hit, and `Luck` spawns Golden Ace Phantoms.
+   - **Immediate 4-Tier Build-Scaling Resonance Surge Power-Up:** Every single aim-trainer hit, Smooth Track tick, or boss weakpoint snipe immediately ignites & escalates **Resonance Surge** (`I · Focused → II · Amplified → III · Supercharged → IV · Hyper-Prism`), visibly haloing your prism and supercharging your **entire drafted build**:
+     - Global build damage up to **`+220%`** (scaling multiplicatively with your Rank, total shard levels, active synergies, and evolutions across auto-beams, Halo, Arc, Minefield, Lance, Interference, and Barrier)
+     - Auto-salvo fire rate up to **`+100%+`**, bonus extra Overdrive beam at Surge III+, faster move speed & Dash recharge, and **`1.5× → 6×` Global XP Vacuum**
+     - **Every Shard Scales With Aim & Surge:** `Halo` spins up to `2.4×` faster, `Arc` chains `+4` extra jumps & strikes from targets, `Minefield` drops supercharged mines on hit, `Siphon`/`Barrier` restore HP & Shield on every hit, `Frost` unleashes Cryo Novas, `Diffract` scatters starbursts, `Mirror` adds rear/quad sniper lances, `Lance` shaves cooldown per hit, and **completing a Ghost Duel fires a full Phantom Build Salvo** using your entire `compose_salvo` build directly from the shattered Ghost!
+   - **Cumulative Optical Mastery + RMB Dead-Eye:** Winning Ghost Duels permanently stacks Optical Mastery (`+5%` global DMG & `+2%` crit per stack), unlocks **4 Milestone Perks** at `3 / 7 / 12 / 20` stacks (*Weakpoint Sight*, *Prism Ricochet*, *Phase Refund*, *Spectral Overclock*), and charges **RMB Prismatic Dead-Eye Overdrive**.
 
 ## Procedural Classic & Modern Adaptive Soundtrack (`web/src/music.ts`)
 
@@ -69,7 +72,7 @@ Auto-firing light, refracted through shards you collect — paired with **hostil
 ## Local Development
 
 ```bash
-# Run deterministic Rust simulation, Ghost Duel, 6-boss & Dash scaling tests (25 tests)
+# Run deterministic Rust simulation, Resonance Surge, Ghost Duel, 6-boss & Dash scaling tests (26 tests)
 cargo test
 
 # Build optimized release WebAssembly module

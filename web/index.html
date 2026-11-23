@@ -286,6 +286,54 @@
         background: linear-gradient(90deg, #ffae42, #fff4a8, #ffd95e);
         box-shadow: 0 0 12px rgba(255, 217, 94, 0.9);
       }
+      #surge-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin-top: 2px;
+        padding: 4px 6px;
+        background: rgba(4, 14, 34, 0.58);
+        border: 1px solid rgba(125, 244, 255, 0.22);
+      }
+      #surge-wrap.tier-1 { border-color: rgba(94, 246, 255, 0.58); background: rgba(10, 38, 54, 0.62); }
+      #surge-wrap.tier-2 { border-color: rgba(198, 138, 255, 0.68); background: rgba(34, 16, 62, 0.66); }
+      #surge-wrap.tier-3 { border-color: rgba(255, 225, 105, 0.80); background: rgba(54, 36, 8, 0.72); }
+      #surge-wrap.tier-4 {
+        border-color: #ff7ae0;
+        background: linear-gradient(95deg, rgba(64, 18, 54, 0.78), rgba(16, 42, 66, 0.78));
+        box-shadow: 0 0 14px rgba(255, 112, 220, 0.42);
+      }
+      #surge-header {
+        display: flex;
+        justify-content: space-between;
+        font-size: 7.5px;
+        font-weight: 700;
+        letter-spacing: 1.4px;
+        color: #9bf6ff;
+      }
+      #surge-wrap.tier-2 #surge-header { color: #deb8ff; }
+      #surge-wrap.tier-3 #surge-header { color: #ffe87a; }
+      #surge-wrap.tier-4 #surge-header { color: #ff99ec; }
+      #surge-bar {
+        height: 4px;
+        background: rgba(0, 0, 0, 0.55);
+        overflow: hidden;
+      }
+      #surge-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #42dcff, #9af7ff);
+        transition: width 70ms linear;
+      }
+      #surge-wrap.tier-2 #surge-fill { background: linear-gradient(90deg, #9f6eff, #e2b8ff); }
+      #surge-wrap.tier-3 #surge-fill { background: linear-gradient(90deg, #ffae38, #fff19c); }
+      #surge-wrap.tier-4 #surge-fill { background: linear-gradient(90deg, #5ef6ff, #ff66d4, #ffe875); }
+      #surge-stats {
+        font-size: 7px;
+        letter-spacing: 0.9px;
+        color: rgba(235, 250, 255, 0.88);
+        line-height: 1.35;
+      }
       #aim-hud-sub {
         display: flex;
         justify-content: space-between;
@@ -1217,7 +1265,7 @@
         <div id="core-grid"></div>
         <div id="title-guide">
           <div class="guide-step"><span class="guide-num">01</span><span><strong>15:00 RUN · 6 MULTI-PHASE BOSSES</strong> — Lattice, Sentinel, Mirror Sovereign, Hydra, Chrono Eclipse &amp; Void Prism (+ Endless).</span></div>
-          <div class="guide-step"><span class="guide-num">02</span><span><strong>GHOST SNIPER DUELS &amp; DEAD-EYE</strong> — Hostile Pink Ghosts of real players lock laser sights on you. Counter-snipe to stack permanent Optical Mastery &amp; charge <strong>RMB Dead-Eye Overdrive</strong>.</span></div>
+          <div class="guide-step"><span class="guide-num">02</span><span><strong>RESONANCE SURGE POWER-UP &amp; GHOST DUELS</strong> — Every snipe immediately ignites a 4-tier build-scaling Surge (up to +200% DMG, +100% Fire Rate, 3.5× XP Vacuum &amp; supercharged Shards) + charges <strong>RMB Dead-Eye</strong>.</span></div>
           <div class="guide-step"><span class="guide-num">03</span><span><strong>SHARD SYNERGIES &amp; OBELISKS</strong> — Every shard transforms auto-beams AND mouse sniping; capture Golden Obelisks for +2 Relic Chests.</span></div>
         </div>
         <div id="title-actions">
@@ -1259,6 +1307,14 @@
             <span class="perk-pip" id="perk-1" title="7 Optical Stacks: Prism Ricochet">7·RICO</span>
             <span class="perk-pip" id="perk-2" title="12 Optical Stacks: Phase Refund">12·DASH</span>
             <span class="perk-pip" id="perk-3" title="20 Optical Stacks: Spectral Overclock">20·OVER</span>
+          </div>
+          <div id="surge-wrap">
+            <div id="surge-header">
+              <span id="surge-label">⚡ SURGE · SNIPE TO IGNITE</span>
+              <span id="surge-tier-badge">OFF</span>
+            </div>
+            <div id="surge-bar"><div id="surge-fill"></div></div>
+            <div id="surge-stats">HIT TARGETS FOR BUILD-SCALED POWER-UP</div>
           </div>
           <div id="overdrive-wrap">
             <div id="overdrive-label">
