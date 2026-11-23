@@ -5,7 +5,7 @@
 //   - Continuous pitch-rising resonant lock-on shimmer during Smooth Tracking drills.
 //   - Separate Music & SFX toggles + master dynamics compressor + smooth low-pass modal ducking.
 
-import { MusicEngine } from './music.js';
+import { MusicEngine, MusicGameState } from './music.js';
 
 const AUDIO_RANK_UP = 1 << 0;
 const AUDIO_PLAYER_HIT = 1 << 1;
@@ -56,6 +56,7 @@ export class AudioManager {
   private gemCooldown = 0;
   private killCooldown = 0;
   private accentCooldown = 0;
+  private killVelocity = 0;
   private panToggle = 1;
 
   public isInitialized(): boolean {
@@ -232,8 +233,8 @@ export class AudioManager {
     this.music?.setDucked(pausedOrModal);
   }
 
-  public updateMusicState(isTitle: boolean, energy: number, bossActive: boolean): void {
-    this.music?.setGameState(isTitle, energy, bossActive);
+  public updateMusicState(state: Partial<MusicGameState>): void {
+    this.music?.setGameState(state);
   }
 
   private applySfxBus(): void {
@@ -352,15 +353,30 @@ export class AudioManager {
     aimTracking = false,
     aimTrackProgress = 0,
     aimCombo = 0,
+    musicCtx?: Partial<MusicGameState>,
   ): void {
     if (!this.ctx || this.ctx.state !== 'running') return;
     const now = this.ctx.currentTime;
 
+    // Smooth recent kill velocity (kills/sec) so frantic combat bursts drive the music immediately!
+    const instKillsPerSec = dt > 0.001 ? Math.min(30, killCount / dt) : 0;
+    this.killVelocity = this.killVelocity * Math.exp(-dt * 1.4) + instKillsPerSec * (1 - Math.exp(-dt * 3.0));
+    const killRate = Math.min(1, this.killVelocity / 14);
+
     const musicalEnergy = Math.min(
       1,
-      0.12 + intensity * 0.65 + Math.min(killStreak, 40) * 0.006 + Math.min(aimCombo, 10) * 0.02,
+      0.10 + intensity * 0.58 + Math.min(killStreak, 50) * 0.005 + Math.min(aimCombo, 10) * 0.018 + killRate * 0.20,
     );
-    this.music?.setGameState(false, musicalEnergy, bossActive);
+    this.music?.setGameState({
+      isTitle: false,
+      energy: musicalEnergy,
+      bossActive,
+      killRate,
+      ...musicCtx,
+    });
+    if ((eventBits & AUDIO_BOSS_PHASE) || ((eventBits & AUDIO_SURGE_TIER_UP) && (musicCtx?.surgeTier ?? 0) >= 4)) {
+      this.music?.triggerImpactDrop();
+    }
 
     this.gemCooldown = Math.max(0, this.gemCooldown - dt);
     this.killCooldown = Math.max(0, this.killCooldown - dt);

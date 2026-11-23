@@ -335,6 +335,7 @@ async function main(): Promise<void> {
   const bossHudEl = getEl('boss-hud');
   const bossNameEl = getEl('boss-name');
   const bossFillEl = getEl('boss-fill');
+  const sysBarLeftEl = getEl('sys-bar-left');
   const sysBarMidEl = getEl('sys-bar-mid');
   const sysUplinkEl = getEl('sys-uplink');
   const sysMusicBtn = getEl('sys-music-btn') as HTMLButtonElement;
@@ -1287,7 +1288,22 @@ async function main(): Promise<void> {
 
     // Interactive mouse-reactive spinning crystal globe on Title Screen!
     if (!isStarted) {
-      audio.updateMusicState(true, 0.1, false);
+      audio.updateMusicState({
+        isTitle: true,
+        energy: 0.1,
+        wave: 0,
+        enemyDensity: 0,
+        killRate: 0,
+        surgeTier: 0,
+        bossActive: false,
+        bossKind: -1,
+        bossHpPct: 1,
+        ghostActive: false,
+        ghostImminent: false,
+        deadeyeActive: false,
+        obeliskProgress: 0,
+        lowHp: 0,
+      });
       const t = now / 1000;
       const camX = t * 44;
       const camY = Math.sin(t * 0.22) * 170;
@@ -1433,6 +1449,18 @@ async function main(): Promise<void> {
     const surgeMagMult = game.surge_magnet_mult();
 
     if (!deathShown && !modalShown) {
+      let ghostImminent = false;
+      for (let ti = 0; ti < aimTargetsLen; ti++) {
+        const flags = Math.round(aimTargetsView[ti * AIM_TARGET_STRIDE_FLOATS + 9]!);
+        if ((flags & 4) !== 0) {
+          ghostImminent = true;
+          break;
+        }
+      }
+      const curHp = game.hp();
+      const curMaxHp = game.max_hp();
+      const musicLowHp = curMaxHp > 0 ? Math.max(0, (0.35 - curHp / curMaxHp) / 0.35) : 0;
+      const enemyDensity = Math.min(1, game.enemy_count() / 110);
       audio.tick(
         rawDt,
         game.audio_beam_count(),
@@ -1446,6 +1474,18 @@ async function main(): Promise<void> {
         aimTracking,
         aimTrackProgress,
         aimCombo,
+        {
+          wave: game.wave(),
+          enemyDensity,
+          surgeTier,
+          bossKind: bossActive ? game.boss_kind_index() : -1,
+          bossHpPct: bossActive ? game.boss_hp_pct() : 1,
+          ghostActive: activeGhostId >= 0,
+          ghostImminent,
+          deadeyeActive,
+          obeliskProgress: game.obelisk_active() ? game.obelisk_progress() : 0,
+          lowHp: musicLowHp,
+        },
       );
     }
 
@@ -1801,6 +1841,9 @@ async function main(): Promise<void> {
     if (now - fpsLast > 500) {
       const fps = (fpsFrames * 1000) / (now - fpsLast);
       statusEl.textContent = `${fps.toFixed(0)} fps · ${game.enemy_count()}e ${circlesLen}s ${beamsLen}b`;
+      if (audio.isInitialized() && !audio.isMusicMuted()) {
+        sysBarLeftEl.textContent = `♪ ${audio.getNowPlaying()}`;
+      }
       fpsFrames = 0;
       fpsLast = now;
     }

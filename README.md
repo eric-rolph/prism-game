@@ -51,17 +51,24 @@ Auto-firing light, refracted through shards you collect — paired with **hostil
      - **Every Shard Scales With Aim & Surge:** `Halo` spins up to `2.4×` faster, `Arc` chains `+4` extra jumps & strikes from targets, `Minefield` drops supercharged mines on hit, `Siphon`/`Barrier` restore HP & Shield on every hit, `Frost` unleashes Cryo Novas, `Diffract` scatters starbursts, `Mirror` adds rear/quad sniper lances, `Lance` shaves cooldown per hit, and **completing a Ghost Duel fires a full Phantom Build Salvo** using your entire `compose_salvo` build directly from the shattered Ghost!
    - **Cumulative Optical Mastery + RMB Dead-Eye:** Winning Ghost Duels permanently stacks Optical Mastery (`+5%` global DMG & `+2%` crit per stack), unlocks **4 Milestone Perks** at `3 / 7 / 12 / 20` stacks (*Weakpoint Sight*, *Prism Ricochet*, *Phase Refund*, *Spectral Overclock*), and charges **RMB Prismatic Dead-Eye Overdrive**.
 
-## Procedural Classic & Modern Adaptive Soundtrack (`web/src/music.ts`)
+## Studio-Grade Adaptive Procedural Soundtrack (`web/src/music.ts`)
 
-100% real-time Web Audio synthesis driven by a sample-accurate lookahead scheduler — zero external audio files:
-- **6 Distinct 8-Bar Movements** that evolve organically through your run:
-  1. *I. Crystal Overture* (`D Dorian`, 118 BPM) — extended 9th/11th voicings & atmospheric pulse
-  2. *II. Refraction Lift* (`F Lydian`, 122 BPM) — uplifting relative-major modal modulation & synthwave drive
-  3. *III. Prismatic Counterpoint* (`D Harmonic Minor`, 124 BPM) — Bach-inspired 16th FM-harp arpeggios over a descending chromatic bassline (`Dm → Dm/C → Bbmaj7 → A7/C# → Eø7 → A7b9`)
-  4. *IV. Chromatic Horizon* (`Modal Interchange`, 120 BPM) — Neo-Riemannian chromatic mediants (`Dm9 → F#maj7 → Bm9`) & Neapolitan `bII` (`Ebmaj7`) half-time cinema groove
-  5. *V. Solar Overdrive* (`A Dorian`, 128 BPM) — high-energy climax with twin harmony leads
-  6. *Boss · Void Convergence* (`D Phrygian Dominant`, 134 BPM) — seamless bar-boundary boss transition with double-kick urgency & offbeat brass stabs
-- **Harmonically-Locked SFX (`web/src/audio.ts`):** Gem pickup cascades, Aim-Trainer flick snaps, and Overdrive detonations pull consonant frequencies directly from the currently sounding chord in `MusicEngine` (*Rez Infinite*-style harmonic cohesion), with independent **Music** and **SFX** toggles.
+100% real-time Web Audio API synthesis driven by a sample-accurate lookahead scheduler — zero external audio files:
+- **Studio DSP Mastering Bus:** Procedural 2-second stereo **Hall/Plate Convolution Reverb** (`ConvolverNode`), warm **analog tape soft-saturation** (`WaveShaperNode`), **kick-triggered sidechain pumping bus**, and **tempo-locked stereo ping-pong delay** that automatically tracks live BPM shifts.
+- **Dynamic Live Gameplay Reactivity (7 Vertical Stems + Living Tempo):**
+  - **Live BPM Pace Scaling:** Tempo accelerates smoothly (`+0 to +16 BPM`) with wave progression, swarm density, kill velocity, Resonance Surge tier, and boss phases.
+  - **Resonance Surge (`I–IV`):** Ignites wide detuned supersaw power-chords, twin harmony/octave lead doubling, driving ride cymbals, celestial formant choir at Tier IV, and opens the master filter wide.
+  - **Prismatic Dead-Eye Slow-Mo:** Immediately dives the soundtrack underwater (`390 Hz` resonant low-pass + heavy dark reverb wash + `0.64×` tempo stretch), slamming back open with a wide crash + war-taiko drop on rail detonation.
+  - **Hostile Ghost Sniper Lock-On:** Injects an in-key staccato sonar-pizzicato tension ostinato that doubles speed when `FIRE IMMINENT!`.
+  - **Obelisk Capture & Low Hull:** Swelling dual-formant celestial choir during Obelisk captures, and a visceral sub-bass heartbeat pulse below 35% Hull.
+- **5 Evolving 4-Phrase Movements + 3 Bespoke Boss Themes (including 7/8 Odd-Meter!):**
+  1. *I. Nebula Awakening* (`D Dorian`, 118+ BPM) — progressive synth-rock groove with portamento Reese bass & polyrhythmic arps
+  2. *II. Spectral Velocity* (`F# Dorian`, 126+ BPM) — liquid drum-and-bass two-step breakbeat & octave slap bass
+  3. *III. Baroque Reactor* (`D Harmonic Minor`, 128+ BPM) — Bach-inspired 16th FM-harpsichord counterpoint over descending chromatic bassline
+  4. *IV. Chromatic Drift* (`Neo-Riemannian Modal Interchange`, 122+ BPM) — chromatic mediants (`Dm9 → F#maj7 → Bm9`) & Neapolitan `bII` (`Ebmaj7`) cinematic half-time drops
+  5. *V. Hyper-Prism Overdrive* (`E Dorian`, 134+ BPM) — cyber-symphonic four-on-the-floor climax with two-part counterpoint
+  6. *Boss Themes:* **Iron Geometry** (*Lattice & Sentinel*), **Chrono Paradox [7/8]** (14-step odd-meter progressive clockwork for *Mirror Sovereign & Chrono Eclipse*), and **Void Apocalypse** (142+ BPM war-taiko symphonic finale for *Hydra & Void Prism*)
+- **Harmonically-Locked SFX (`web/src/audio.ts`):** Gem pickup cascades, aim hits, and Surge fanfares pull consonant frequencies directly from the currently sounding chord in `MusicEngine`, with live track/BPM/state displayed in the top telemetry bar.
 
 ## Spectral WebGL2 Rendering Pipeline
 
