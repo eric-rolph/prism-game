@@ -1,155 +1,247 @@
-// Input aggregation. Maintains the current intent as a 2D vector; game code
-// reads via `direction()` once per frame. Both keyboard and touch drag are
-// supported; touch produces an analog magnitude scaled by drag distance.
-//
-// Mobile: drag = move, double-tap = dash/jump. Lifting the finger keeps momentum
-// for ~200 ms so the player doesn't snap to a stop mid-maneuver.
+// Keyboard (WASD/Arrows + Space/Shift Dash), Touch virtual analog stick (drag + double-tap dash),
+// and Gamepad API controller support (left stick / D-pad, A/RB/RT dash, Start pause, modal nav).
 
-const KEYS_LEFT = new Set(['ArrowLeft', 'a', 'A']);
-const KEYS_RIGHT = new Set(['ArrowRight', 'd', 'D']);
-const KEYS_UP = new Set(['ArrowUp', 'w', 'W']);
-const KEYS_DOWN = new Set(['ArrowDown', 's', 'S']);
+export type ModalGamepadAction = 'prev' | 'next' | 'confirm' | 'reroll' | 'skip' | null;
 
-const MOMENTUM_DECAY_MS = 200; // touch-lift momentum lingers this long
-const DOUBLE_TAP_MS = 320;     // max gap between taps to count as double-tap
+const STICK_DEADZONE = 0.16;
 
 export class Input {
-  private pressed = new Set<string>();
-  private touchStart: { x: number; y: number } | null = null;
-  private touchCurrent: { x: number; y: number } | null = null;
-  private touchStartTime = 0;
-  private _dashPressed = false;
-
-  // Touch momentum state.
-  private momentumX = 0;
-  private momentumY = 0;
-  private touchEndTime = 0; // performance.now() when last touch ended
-
-  // Double-tap detection.
+  private keys = new Set<string>();
+  private touchId: number | null = null;
+  private touchOrigin: [number, number] = [0, 0];
+  private touchVec: [number, number] = [0, 0];
+  private dashPending = false;
+  private pausePending = false;
   private lastTapTime = 0;
+
+  // Gamepad live state + edge detection.
+  private padVec: [number, number] = [0, 0];
+  private padConnected = false;
+  private prevPadDash = false;
+  private prevPadPause = false;
+  private prevPadLeft = false;
+  private prevPadRight = false;
+  private prevPadConfirm = false;
+  private prevPadReroll = false;
+  private prevPadSkip = false;
+  private modalActionQueue: ModalGamepadAction[] = [];
+
+  private readonly touchRadius = 56;
+  private readonly doubleTapMs = 300;
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
-      if (e.key === ' ' || e.key === 'Shift') {
-        this._dashPressed = true;
-        e.preventDefault();
-        return;
+      this.keys.add(e.code);
+      if (e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        this.dashPending = true;
       }
-      if (this.isTracked(e.key)) {
-        this.pressed.add(e.key);
+      if (
+        e.code === 'ArrowUp' ||
+        e.code === 'ArrowDown' ||
+        e.code === 'ArrowLeft' ||
+        e.code === 'ArrowRight' ||
+        e.code === 'Space'
+      ) {
         e.preventDefault();
       }
     });
+
     window.addEventListener('keyup', (e) => {
-      this.pressed.delete(e.key);
+      this.keys.delete(e.code);
     });
-    window.addEventListener('blur', () => this.pressed.clear());
+
+    window.addEventListener('blur', () => {
+      this.keys.clear();
+      this.touchId = null;
+      this.touchVec = [0, 0];
+      this.dashPending = false;
+    });
 
     target.addEventListener(
       'touchstart',
       (e) => {
-        const t = e.touches[0];
-        if (t) {
-          this.touchStart = this.touchCurrent = { x: t.clientX, y: t.clientY };
-          this.touchStartTime = performance.now();
-        }
         e.preventDefault();
+        const now = performance.now();
+        if (now - this.lastTapTime < this.doubleTapMs) {
+          this.dashPending = true;
+          this.lastTapTime = 0;
+        } else {
+          this.lastTapTime = now;
+        }
+        if (this.touchId !== null) return;
+        const t = e.changedTouches[0];
+        if (!t) return;
+        this.touchId = t.identifier;
+        this.touchOrigin = [t.clientX, t.clientY];
+        this.touchVec = [0, 0];
       },
       { passive: false },
     );
+
     target.addEventListener(
       'touchmove',
       (e) => {
-        const t = e.touches[0];
-        if (t) this.touchCurrent = { x: t.clientX, y: t.clientY };
         e.preventDefault();
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches[i];
+          if (t && t.identifier === this.touchId) {
+            const dx = t.clientX - this.touchOrigin[0];
+            const dy = t.clientY - this.touchOrigin[1];
+            const len = Math.hypot(dx, dy);
+            if (len < 6) {
+              this.touchVec = [0, 0];
+            } else {
+              const scale = Math.min(len, this.touchRadius) / this.touchRadius;
+              this.touchVec = [(dx / len) * scale, (dy / len) * scale];
+            }
+          }
+        }
       },
       { passive: false },
     );
-    const end = () => {
-      const now = performance.now();
-      if (this.touchStart && this.touchCurrent) {
-        const dx = this.touchCurrent.x - this.touchStart.x;
-        const dy = this.touchCurrent.y - this.touchStart.y;
-        const moved = Math.hypot(dx, dy);
-        const elapsed = now - this.touchStartTime;
 
-        if (moved < 12 && elapsed < 220) {
-          // Tap: check for double-tap to trigger dash.
-          if (now - this.lastTapTime < DOUBLE_TAP_MS) {
-            this._dashPressed = true;
-            this.lastTapTime = 0; // reset so triple-tap doesn't re-fire
-          } else {
-            this.lastTapTime = now;
-          }
-          // No momentum on a tap — player was stationary.
-          this.momentumX = 0;
-          this.momentumY = 0;
-        } else {
-          // Drag end: carry momentum so lifting doesn't feel sticky.
-          const scale = 80;
-          this.momentumX = Math.max(-1, Math.min(1, dx / scale));
-          this.momentumY = Math.max(-1, Math.min(1, dy / scale));
+    const endTouch = (e: TouchEvent): void => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        if (t && t.identifier === this.touchId) {
+          this.touchId = null;
+          this.touchVec = [0, 0];
         }
       }
-      this.touchEndTime = now;
-      this.touchStart = null;
-      this.touchCurrent = null;
     };
-    target.addEventListener('touchend', end);
-    target.addEventListener('touchcancel', end);
+    target.addEventListener('touchend', endTouch, { passive: true });
+    target.addEventListener('touchcancel', endTouch, { passive: true });
   }
 
-  private isTracked(key: string): boolean {
-    return KEYS_LEFT.has(key) || KEYS_RIGHT.has(key) || KEYS_UP.has(key) || KEYS_DOWN.has(key);
+  /** Poll connected standard gamepads once per animation frame. */
+  public pollGamepad(modalOpen: boolean): void {
+    if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
+    const pads = navigator.getGamepads();
+    let pad: Gamepad | null = null;
+    for (let i = 0; i < pads.length; i++) {
+      const p = pads[i];
+      if (p && p.connected) {
+        pad = p;
+        break;
+      }
+    }
+
+    if (!pad) {
+      this.padConnected = false;
+      this.padVec = [0, 0];
+      return;
+    }
+    this.padConnected = true;
+
+    // Analog left stick with radial deadzone + D-pad digital override.
+    let ax = pad.axes[0] ?? 0;
+    let ay = pad.axes[1] ?? 0;
+    const mag = Math.hypot(ax, ay);
+    if (mag < STICK_DEADZONE) {
+      ax = 0;
+      ay = 0;
+    } else {
+      const rescaled = Math.min(1, (mag - STICK_DEADZONE) / (1 - STICK_DEADZONE));
+      ax = (ax / mag) * rescaled;
+      ay = (ay / mag) * rescaled;
+    }
+
+    const dUp = Boolean(pad.buttons[12]?.pressed);
+    const dDown = Boolean(pad.buttons[13]?.pressed);
+    const dLeft = Boolean(pad.buttons[14]?.pressed);
+    const dRight = Boolean(pad.buttons[15]?.pressed);
+    if (dLeft) ax = -1;
+    if (dRight) ax = 1;
+    if (dUp) ay = -1;
+    if (dDown) ay = 1;
+    this.padVec = [ax, ay];
+
+    const btnA = Boolean(pad.buttons[0]?.pressed);
+    const btnB = Boolean(pad.buttons[1]?.pressed);
+    const btnY = Boolean(pad.buttons[3]?.pressed);
+    const btnLB = Boolean(pad.buttons[4]?.pressed);
+    const btnRB = Boolean(pad.buttons[5]?.pressed);
+    const btnRT = (pad.buttons[7]?.value ?? 0) > 0.45;
+    const btnStart = Boolean(pad.buttons[9]?.pressed);
+
+    // Pause edge detection.
+    if (btnStart && !this.prevPadPause) {
+      this.pausePending = true;
+    }
+    this.prevPadPause = btnStart;
+
+    if (modalOpen) {
+      const goLeft = dLeft || btnLB || ax < -0.65;
+      const goRight = dRight || btnRB || ax > 0.65;
+      if (goLeft && !this.prevPadLeft) this.modalActionQueue.push('prev');
+      if (goRight && !this.prevPadRight) this.modalActionQueue.push('next');
+      if (btnA && !this.prevPadConfirm) this.modalActionQueue.push('confirm');
+      if (btnY && !this.prevPadReroll) this.modalActionQueue.push('reroll');
+      if (btnB && !this.prevPadSkip) this.modalActionQueue.push('skip');
+      this.prevPadLeft = goLeft;
+      this.prevPadRight = goRight;
+      this.prevPadConfirm = btnA;
+      this.prevPadReroll = btnY;
+      this.prevPadSkip = btnB;
+      this.prevPadDash = btnA || btnRB || btnRT;
+    } else {
+      const dashNow = btnA || btnRB || btnRT;
+      if (dashNow && !this.prevPadDash) {
+        this.dashPending = true;
+      }
+      this.prevPadDash = dashNow;
+      this.prevPadLeft = false;
+      this.prevPadRight = false;
+      this.prevPadConfirm = btnA;
+      this.prevPadReroll = btnY;
+      this.prevPadSkip = btnB;
+    }
   }
 
-  /// Returns the current movement direction in [-1, 1]^2. Magnitude ≤ 1.
-  direction(): [number, number] {
-    // Active touch drag takes full precedence.
-    if (this.touchStart && this.touchCurrent) {
-      const dx = this.touchCurrent.x - this.touchStart.x;
-      const dy = this.touchCurrent.y - this.touchStart.y;
-      const scale = 80;
-      const nx = Math.max(-1, Math.min(1, dx / scale));
-      const ny = Math.max(-1, Math.min(1, dy / scale));
-      return [nx, ny];
-    }
+  public hasGamepad(): boolean {
+    return this.padConnected;
+  }
 
-    // Touch momentum decay after finger lifts.
-    const elapsed = performance.now() - this.touchEndTime;
-    if (elapsed < MOMENTUM_DECAY_MS && (Math.abs(this.momentumX) > 0.05 || Math.abs(this.momentumY) > 0.05)) {
-      const t = 1 - elapsed / MOMENTUM_DECAY_MS; // 1→0 over decay window
-      return [this.momentumX * t, this.momentumY * t];
-    }
+  public consumeDash(): boolean {
+    const p = this.dashPending;
+    this.dashPending = false;
+    return p;
+  }
 
-    // Keyboard input.
+  public consumePause(): boolean {
+    const p = this.pausePending;
+    this.pausePending = false;
+    return p;
+  }
+
+  public consumeModalAction(): ModalGamepadAction {
+    return this.modalActionQueue.shift() ?? null;
+  }
+
+  public clearKeys(): void {
+    this.keys.clear();
+    this.touchId = null;
+    this.touchVec = [0, 0];
+    this.dashPending = false;
+    this.pausePending = false;
+    this.modalActionQueue.length = 0;
+  }
+
+  public direction(): [number, number] {
+    if (this.touchId !== null) {
+      return this.touchVec;
+    }
     let x = 0;
     let y = 0;
-    for (const k of this.pressed) {
-      if (KEYS_LEFT.has(k)) x -= 1;
-      if (KEYS_RIGHT.has(k)) x += 1;
-      if (KEYS_UP.has(k)) y -= 1;
-      if (KEYS_DOWN.has(k)) y += 1;
+    if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) x -= 1;
+    if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) x += 1;
+    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) y -= 1;
+    if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) y += 1;
+
+    if (x === 0 && y === 0 && this.padConnected) {
+      return this.padVec;
     }
     const len = Math.hypot(x, y);
-    if (len > 1) {
-      x /= len;
-      y /= len;
-    }
-    return [x, y];
-  }
-
-  consumeDash(): boolean {
-    const v = this._dashPressed;
-    this._dashPressed = false;
-    return v;
-  }
-
-  clearKeys(): void {
-    this.pressed.clear();
-    this._dashPressed = false;
-    this.momentumX = 0;
-    this.momentumY = 0;
+    return len > 1 ? [x / len, y / len] : [x, y];
   }
 }

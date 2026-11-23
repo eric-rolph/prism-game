@@ -1,17 +1,22 @@
-// Bootstrap for step 2+3 — wires WASM ↔ Renderer ↔ Input, drives the RAF loop,
-// and manages the HUD (rank / kills / XP bar / shard tray) plus the level-up
-// modal. The modal is pure DOM over a blurred live canvas; Rust pauses the
-// simulation whenever `is_leveling_up()` is true, so the frozen scene stays
-// visible through the backdrop filter.
+// Bootstrap for Prism — wires WASM ↔ WebGL2 Renderer ↔ 2D Overlay ↔ Input (KB/Touch/Gamepad) ↔ Audio DSP.
+// Zero-copy Float32Array views read CircleInstance (9 floats), BeamInstance (10 floats),
+// and DamagePopup (4 floats) directly out of WebAssembly linear memory.
 
 import init, { Game } from '../wasm/prism.js';
-import { Renderer } from './renderer.js';
+import { Renderer, VisualQuality } from './renderer.js';
 import { Input } from './input.js';
 import { AudioManager } from './audio.js';
+import { OverlayRenderer } from './overlay.js';
 
-const CIRCLE_STRIDE_FLOATS = 8;
+const CIRCLE_STRIDE_FLOATS = 9;
 const BEAM_STRIDE_FLOATS = 10;       // layout from WASM (read only)
 const BEAM_AUGMENTED_STRIDE = 11;    // +1 form_progress float injected before upload
+const POPUP_STRIDE_FLOATS = 4;
+
+const AUDIO_BOSS_SPAWN = 1 << 2;
+const AUDIO_SHIELD_BREAK = 1 << 4;
+const AUDIO_STREAK_MILESTONE = 1 << 7;
+const AUDIO_EVOLUTION = 1 << 8;
 
 // Must stay in index-lock with Rust's SYNERGIES const (src/shards.rs).
 // Order determines bit positions in active_synergy_bits() / near_synergy_bits().
@@ -104,12 +109,14 @@ interface StoredRunSummary {
   savedAt: string;
   outcome: RunOutcome;
   seed?: number;
+  daily?: boolean;
   deathCause?: string;
   score: number;
   timeSeconds: number;
   rank: number;
   peakRank: number;
   kills: number;
+  peakStreak?: number;
   bossKills: number;
   damageTaken: number;
   barrierAbsorbed: number;
@@ -127,6 +134,8 @@ interface StoredRunSummary {
 }
 
 const BEST_RUNS_STORAGE_KEY = 'prism.bestRuns.v1';
+const QUALITY_STORAGE_KEY = 'prism.visualQuality.v1';
+const NUMBERS_STORAGE_KEY = 'prism.damageNumbers.v1';
 const MAX_STORED_RUNS = 5;
 
 const formatTime = (secondsRaw: number): string => {
@@ -134,6 +143,12 @@ const formatTime = (secondsRaw: number): string => {
   const mins = Math.floor(secondsTotal / 60);
   const secs = secondsTotal % 60;
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+};
+
+const formatCompact = (n: number): string => {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 10_000) return `${(n / 1000).toFixed(1)}K`;
+  return String(Math.round(n));
 };
 
 const escapeHtml = (text: string): string =>
@@ -147,6 +162,22 @@ const escapeHtml = (text: string): string =>
     }
   });
 
+/** Deterministic daily UTC challenge seed via FNV-1a 32-bit hash. */
+const getDailySeedInfo = (): { dateLabel: string; seed: number } => {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(now.getUTCDate()).padStart(2, '0');
+  const dateLabel = `${y}-${m}-${d}`;
+  const key = `PRISM-DAILY-${dateLabel}`;
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return { dateLabel, seed: (h || 1) >>> 0 };
+};
+
 const isStoredShard = (value: unknown): value is StoredShard => {
   if (typeof value !== 'object' || value === null) return false;
   const shard = value as Partial<StoredShard>;
@@ -159,8 +190,6 @@ const isStoredRunSummary = (value: unknown): value is StoredRunSummary => {
   return run.version === 1 &&
     (run.outcome === 'VICTORY' || run.outcome === 'DEATH') &&
     typeof run.savedAt === 'string' &&
-    (run.seed === undefined || typeof run.seed === 'number') &&
-    (run.deathCause === undefined || typeof run.deathCause === 'string') &&
     typeof run.score === 'number' &&
     typeof run.timeSeconds === 'number' &&
     typeof run.rank === 'number' &&
@@ -170,17 +199,8 @@ const isStoredRunSummary = (value: unknown): value is StoredRunSummary => {
     typeof run.damageTaken === 'number' &&
     typeof run.barrierAbsorbed === 'number' &&
     typeof run.gems === 'number' &&
-    (run.skips === undefined || typeof run.skips === 'number') &&
-    (run.rerolls === undefined || typeof run.rerolls === 'number') &&
-    (run.maxObserved === undefined ||
-      (typeof run.maxObserved === 'object' && run.maxObserved !== null &&
-        typeof run.maxObserved.enemies === 'number' &&
-        typeof run.maxObserved.circles === 'number' &&
-        typeof run.maxObserved.beams === 'number')) &&
     Array.isArray(run.synergies) &&
     run.synergies.every((s) => typeof s === 'string') &&
-    (run.evolutions === undefined ||
-      (Array.isArray(run.evolutions) && run.evolutions.every((s) => typeof s === 'string'))) &&
     Array.isArray(run.topShards) &&
     run.topShards.every(isStoredShard);
 };
@@ -210,7 +230,6 @@ const writeStoredRuns = (runs: StoredRunSummary[]): boolean => {
     window.localStorage.setItem(BEST_RUNS_STORAGE_KEY, JSON.stringify(runs));
     return true;
   } catch {
-    // Private browsing and full storage can reject localStorage writes.
     return false;
   }
 };
@@ -238,14 +257,14 @@ const renderBestRuns = (
   const lines = runs.map((run, idx) => {
     const currentClass = run.savedAt === currentSavedAt ? ' current-run' : '';
     const shardText = run.topShards.length > 0
-      ? ` / ${run.topShards.slice(0, 2).map((s) => `${escapeHtml(s.name)} ${s.level}`).join(', ')}`
+      ? ` · ${run.topShards.slice(0, 2).map((s) => `${escapeHtml(s.name)} ${s.level}`).join(', ')}`
       : '';
     return `<div class="best-run-line${currentClass}">` +
-      `${idx + 1}. ${run.score} / ${formatTime(run.timeSeconds)} / ${run.outcome}${shardText}` +
+      `${idx + 1}. ${run.score} PTS · ${formatTime(run.timeSeconds)} · ${run.outcome}${shardText}` +
       `</div>`;
   }).join('');
   return `<div class="best-run-panel">` +
-    `<div class="best-run-title">${isNewBest ? 'NEW BEST' : 'LOCAL BEST'}</div>` +
+    `<div class="best-run-title">${isNewBest ? '★ NEW PERSONAL BEST' : 'LOCAL LEADERBOARD'}</div>` +
     lines +
     (storageOk ? '' : `<div class="best-run-line">storage unavailable this session</div>`) +
     `</div>`;
@@ -289,94 +308,77 @@ const collectSynergyTimes = (game: Game): string[] =>
     .map((entry) => `${formatTime(entry.time)} ${entry.name}`);
 
 async function main(): Promise<void> {
-  // Narrow each DOM node through an intermediate variable so TS preserves the
-  // non-null guarantee inside closures (the fix from step 1).
   const canvasEl = document.getElementById('canvas');
+  const overlayCanvasEl = document.getElementById('overlay-canvas');
   if (!(canvasEl instanceof HTMLCanvasElement)) throw new Error('missing #canvas');
+  if (!(overlayCanvasEl instanceof HTMLCanvasElement)) throw new Error('missing #overlay-canvas');
   const canvas: HTMLCanvasElement = canvasEl;
+  const overlayCanvas: HTMLCanvasElement = overlayCanvasEl;
 
-  const statusRaw = document.getElementById('status');
-  const rankRaw = document.getElementById('rank');
-  const killsRaw = document.getElementById('kills');
-  const xpFillRaw = document.getElementById('xp-fill');
-  const trayRaw = document.getElementById('shards-tray');
-  const levelupRaw = document.getElementById('levelup');
-  const levelupRankRaw = document.getElementById('levelup-rank');
-  const levelupCardsRaw = document.getElementById('levelup-cards');
+  const getEl = (id: string): HTMLElement => {
+    const el = document.getElementById(id);
+    if (!el) throw new Error(`missing #${id} in index.html`);
+    return el;
+  };
 
-  if (!statusRaw || !rankRaw || !killsRaw || !xpFillRaw || !trayRaw ||
-      !levelupRaw || !levelupRankRaw || !levelupCardsRaw) {
-    throw new Error('HUD elements missing from index.html');
-  }
-  const statusEl: HTMLElement = statusRaw;
-  const rankEl: HTMLElement = rankRaw;
-  const killsEl: HTMLElement = killsRaw;
-  const xpFillEl: HTMLElement = xpFillRaw;
-  const trayEl: HTMLElement = trayRaw;
-  const levelupEl: HTMLElement = levelupRaw;
-  const levelupRankEl: HTMLElement = levelupRankRaw;
-  const levelupCardsEl: HTMLElement = levelupCardsRaw;
+  const hudEl = getEl('hud');
+  const statusEl = getEl('status');
+  const rankEl = getEl('rank');
+  const killsEl = getEl('kills');
+  const xpFillEl = getEl('xp-fill');
+  const trayEl = getEl('shards-tray');
+  const levelupEl = getEl('levelup');
+  const levelupRankEl = getEl('levelup-rank');
+  const levelupCardsEl = getEl('levelup-cards');
+  const levelupFooterEl = getEl('levelup-footer');
+  const timerEl = getEl('timer');
+  const waveLabelEl = getEl('wave-label');
+  const endlessBadgeEl = getEl('endless-badge');
+  const xpRankLabelEl = getEl('xp-rank-label');
+  const xpValEl = getEl('xp-val');
+  const dashStatusEl = getEl('dash-status');
+  const hpValEl = getEl('hp-val');
+  const hpFillEl = getEl('hp-fill');
+  const dashFillEl = getEl('dash-fill');
+  const waveClearEl = getEl('wave-clear');
+  const comboWrapEl = getEl('combo-wrap');
+  const comboValEl = getEl('combo-val');
+  const comboFillEl = getEl('combo-fill');
+  const synergiesHudEl = getEl('synergies-hud');
+  const bossHudEl = getEl('boss-hud');
+  const bossNameEl = getEl('boss-name');
+  const bossFillEl = getEl('boss-fill');
+  const sysBarMidEl = getEl('sys-bar-mid');
+  const sysUplinkEl = getEl('sys-uplink');
+  const sysMuteBtn = getEl('sys-mute-btn') as HTMLButtonElement;
+  const sysPauseBtn = getEl('sys-pause-btn') as HTMLButtonElement;
 
-  // Timer + wave elements.
-  const timerRaw = document.getElementById('timer');
-  const waveLabelRaw = document.getElementById('wave-label');
-  const xpRankLabelRaw = document.getElementById('xp-rank-label');
-  const xpValRaw = document.getElementById('xp-val');
-  const dashStatusRaw = document.getElementById('dash-status');
-  const hpValEl = document.getElementById('hp-val') as HTMLElement | null;
-  if (!timerRaw || !waveLabelRaw) {
-    throw new Error('Timer elements missing from index.html');
-  }
-  const timerEl: HTMLElement = timerRaw;
-  const waveLabelEl: HTMLElement = waveLabelRaw;
-  const xpRankLabelEl: HTMLElement | null = xpRankLabelRaw as HTMLElement | null;
-  const xpValEl: HTMLElement | null = xpValRaw as HTMLElement | null;
-  const dashStatusEl: HTMLElement | null = dashStatusRaw as HTMLElement | null;
+  const titleScreenEl = getEl('title-screen');
+  const btnPlay = getEl('btn-play') as HTMLButtonElement;
+  const btnDaily = getEl('btn-daily') as HTMLButtonElement;
+  const titleBestEl = getEl('title-best');
 
-  // Death screen elements.
-  const deathScreenRaw = document.getElementById('death-screen');
-  const deathScoreRaw = document.getElementById('death-score');
-  const deathStatsRaw = document.getElementById('death-stats');
-  const deathRestartRaw = document.getElementById('death-restart');
-  const hpFillRaw = document.getElementById('hp-fill');
+  const deathScreenEl = getEl('death-screen');
+  const deathTitleEl = getEl('death-title');
+  const deathScoreEl = getEl('death-score');
+  const deathStatsEl = getEl('death-stats');
+  const deathRestartEl = getEl('death-restart') as HTMLButtonElement;
+  const btnContinueEndless = getEl('btn-continue-endless') as HTMLButtonElement;
+  const btnCopyTelemetry = getEl('btn-copy-telemetry') as HTMLButtonElement;
 
-  if (!deathScreenRaw || !deathScoreRaw || !deathStatsRaw || !deathRestartRaw || !hpFillRaw) {
-    throw new Error('Death-screen or HP elements missing from index.html');
-  }
-  const deathScreenEl: HTMLElement = deathScreenRaw;
-  const deathScoreEl: HTMLElement = deathScoreRaw;
-  const deathStatsEl: HTMLElement = deathStatsRaw;
-  const deathRestartEl: HTMLElement = deathRestartRaw;
-  const hpFillEl: HTMLElement = hpFillRaw;
+  const pauseMenuEl = getEl('pause-menu');
+  const pauseBuildEl = getEl('pause-build');
+  const btnResume = getEl('btn-resume') as HTMLButtonElement;
+  const btnRestartPause = getEl('btn-restart-pause') as HTMLButtonElement;
+  const btnToggleSound = getEl('btn-toggle-sound') as HTMLButtonElement;
+  const btnToggleFx = getEl('btn-toggle-fx') as HTMLButtonElement;
+  const btnToggleNumbers = getEl('btn-toggle-numbers') as HTMLButtonElement;
 
-  // Synergy HUD.
-  const synergiesHudRaw = document.getElementById('synergies-hud');
-  if (!synergiesHudRaw) throw new Error('synergies-hud missing from index.html');
-  const synergiesHudEl: HTMLElement = synergiesHudRaw;
-
-  // Dash + wave clear elements.
-  const dashFillRaw = document.getElementById('dash-fill');
-  const waveClearRaw = document.getElementById('wave-clear');
-  const deathTitleRaw = document.getElementById('death-title');
-  const bossHudRaw = document.getElementById('boss-hud');
-  const bossNameRaw = document.getElementById('boss-name');
-  const bossFillRaw = document.getElementById('boss-fill');
-  if (!dashFillRaw || !waveClearRaw || !deathTitleRaw || !bossHudRaw || !bossNameRaw || !bossFillRaw) {
-    throw new Error('Dash/wave-clear elements missing from index.html');
-  }
-  const dashFillEl: HTMLElement = dashFillRaw;
-  const waveClearEl: HTMLElement = waveClearRaw;
-  const deathTitleEl: HTMLElement = deathTitleRaw;
-  const bossHudEl: HTMLElement = bossHudRaw;
-  const bossNameEl: HTMLElement = bossNameRaw;
-  const bossFillEl: HTMLElement = bossFillRaw;
-
-  // Boot WASM. `wasm.memory.buffer` is the ArrayBuffer we re-view as typed
-  // arrays every frame — it can grow, so we must check for buffer identity.
+  // Boot WASM.
   const wasm = await init();
   const memory: WebAssembly.Memory = wasm.memory;
 
-  // Build synergy tag elements — one per synergy, hidden until active or near.
+  // Build synergy tags.
   synergiesHudEl.innerHTML = '';
   const synergyTags: HTMLElement[] = [];
   for (const name of SYNERGY_NAMES) {
@@ -388,7 +390,7 @@ async function main(): Promise<void> {
     synergyTags.push(tag);
   }
 
-  // Build the shard tray — one pip-wrap per shard. Hidden until level > 0.
+  // Build shard tray.
   trayEl.innerHTML = '';
   const pips: HTMLElement[] = [];
   for (let i = 0; i < SHARDS.length; i++) {
@@ -411,17 +413,46 @@ async function main(): Promise<void> {
   }
 
   const renderer = new Renderer(canvas);
+  const overlay = new OverlayRenderer(overlayCanvas);
   const input = new Input(canvas);
   const audio = new AudioManager();
 
-  // Initialize AudioContext on first user gesture (browser autoplay policy).
-  const initAudio = (): void => { audio.init(); audio.resume(); };
-  window.addEventListener('keydown', initAudio, { once: true });
-  window.addEventListener('pointerdown', initAudio, { once: true });
+  // Restore saved visual quality & damage-numbers preferences.
+  try {
+    const savedQ = window.localStorage.getItem(QUALITY_STORAGE_KEY);
+    if (savedQ === 'high' || savedQ === 'balanced' || savedQ === 'reduced') {
+      renderer.setQuality(savedQ);
+    }
+    const savedNums = window.localStorage.getItem(NUMBERS_STORAGE_KEY);
+    if (savedNums === '0') {
+      overlay.setEnabled(false);
+    }
+  } catch { /* ignore storage errors */ }
 
-  // Canvas sizing — DPR-aware, capped at 2× so phones don't burn fill rate.
-  // We track viewW/H (CSS pixels, = world units) and pixelW/H (backbuffer)
-  // separately; the renderer uses them independently.
+  let numbersEnabled = true;
+  try {
+    numbersEnabled = window.localStorage.getItem(NUMBERS_STORAGE_KEY) !== '0';
+  } catch { /* ignore */ }
+
+  const syncSettingsButtons = (): void => {
+    const muted = audio.isMuted();
+    btnToggleSound.textContent = muted ? 'SOUND: OFF' : 'SOUND: ON';
+    sysMuteBtn.textContent = muted ? 'SFX: OFF' : 'SFX: ON';
+    const q = renderer.getQuality().toUpperCase();
+    btnToggleFx.textContent = `FX: ${q}`;
+    btnToggleNumbers.textContent = numbersEnabled ? 'NUMBERS: ON' : 'NUMBERS: OFF';
+  };
+  syncSettingsButtons();
+
+  // Initialize AudioContext on first user gesture.
+  const ensureAudio = (): void => {
+    if (!audio.isInitialized()) audio.init();
+    audio.resume();
+  };
+  window.addEventListener('keydown', ensureAudio, { once: true });
+  window.addEventListener('pointerdown', ensureAudio, { once: true });
+
+  // DPR-aware sizing.
   const DPR_CAP = 2;
   let viewW = 0;
   let viewH = 0;
@@ -438,103 +469,102 @@ async function main(): Promise<void> {
     canvas.height = pixelH;
     canvas.style.width = viewW + 'px';
     canvas.style.height = viewH + 'px';
+    overlay.resize(viewW, viewH, dpr);
   };
   applySize();
 
-  const seed = (Math.random() * 0xffffffff) >>> 0;
-  
-  let game = new Game(viewW, viewH, seed);
-  let isStarted = true;
-  let isPaused = false;
-  let globalT = 0;
-  
-  // Pause Menu Elements
-  const pauseMenuEl = document.getElementById('pause-menu') as HTMLElement;
-  const btnResume = document.getElementById('btn-resume') as HTMLButtonElement;
-  const btnToggleSound = document.getElementById('btn-toggle-sound') as HTMLButtonElement;
-  
-  const togglePause = () => {
-    if (!isStarted || deathShown || modalShown) return;
-    isPaused = !isPaused;
-    if (isPaused) {
-      pauseMenuEl.classList.add('shown');
-      audio.duck(true);
+  // Daily seed & URL ?seed= support.
+  const daily = getDailySeedInfo();
+  btnDaily.textContent = `DAILY · ${daily.dateLabel}`;
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlSeedRaw = urlParams.get('seed');
+  const urlSeed = urlSeedRaw && /^\d+$/.test(urlSeedRaw) ? (Number(urlSeedRaw) >>> 0) : null;
+  const autoStart = urlParams.get('autostart') === '1' || urlSeed !== null;
+
+  const updateTitleBestBadge = (): void => {
+    const best = readStoredRuns()[0];
+    if (best) {
+      titleBestEl.textContent =
+        `PERSONAL BEST · ${best.score} PTS · ${formatTime(best.timeSeconds)} · RANK ${best.peakRank} (${best.outcome})`;
     } else {
-      pauseMenuEl.classList.remove('shown');
-      audio.duck(false);
-      input.clearKeys();
-      last = performance.now(); // avoid big dt jump
+      titleBestEl.textContent = '';
     }
   };
-  
-  btnResume.addEventListener('click', togglePause);
-  btnToggleSound.addEventListener('click', () => {
-    const isMuted = audio.toggleMute();
-    btnToggleSound.textContent = isMuted ? 'SOUND: OFF' : 'SOUND: ON';
-  });
-  
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      togglePause();
-      e.preventDefault();
-    }
-  });
-  
-  // Initializing audio on the first interaction.
-  window.addEventListener('click', () => {
-    if (!audio['ctx']) { audio.init(); audio.resume(); }
-  }, { once: true });
-  window.addEventListener('keydown', () => {
-    if (!audio['ctx']) { audio.init(); audio.resume(); }
-  }, { once: true });
+  updateTitleBestBadge();
 
-  // Attach resize AFTER game exists, so the listener can't fire during TDZ.
-  window.addEventListener('resize', () => {
-    applySize();
-    if (game) game.resize(viewW, viewH);
-  });
+  let currentSeed = urlSeed ?? ((Math.random() * 0xffffffff) >>> 0);
+  let isDailyRun = false;
+  let game = new Game(viewW, viewH, currentSeed);
+  let isStarted = autoStart;
+  let isPaused = false;
+  let modalShown = false;
+  let deathShown = false;
+  let modalFocusIdx = 0;
+  let hitStopTimer = 0;
+  let lastRunTelemetryText = '';
 
-  statusEl.textContent = 'prism';
+  // Attract-mode preview geometry for the Title Screen (spinning prism over live crystal globe).
+  const attractCircles = new Float32Array(CIRCLE_STRIDE_FLOATS * 16);
+  const attractBeams = new Float32Array(BEAM_AUGMENTED_STRIDE * 6);
 
-  // Zero-copy views into the WASM instance buffers. Rust's `Vec` may
-  // reallocate on grow, and `wasm.memory` may grow its buffer — either
-  // invalidates the view, so we recheck pointer/length/buffer-identity.
+  // Zero-copy views into WASM linear memory.
   let circlesPtr = -1;
   let circlesLen = 0;
   let circlesView: Float32Array = new Float32Array(0);
   let beamsPtr = -1;
   let beamsLen = 0;
   let beamsView: Float32Array = new Float32Array(0);
+  let popupsPtr = -1;
+  let popupsLen = 0;
+  let popupsView: Float32Array = new Float32Array(0);
 
-  // Beam formation animation — tracks birth time per beam so each grows from p0→p1.
   interface BeamEntry { birth: number; duration: number }
   const beamBirthTimes = new Map<string, BeamEntry>();
   let augBeamBuf = new Float32Array(0);
 
-  const refreshCircles = (): void => {
-    const ptr = game.circles_ptr();
-    const len = game.circles_len();
-    if (ptr !== circlesPtr || len !== circlesLen || circlesView.buffer !== memory.buffer) {
-      circlesPtr = ptr;
-      circlesLen = len;
-      circlesView = len > 0
-        ? new Float32Array(memory.buffer, ptr, len * CIRCLE_STRIDE_FLOATS)
+  const resetWasmViews = (): void => {
+    circlesPtr = -1;
+    circlesLen = 0;
+    beamsPtr = -1;
+    beamsLen = 0;
+    popupsPtr = -1;
+    popupsLen = 0;
+    beamBirthTimes.clear();
+  };
+
+  const refreshBuffers = (): void => {
+    const cPtr = game.circles_ptr();
+    const cLen = game.circles_len();
+    if (cPtr !== circlesPtr || cLen !== circlesLen || circlesView.buffer !== memory.buffer) {
+      circlesPtr = cPtr;
+      circlesLen = cLen;
+      circlesView = cLen > 0
+        ? new Float32Array(memory.buffer, cPtr, cLen * CIRCLE_STRIDE_FLOATS)
         : new Float32Array(0);
     }
-  };
-  const refreshBeams = (): void => {
-    const ptr = game.beams_ptr();
-    const len = game.beams_len();
-    if (ptr !== beamsPtr || len !== beamsLen || beamsView.buffer !== memory.buffer) {
-      beamsPtr = ptr;
-      beamsLen = len;
-      beamsView = len > 0
-        ? new Float32Array(memory.buffer, ptr, len * BEAM_STRIDE_FLOATS)
+
+    const bPtr = game.beams_ptr();
+    const bLen = game.beams_len();
+    if (bPtr !== beamsPtr || bLen !== beamsLen || beamsView.buffer !== memory.buffer) {
+      beamsPtr = bPtr;
+      beamsLen = bLen;
+      beamsView = bLen > 0
+        ? new Float32Array(memory.buffer, bPtr, bLen * BEAM_STRIDE_FLOATS)
+        : new Float32Array(0);
+    }
+
+    const pPtr = game.popups_ptr();
+    const pLen = game.popups_len();
+    if (pPtr !== popupsPtr || pLen !== popupsLen || popupsView.buffer !== memory.buffer) {
+      popupsPtr = pPtr;
+      popupsLen = pLen;
+      popupsView = pLen > 0
+        ? new Float32Array(memory.buffer, pPtr, pLen * POPUP_STRIDE_FLOATS)
         : new Float32Array(0);
     }
   };
 
-  // HUD change-detection — avoids layout thrash when values are unchanged.
+  // HUD change-detection state.
   let lastRank = -1;
   let lastKills = -1;
   let lastScore = -1;
@@ -550,16 +580,182 @@ async function main(): Promise<void> {
   let lastBossActive = false;
   let lastBossKind = -2;
   let lastBossPct = -1;
+  let lastStreak = -1;
+  let lastEndless = false;
   const lastPipLevels: number[] = new Array(SHARDS.length).fill(-1);
   let lastActiveBits = -1;
   let lastNearBits = -1;
+  let announcedSynergyBits = 0;
+  let announcedEvoBits = 0;
+
+  const resetHudCache = (): void => {
+    lastRank = -1;
+    lastKills = -1;
+    lastScore = -1;
+    lastXpPct = -1;
+    lastXp = -1;
+    lastXpNeeded = -1;
+    lastHp = -1;
+    lastMaxHp = -1;
+    lastHpPct = -1;
+    lastDashReady = false;
+    lastTimerStr = '';
+    lastWave = -1;
+    lastBossActive = false;
+    lastBossKind = -2;
+    lastBossPct = -1;
+    lastStreak = -1;
+    lastEndless = false;
+    lastPipLevels.fill(-1);
+    lastActiveBits = -1;
+    lastNearBits = -1;
+    announcedSynergyBits = 0;
+    announcedEvoBits = 0;
+  };
+
+  const startNewRun = (seed: number, dailyMode: boolean): void => {
+    ensureAudio();
+    audio.playUiSelect();
+    currentSeed = seed >>> 0;
+    isDailyRun = dailyMode;
+    game.free();
+    game = new Game(viewW, viewH, currentSeed);
+    resetWasmViews();
+    resetHudCache();
+    overlay.clear();
+    input.clearKeys();
+    isStarted = true;
+    isPaused = false;
+    modalShown = false;
+    deathShown = false;
+    hitStopTimer = 0;
+    titleScreenEl.classList.remove('shown');
+    pauseMenuEl.classList.remove('shown');
+    levelupEl.classList.remove('shown');
+    deathScreenEl.classList.remove('shown');
+    hudEl.classList.remove('hidden');
+    audio.duck(false);
+    sysBarMidEl.textContent = dailyMode
+      ? `DAILY ${daily.dateLabel} · SEED #${currentSeed}`
+      : `SPHERICAL ARENA · SEED #${currentSeed}`;
+    overlay.announce(dailyMode ? `DAILY ${daily.dateLabel}` : 'REFRACTION ONLINE', '#a8f4ff', 'SURVIVE 15:00 OR SHATTER THE VOID PRISM');
+    last = performance.now();
+  };
+
+  if (autoStart) {
+    titleScreenEl.classList.remove('shown');
+    hudEl.classList.remove('hidden');
+    sysBarMidEl.textContent = `SPHERICAL ARENA · SEED #${currentSeed}`;
+  }
+
+  btnPlay.addEventListener('click', () => {
+    const freshSeed = (Math.random() * 0xffffffff) >>> 0;
+    startNewRun(freshSeed, false);
+  });
+  btnDaily.addEventListener('click', () => {
+    startNewRun(daily.seed, true);
+  });
+
+  // --- Pause Menu + Active Build Inspector -------------------------------
+
+  const renderPauseBuild = (): void => {
+    const owned = SHARDS.map((s, i) => ({
+      name: s.name,
+      color: s.color,
+      lvl: game.inventory_level(i),
+    })).filter((s) => s.lvl > 0);
+    const activeSyn = SYNERGY_NAMES.filter((_, i) => ((game.active_synergy_bits() >>> i) & 1) === 1);
+    const activeEvo = EVOLUTIONS
+      .filter((_, i) => ((game.active_evolution_bits() >>> i) & 1) === 1)
+      .map((e) => e.name);
+    const elapsed = Math.max(1, game.timer());
+    const dps = game.total_damage_dealt() / elapsed;
+
+    const shardChips = owned.length > 0
+      ? owned.map((s) => `<span class="build-chip" style="border-color:${s.color}66;color:${s.color}">${s.name} L${s.lvl}</span>`).join('')
+      : '<span style="opacity:0.5">No shards collected yet</span>';
+    const synLine = activeSyn.length > 0
+      ? `<div style="margin-top:8px;color:#ffd740">SYNERGIES: ${activeSyn.map(escapeHtml).join(' · ')}</div>`
+      : '';
+    const evoLine = activeEvo.length > 0
+      ? `<div style="margin-top:4px;color:#ffb547">EVOLUTIONS: ${activeEvo.map(escapeHtml).join(' · ')}</div>`
+      : '';
+
+    pauseBuildEl.innerHTML =
+      `<div style="display:flex;justify-content:space-between;color:#dcf8ff">` +
+        `<span>BUILD INSPECTOR · SEED #${game.seed()}${isDailyRun ? ' (DAILY)' : ''}</span>` +
+        `<span>${formatCompact(dps)} DPS · PEAK ×${game.peak_kill_streak()}</span>` +
+      `</div>` +
+      `<div class="build-chip-row">${shardChips}</div>` +
+      synLine +
+      evoLine;
+  };
+
+  const togglePause = (): void => {
+    if (!isStarted || deathShown || modalShown) return;
+    isPaused = !isPaused;
+    if (isPaused) {
+      renderPauseBuild();
+      pauseMenuEl.classList.add('shown');
+      audio.duck(true);
+    } else {
+      pauseMenuEl.classList.remove('shown');
+      audio.duck(false);
+      input.clearKeys();
+      last = performance.now();
+    }
+  };
+
+  btnResume.addEventListener('click', togglePause);
+  sysPauseBtn.addEventListener('click', togglePause);
+  btnRestartPause.addEventListener('click', () => {
+    startNewRun((Math.random() * 0xffffffff) >>> 0, false);
+  });
+
+  const handleToggleMute = (): void => {
+    ensureAudio();
+    audio.toggleMute();
+    syncSettingsButtons();
+  };
+  btnToggleSound.addEventListener('click', handleToggleMute);
+  sysMuteBtn.addEventListener('click', handleToggleMute);
+
+  btnToggleFx.addEventListener('click', () => {
+    const order: VisualQuality[] = ['high', 'balanced', 'reduced'];
+    const cur = renderer.getQuality();
+    const next = order[(order.indexOf(cur) + 1) % order.length]!;
+    renderer.setQuality(next);
+    try { window.localStorage.setItem(QUALITY_STORAGE_KEY, next); } catch { /* ignore */ }
+    syncSettingsButtons();
+  });
+
+  btnToggleNumbers.addEventListener('click', () => {
+    numbersEnabled = !numbersEnabled;
+    overlay.setEnabled(numbersEnabled);
+    try { window.localStorage.setItem(NUMBERS_STORAGE_KEY, numbersEnabled ? '1' : '0'); } catch { /* ignore */ }
+    syncSettingsButtons();
+  });
+
+  window.addEventListener('resize', () => {
+    applySize();
+    if (game) game.resize(viewW, viewH);
+  });
+
+  statusEl.textContent = 'prism';
 
   // --- Level-up modal ----------------------------------------------------
 
-  let modalShown = false;
+  const updateModalFocusVisual = (): void => {
+    const cards = levelupCardsEl.querySelectorAll<HTMLButtonElement>('.shard-card');
+    cards.forEach((c, idx) => {
+      c.classList.toggle('gamepad-focus', idx === modalFocusIdx);
+    });
+  };
 
   const renderLevelUpCards = (): void => {
     levelupCardsEl.innerHTML = '';
+    levelupFooterEl.innerHTML = '';
+    modalFocusIdx = 0;
 
     for (let slot = 0; slot < 3; slot++) {
       const offerType = game.level_choice_type(slot);
@@ -569,25 +765,27 @@ async function main(): Promise<void> {
       const card = document.createElement('button');
       card.className = 'shard-card';
       card.type = 'button';
+      card.dataset.slot = String(slot);
+
       if (offerType === 1) {
         if (offerIdx >= EVOLUTIONS.length) continue;
         const meta = EVOLUTIONS[offerIdx]!;
-        card.style.borderColor = 'rgba(255,181,71,0.5)';
-        card.style.boxShadow = '0 0 24px rgba(255,181,71,0.12)';
+        card.style.borderColor = 'rgba(255,181,71,0.58)';
+        card.style.boxShadow = '0 0 28px rgba(255,181,71,0.16)';
         card.innerHTML =
-          `<div class="shard-rarity evolution">evolution</div>` +
+          `<div class="shard-rarity evolution">★ evolution</div>` +
           `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
           `<div class="shard-name">${meta.name}</div>` +
           `<div class="shard-level">${meta.recipe}</div>` +
           `<div class="shard-desc">${meta.desc}</div>` +
-          `<div class="shard-hotkey">${slot + 1}</div>`;
+          `<div class="shard-hotkey">[${slot + 1}]</div>`;
       } else {
         if (offerIdx >= SHARDS.length) continue;
         const meta = SHARDS[offerIdx]!;
         const currentLevel = game.inventory_level(offerIdx);
         const nextLevel = currentLevel + 1;
-        if (meta.rarity === 'rare') card.style.borderColor = 'rgba(127,211,255,0.3)';
-        if (meta.rarity === 'legendary') card.style.borderColor = 'rgba(255,215,64,0.4)';
+        if (meta.rarity === 'rare') card.style.borderColor = 'rgba(127,211,255,0.34)';
+        if (meta.rarity === 'legendary') card.style.borderColor = 'rgba(255,215,64,0.45)';
 
         const pipLadder = Array.from({ length: 6 }, (_, n) => {
           const lvl = n + 1;
@@ -595,20 +793,19 @@ async function main(): Promise<void> {
           if (lvl <= currentLevel) {
             bg = meta.color;
           } else if (lvl === nextLevel) {
-            bg = 'rgba(255,255,255,0.9)';
-            shadow = '0 0 6px rgba(255,255,255,0.8)';
-            border = '1px solid rgba(255,255,255,0.6)';
+            bg = 'rgba(255,255,255,0.92)';
+            shadow = '0 0 6px rgba(255,255,255,0.85)';
+            border = '1px solid rgba(255,255,255,0.65)';
           } else {
             bg = 'transparent';
-            opacity = '0.2';
+            opacity = '0.22';
           }
           return `<div style="flex:1;height:4px;background:${bg};box-shadow:${shadow};border:${border};opacity:${opacity}"></div>`;
         }).join('');
 
-        let synergyHtml = '';
-        if (meta.synergies.length > 0) {
-          synergyHtml = `<div class="shard-synergy">${meta.synergies.map(s => `<span>${s}</span>`).join('')}</div>`;
-        }
+        const synergyHtml = meta.synergies.length > 0
+          ? `<div class="shard-synergy">${meta.synergies.map((s) => `<span>${s}</span>`).join('')}</div>`
+          : '';
 
         card.innerHTML =
           `<div class="shard-rarity ${meta.rarity}">${meta.rarity}</div>` +
@@ -618,9 +815,17 @@ async function main(): Promise<void> {
           `<div class="shard-level">LV ${currentLevel} → ${nextLevel}</div>` +
           `<div class="shard-desc">${meta.desc}</div>` +
           synergyHtml +
-          `<div class="shard-hotkey">${slot + 1}</div>`;
+          `<div class="shard-hotkey">[${slot + 1}]</div>`;
       }
-      card.addEventListener('click', () => { game.select_shard(slot); });
+      card.addEventListener('mouseenter', () => {
+        audio.playUiHover();
+        modalFocusIdx = slot;
+        updateModalFocusVisual();
+      });
+      card.addEventListener('click', () => {
+        audio.playUiSelect();
+        game.select_shard(slot);
+      });
       levelupCardsEl.appendChild(card);
     }
 
@@ -629,19 +834,25 @@ async function main(): Promise<void> {
     rerollBtn.className = 'levelup-action';
     rerollBtn.type = 'button';
     rerollBtn.disabled = charges === 0;
-    rerollBtn.textContent = `REROLL [R]  ×${charges}`;
+    rerollBtn.textContent = `REROLL [R / Y]  ×${charges}`;
     rerollBtn.addEventListener('click', () => {
+      audio.playUiSelect();
       game.reroll_level_up();
       renderLevelUpCards();
     });
-    levelupCardsEl.appendChild(rerollBtn);
+    levelupFooterEl.appendChild(rerollBtn);
 
     const skipBtn = document.createElement('button');
     skipBtn.className = 'levelup-action';
     skipBtn.type = 'button';
-    skipBtn.textContent = 'SKIP [X]  +6 HP';
-    skipBtn.addEventListener('click', () => { game.skip_level_up(); });
-    levelupCardsEl.appendChild(skipBtn);
+    skipBtn.textContent = 'SKIP [X / B]  +6 HP';
+    skipBtn.addEventListener('click', () => {
+      audio.playUiSelect();
+      game.skip_level_up();
+    });
+    levelupFooterEl.appendChild(skipBtn);
+
+    updateModalFocusVisual();
   };
 
   const showLevelUpModal = (): void => {
@@ -656,51 +867,35 @@ async function main(): Promise<void> {
   const hideLevelUpModal = (): void => {
     levelupEl.classList.remove('shown');
     levelupCardsEl.innerHTML = '';
+    levelupFooterEl.innerHTML = '';
     audio.duck(false);
     modalShown = false;
   };
 
-  window.addEventListener('keydown', (e) => {
-    if (!modalShown) return;
-    const n = parseInt(e.key, 10);
-    if (n >= 1 && n <= 3) {
-      game.select_shard(n - 1);
-      e.preventDefault();
-    }
-    if (e.key === 'x' || e.key === 'X') {
-      game.skip_level_up();
-      e.preventDefault();
-    }
-    if (e.key === 'r' || e.key === 'R') {
-      if (game.reroll_charges() > 0) {
-        game.reroll_level_up();
-        renderLevelUpCards();
-      }
-      e.preventDefault();
-    }
-  });
-
-  // --- Death screen ------------------------------------------------------
-
-  let deathShown = false;
+  // --- Death / Victory screen --------------------------------------------
 
   const ENEMY_KIND_NAMES = ['DRONE', 'BRUTE', 'DASHER', 'SPLITTER', 'ORBITER', 'EMITTER', 'PULSAR', 'UMBRA'];
 
-  const showDeathScreen = (victory: boolean = false): void => {
+  const showDeathScreen = (victory: boolean): void => {
     if (victory) {
       deathTitleEl.textContent = 'VICTORY';
       deathTitleEl.classList.add('victory-title');
+      btnContinueEndless.classList.add('shown');
     } else {
-      deathTitleEl.textContent = 'SHATTERED';
+      deathTitleEl.textContent = game.is_endless() ? 'ENDLESS SHATTERED' : 'SHATTERED';
       deathTitleEl.classList.remove('victory-title');
+      btnContinueEndless.classList.remove('shown');
     }
-    deathScoreEl.textContent = String(game.score());
+    deathScoreEl.textContent = `${game.score()} PTS`;
+
     const t = game.timer();
     const timeStr = formatTime(t);
     const dmgTaken = Math.round(game.damage_taken());
     const barrierAbs = Math.round(game.barrier_absorbed());
     const gems = game.gems_collected();
     const bossKills = game.boss_kills_count();
+    const peakStreak = game.peak_kill_streak();
+    const avgDps = game.total_damage_dealt() / Math.max(1, t);
     const deathCauseIdx = game.death_cause();
     const deathCause = !victory && deathCauseIdx >= 0
       ? describeDamageSource(deathCauseIdx)
@@ -725,17 +920,20 @@ async function main(): Promise<void> {
       .filter((s) => s.level > 0)
       .sort((a, b) => b.level - a.level || a.name.localeCompare(b.name))
       .slice(0, 5);
+
     const summary: StoredRunSummary = {
       version: 1,
       savedAt: new Date().toISOString(),
       outcome: victory ? 'VICTORY' : 'DEATH',
       seed: game.seed(),
+      daily: isDailyRun,
       deathCause,
       score: game.score(),
       timeSeconds: Math.floor(t),
       rank: game.rank(),
       peakRank: game.peak_rank(),
       kills: game.kills_total(),
+      peakStreak,
       bossKills,
       damageTaken: dmgTaken,
       barrierAbsorbed: barrierAbs,
@@ -748,44 +946,65 @@ async function main(): Promise<void> {
       topShards,
     };
     const { runs, isNewBest, storageOk } = saveRunSummary(summary);
+    updateTitleBestBadge();
+
     const shardSummary = SHARDS.map((s, i) => {
       const lvl = game.inventory_level(i);
-      return lvl > 0 ? `<span style="color:${s.color}">${s.name} ${lvl}</span>` : null;
-    }).filter(Boolean).join('  ');
+      return lvl > 0 ? `<span class="build-chip" style="border-color:${s.color}55;color:${s.color}">${s.name} L${lvl}</span>` : null;
+    }).filter(Boolean).join('');
+
     const synergySummary = activeSynergies.length > 0
-      ? `<br>SYNERGIES ${activeSynergies.map(escapeHtml).join(' / ')}`
+      ? `<div style="margin-top:6px;color:#ffd740">SYNERGIES · ${activeSynergies.map(escapeHtml).join(' / ')}</div>`
       : '';
     const evolutionSummary = activeEvolutions.length > 0
-      ? `<br>EVOLUTIONS ${activeEvolutions.map(escapeHtml).join(' / ')}`
+      ? `<div style="margin-top:4px;color:#ffb547">EVOLUTIONS · ${activeEvolutions.map(escapeHtml).join(' / ')}</div>`
       : '';
-    const deathCauseSummary = deathCause ? `<br>CAUSE ${escapeHtml(deathCause)}` : '';
+    const deathCauseSummary = deathCause
+      ? `<div style="color:#ff8f8f;margin-bottom:4px">CAUSE · ${escapeHtml(deathCause)}${damageBreakdown.length > 0 ? ` (${escapeHtml(damageBreakdown.join(' · '))})` : ''}</div>`
+      : '';
+
     deathStatsEl.innerHTML =
-      `RANK ${game.rank()}  /  PEAK ${game.peak_rank()}<br>` +
-      `${game.kills_total()} KILLS  /  ${timeStr} SURVIVED<br>` +
-      `${dmgTaken} DMG TAKEN  /  ${barrierAbs} ABSORBED<br>` +
-      `${gems} GEMS  /  ${bossKills} BOSSES` +
       deathCauseSummary +
+      `<div class="stat-grid">` +
+        `<div class="stat-cell"><div class="stat-cell-label">SURVIVED</div><div class="stat-cell-val">${timeStr}</div></div>` +
+        `<div class="stat-cell"><div class="stat-cell-label">RANK</div><div class="stat-cell-val">${game.rank()}</div></div>` +
+        `<div class="stat-cell"><div class="stat-cell-label">KILLS</div><div class="stat-cell-val">${game.kills_total()}</div></div>` +
+        `<div class="stat-cell"><div class="stat-cell-label">PEAK STREAK</div><div class="stat-cell-val">×${peakStreak}</div></div>` +
+        `<div class="stat-cell"><div class="stat-cell-label">AVG DPS</div><div class="stat-cell-val">${formatCompact(avgDps)}</div></div>` +
+        `<div class="stat-cell"><div class="stat-cell-label">BOSSES</div><div class="stat-cell-val">${bossKills}</div></div>` +
+        `<div class="stat-cell"><div class="stat-cell-label">DMG / SHIELD</div><div class="stat-cell-val">${dmgTaken} / ${barrierAbs}</div></div>` +
+        `<div class="stat-cell"><div class="stat-cell-label">SEED</div><div class="stat-cell-val">#${game.seed()}</div></div>` +
+      `</div>` +
       synergySummary +
       evolutionSummary +
-      renderBestRuns(runs, summary.savedAt, isNewBest, storageOk) +
-      (shardSummary ? `<br><br>${shardSummary}` : '');
+      (shardSummary ? `<div class="build-chip-row" style="justify-content:center;margin-top:8px">${shardSummary}</div>` : '') +
+      renderBestRuns(runs, summary.savedAt, isNewBest, storageOk);
+
     deathScreenEl.classList.add('shown');
     deathShown = true;
-    if (victory) audio.playVictory(); else audio.playDeath();
+    btnCopyTelemetry.textContent = 'COPY SEED';
+    if (victory) audio.playVictory();
+    else audio.playDeath();
 
-    // Debug run summary.
     const killsByKind = ENEMY_KIND_NAMES.map((n, i) => `${n}: ${game.kills_by_kind(i)}`).join(', ');
     const shardSummaryText = SHARDS.map((s, i) => {
       const lvl = game.inventory_level(i);
       return lvl > 0 ? `${s.name} ${lvl}` : null;
     }).filter(Boolean).join(', ');
+
+    lastRunTelemetryText =
+      `PRISM ${victory ? 'VICTORY' : 'RUN'} | Seed #${game.seed()}${isDailyRun ? ` (Daily ${daily.dateLabel})` : ''}\n` +
+      `Score: ${game.score()} | Time: ${timeStr} | Rank: ${game.rank()} | Kills: ${game.kills_total()} (Peak ×${peakStreak})\n` +
+      `Avg DPS: ${Math.round(avgDps)} | Bosses: ${bossKills} | Shards: ${shardSummaryText || 'none'}\n` +
+      `Synergies: ${activeSynergies.join(', ') || 'none'} | Evolutions: ${activeEvolutions.join(', ') || 'none'}`;
+
     console.log(
       `[PRISM RUN SUMMARY]\n` +
       `  seed: ${game.seed()}\n` +
       `  outcome: ${victory ? 'VICTORY' : 'DEATH'}  |  time: ${timeStr}  |  score: ${game.score()}\n` +
       `  death cause: ${deathCause ?? 'none'}\n` +
-      `  rank: ${game.rank()} (peak ${game.peak_rank()})  |  kills: ${game.kills_total()}  |  bosses: ${bossKills}\n` +
-      `  dmg taken: ${dmgTaken}  |  barrier absorbed: ${barrierAbs}  |  gems: ${gems}\n` +
+      `  rank: ${game.rank()} (peak ${game.peak_rank()})  |  kills: ${game.kills_total()} (peak streak ${peakStreak})  |  bosses: ${bossKills}\n` +
+      `  avg dps: ${Math.round(avgDps)}  |  dmg taken: ${dmgTaken}  |  barrier absorbed: ${barrierAbs}  |  gems: ${gems}\n` +
       `  damage by source: ${damageBreakdown.join(', ') || 'none'}\n` +
       `  kills by kind: ${killsByKind}\n` +
       `  rank timeline: ${rankTimeline}\n` +
@@ -795,86 +1014,274 @@ async function main(): Promise<void> {
       `  synergy times: ${synergyTimes.join(', ') || 'none'}\n` +
       `  evolutions: ${activeEvolutions.join(', ') || 'none'}\n` +
       `  max observed: enemies ${maxObserved.enemies}, circles ${maxObserved.circles}, beams ${maxObserved.beams}\n` +
-      `  shards: ${shardSummaryText || 'none'}`
+      `  shards: ${shardSummaryText || 'none'}`,
     );
   };
 
   const hideDeathScreen = (): void => {
     deathScreenEl.classList.remove('shown');
     deathShown = false;
-    // Reset HUD change-detection so everything redraws.
-    lastRank = -1;
-    lastKills = -1;
-    lastScore = -1;
-    lastXpPct = -1;
-    lastXp = -1;
-    lastXpNeeded = -1;
-    lastHp = -1;
-    lastMaxHp = -1;
-    lastHpPct = -1;
-    lastDashReady = false;
-    lastTimerStr = '';
-    lastWave = -1;
-    lastBossActive = false;
-    lastBossKind = -2;
-    lastBossPct = -1;
-    lastPipLevels.fill(-1);
-    lastActiveBits = -1;
-    lastNearBits = -1;
+    resetHudCache();
   };
 
   const doRestart = (): void => {
     if (!deathShown) return;
-    game.restart();
-    input.clearKeys();
-    hideDeathScreen();
+    startNewRun((Math.random() * 0xffffffff) >>> 0, false);
   };
 
+  btnContinueEndless.addEventListener('click', () => {
+    if (!deathShown || !game.is_victory()) return;
+    ensureAudio();
+    audio.playUiSelect();
+    game.continue_endless();
+    hideDeathScreen();
+    input.clearKeys();
+    overlay.announce('ENDLESS OVERDRIVE', '#ffd740', 'ESCALATING WAVES & OVERDRIVE BOSSES');
+    last = performance.now();
+  });
+
+  btnCopyTelemetry.addEventListener('click', () => {
+    if (!lastRunTelemetryText) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      void navigator.clipboard.writeText(lastRunTelemetryText).then(() => {
+        btnCopyTelemetry.textContent = 'COPIED!';
+      });
+    }
+  });
+
   deathRestartEl.addEventListener('click', doRestart);
+
+  // Global keyboard shortcuts.
   window.addEventListener('keydown', (e) => {
+    if (!isStarted) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        startNewRun((Math.random() * 0xffffffff) >>> 0, false);
+        e.preventDefault();
+      }
+      return;
+    }
+    if (e.key === 'Escape') {
+      togglePause();
+      e.preventDefault();
+      return;
+    }
+    if (modalShown) {
+      const n = parseInt(e.key, 10);
+      if (n >= 1 && n <= 3) {
+        audio.playUiSelect();
+        game.select_shard(n - 1);
+        e.preventDefault();
+      } else if (e.key === 'x' || e.key === 'X') {
+        audio.playUiSelect();
+        game.skip_level_up();
+        e.preventDefault();
+      } else if (e.key === 'r' || e.key === 'R') {
+        if (game.reroll_charges() > 0) {
+          audio.playUiSelect();
+          game.reroll_level_up();
+          renderLevelUpCards();
+        }
+        e.preventDefault();
+      }
+      return;
+    }
     if (deathShown && (e.key === ' ' || e.key === 'Enter')) {
       doRestart();
       e.preventDefault();
     }
   });
-  // Tap-to-restart on touch devices.
-  deathScreenEl.addEventListener('touchstart', (e) => {
-    if (deathShown) {
-      doRestart();
-      e.preventDefault();
-    }
-  }, { passive: false });
 
-  // --- Main loop ---------------------------------------------------------
+  // --- Main RAF loop -----------------------------------------------------
 
   let last = performance.now();
   let fpsLast = last;
   let fpsFrames = 0;
+  let lastGamepadShown = false;
 
   const frame = (now: number): void => {
-    const dt = Math.min((now - last) / 1000, 1 / 30);
+    const rawDt = Math.min((now - last) / 1000, 1 / 30);
     last = now;
-    globalT += dt;
+
+    // Poll Gamepad API every frame (works on title, active run, level-up modal, and pause!).
+    input.pollGamepad(modalShown);
+    const padNow = input.hasGamepad();
+    if (padNow !== lastGamepadShown) {
+      sysUplinkEl.textContent = padNow ? '● GAMEPAD READY' : '● UPLINK STABLE';
+      lastGamepadShown = padNow;
+    }
+    if (input.consumePause()) {
+      if (!isStarted) {
+        startNewRun((Math.random() * 0xffffffff) >>> 0, false);
+      } else {
+        togglePause();
+      }
+    }
+
+    // Attract-mode spinning crystal globe on Title Screen!
+    if (!isStarted) {
+      const t = now / 1000;
+      const camX = t * 52;
+      const camY = Math.sin(t * 0.24) * 190;
+      // Central prism + orbiting spectral crystal ring + refracting preview beams.
+      let cIdx = 0;
+      const putCircle = (
+        x: number, y: number, r: number,
+        cr: number, cg: number, cb: number, ca: number, glow: number, shape: number,
+      ): void => {
+        const o = cIdx * CIRCLE_STRIDE_FLOATS;
+        attractCircles[o] = x;
+        attractCircles[o + 1] = y;
+        attractCircles[o + 2] = r;
+        attractCircles[o + 3] = cr;
+        attractCircles[o + 4] = cg;
+        attractCircles[o + 5] = cb;
+        attractCircles[o + 6] = ca;
+        attractCircles[o + 7] = glow;
+        attractCircles[o + 8] = shape;
+        cIdx++;
+      };
+
+      putCircle(camX, camY, 64, 0.35, 0.85, 1.0, 0.34, 1.6, 4.0);
+      putCircle(camX, camY, 26, 0.74, 0.96, 1.0, 0.96, 1.5, 5.0);
+      for (let i = 0; i < 6; i++) {
+        const a = t * 0.55 + (i * Math.PI * 2) / 6;
+        const ox = camX + Math.cos(a) * 140;
+        const oy = camY + Math.sin(a) * 140;
+        const hue = i / 6;
+        const cr = 0.5 + 0.5 * Math.cos(hue * Math.PI * 2);
+        const cg = 0.5 + 0.5 * Math.cos(hue * Math.PI * 2 + 2.094);
+        const cb = 0.5 + 0.5 * Math.cos(hue * Math.PI * 2 + 4.189);
+        putCircle(ox, oy, 12, cr, cg, cb, 0.90, 2.0, 1.0);
+
+        const bo = i * BEAM_AUGMENTED_STRIDE;
+        attractBeams[bo] = camX;
+        attractBeams[bo + 1] = camY;
+        attractBeams[bo + 2] = camX + Math.cos(a) * 420;
+        attractBeams[bo + 3] = camY + Math.sin(a) * 420;
+        attractBeams[bo + 4] = 2.0;
+        attractBeams[bo + 5] = cr;
+        attractBeams[bo + 6] = cg;
+        attractBeams[bo + 7] = cb;
+        attractBeams[bo + 8] = 0.55;
+        attractBeams[bo + 9] = 2.1;
+        attractBeams[bo + 10] = 1.0;
+      }
+
+      renderer.render(
+        pixelW, pixelH, viewW, viewH,
+        [camX, camY],
+        attractCircles, cIdx,
+        attractBeams, 6,
+        [0, 0],
+        t,
+        game.arena_radius(),
+        { intensity: 0.45, screenFlash: 0, damageFlash: 0, lowHp: 0, bossMood: 0 },
+      );
+      requestAnimationFrame(frame);
+      return;
+    }
 
     if (isPaused) {
       requestAnimationFrame(frame);
       return;
     }
 
+    // Handle Gamepad navigation inside Level-Up modal.
+    if (modalShown) {
+      const act = input.consumeModalAction();
+      if (act === 'prev') {
+        modalFocusIdx = (modalFocusIdx + 2) % 3;
+        audio.playUiHover();
+        updateModalFocusVisual();
+      } else if (act === 'next') {
+        modalFocusIdx = (modalFocusIdx + 1) % 3;
+        audio.playUiHover();
+        updateModalFocusVisual();
+      } else if (act === 'confirm') {
+        audio.playUiSelect();
+        game.select_shard(modalFocusIdx);
+      } else if (act === 'reroll' && game.reroll_charges() > 0) {
+        audio.playUiSelect();
+        game.reroll_level_up();
+        renderLevelUpCards();
+      } else if (act === 'skip') {
+        audio.playUiSelect();
+        game.skip_level_up();
+      }
+    }
+
+    // Visceral micro hit-stop time dilation (purely presentation-side; deterministic Rust unaffected).
+    let simDt = rawDt;
+    if (hitStopTimer > 0) {
+      hitStopTimer = Math.max(0, hitStopTimer - rawDt);
+      simDt = rawDt * 0.22;
+    }
+
     const [ix, iy] = input.direction();
     game.set_input(ix, iy);
     game.set_dash_input(input.consumeDash());
-    game.update(dt);
+    game.update(simDt);
 
-    // Audio tick — reads per-frame counters set during game.update().
+    const pulseHitStop = game.hit_stop_pulse();
+    if (pulseHitStop > 0.1) {
+      hitStopTimer = Math.max(hitStopTimer, 0.025 + pulseHitStop * 0.03);
+    }
+
+    // Compute build intensity (0..1).
+    let totalShardLevels = 0;
+    for (let i = 0; i < SHARDS.length; i++) {
+      totalShardLevels += game.inventory_level(i);
+    }
+    const intensity = Math.min(1.0, totalShardLevels / 40.0);
+    const bossActive = game.boss_active();
+    const eventBits = game.audio_event_bits();
+    const activeBits = game.active_synergy_bits();
+    const activeEvoBits = game.active_evolution_bits();
+    const streak = game.kill_streak();
+
+    // Audio DSP tick.
     if (!deathShown && !modalShown) {
-      audio.tick(dt,
+      audio.tick(
+        rawDt,
         game.audio_beam_count(),
         game.audio_kill_count(),
         game.audio_gem_count(),
-        game.audio_event_bits(),
-        game.active_synergy_bits(),
+        eventBits,
+        activeBits,
+        intensity,
+        bossActive,
+        streak,
       );
+    }
+
+    // Floating milestone announcements on Overlay Canvas.
+    if (eventBits & AUDIO_BOSS_SPAWN) {
+      const bName = BOSS_NAMES[game.boss_kind_index()] ?? 'ANCIENT PRISM';
+      overlay.announce(`WARNING · ${bName}`, '#ffad5c', 'ARENA CROWD CLEARED FOR ENGAGEMENT');
+    }
+    if (eventBits & AUDIO_SHIELD_BREAK) {
+      overlay.announce('SHIELD SHATTERED', '#ffe26a', 'SENTINEL CORE EXPOSED');
+    }
+    if (eventBits & AUDIO_STREAK_MILESTONE) {
+      overlay.announce(`×${streak} KILL STREAK`, streak >= 100 ? '#ff8df2' : '#ffd740');
+    }
+    const newSynergies = activeBits & ~announcedSynergyBits;
+    if (newSynergies !== 0) {
+      for (let i = 0; i < SYNERGY_NAMES.length; i++) {
+        if ((newSynergies >>> i) & 1) {
+          overlay.announce(`⚡ SYNERGY · ${SYNERGY_NAMES[i]}`, '#ffd740');
+        }
+      }
+      announcedSynergyBits = activeBits;
+    }
+    const newEvos = activeEvoBits & ~announcedEvoBits;
+    if ((eventBits & AUDIO_EVOLUTION) || newEvos !== 0) {
+      for (let i = 0; i < EVOLUTIONS.length; i++) {
+        if ((newEvos >>> i) & 1) {
+          overlay.announce(`★ EVOLUTION · ${EVOLUTIONS[i]!.name}`, EVOLUTIONS[i]!.color, EVOLUTIONS[i]!.desc.toUpperCase());
+        }
+      }
+      announcedEvoBits = activeEvoBits;
     }
 
     // Death / victory screen edges.
@@ -887,8 +1294,7 @@ async function main(): Promise<void> {
     dashFillEl.style.width = ((1 - dashPct) * 100) + '%';
 
     // Wave clear banner.
-    const wcTimer = game.wave_clear_timer();
-    if (wcTimer > 0) waveClearEl.classList.add('shown');
+    if (game.wave_clear_timer() > 0) waveClearEl.classList.add('shown');
     else waveClearEl.classList.remove('shown');
 
     // Modal open/close by state edges.
@@ -896,7 +1302,7 @@ async function main(): Promise<void> {
     if (isLeveling && !modalShown) showLevelUpModal();
     if (!isLeveling && modalShown) hideLevelUpModal();
 
-    // HUD updates only on change.
+    // HUD updates (change-detected).
     const rank = game.rank();
     if (rank !== lastRank) {
       rankEl.textContent = String(rank);
@@ -905,34 +1311,45 @@ async function main(): Promise<void> {
     const kills = game.kills_total();
     const score = game.score();
     if (kills !== lastKills || score !== lastScore) {
-      killsEl.textContent = kills + ' KILLS · ' + score + ' PTS';
+      killsEl.textContent = `${kills} KILLS · ${score} PTS`;
       lastKills = kills;
       lastScore = score;
     }
+    // Kill-streak combo badge.
+    if (streak !== lastStreak) {
+      comboWrapEl.classList.toggle('shown', streak >= 3);
+      if (streak >= 3) {
+        comboValEl.textContent = `×${streak} STREAK`;
+        comboValEl.classList.toggle('hot', streak >= 25 && streak < 75);
+        comboValEl.classList.toggle('super', streak >= 75);
+      }
+      lastStreak = streak;
+    }
+    if (streak >= 3) {
+      comboFillEl.style.width = (game.kill_streak_timer_pct() * 100) + '%';
+    }
+
     const xp = game.xp();
     const xpNeeded = game.xp_needed();
-    const xpPct = xpNeeded > 0
-      ? Math.round(Math.min(100, (xp / xpNeeded) * 100))
-      : 0;
+    const xpPct = xpNeeded > 0 ? Math.round(Math.min(100, (xp / xpNeeded) * 100)) : 0;
     if (xpPct !== lastXpPct) {
-      // Suppress transition on wrap-around so the bar doesn't animate backwards.
       if (xpPct < lastXpPct) xpFillEl.style.transition = 'none';
       else xpFillEl.style.transition = '';
       xpFillEl.style.width = xpPct + '%';
       lastXpPct = xpPct;
     }
     if (xp !== lastXp || xpNeeded !== lastXpNeeded) {
-      if (xpRankLabelEl) xpRankLabelEl.textContent = `RADIANCE TO RANK ${rank + 1}`;
-      if (xpValEl) xpValEl.textContent = `${xp} / ${xpNeeded}`;
+      xpRankLabelEl.textContent = `RADIANCE TO RANK ${rank + 1}`;
+      xpValEl.textContent = `${xp} / ${xpNeeded}`;
       lastXp = xp;
       lastXpNeeded = xpNeeded;
     }
-    // HP bar + HULL value.
+
     const hp = game.hp();
     const maxHp = game.max_hp();
     const hpPct = maxHp > 0 ? Math.round((hp / maxHp) * 100) : 100;
     if (hp !== lastHp || maxHp !== lastMaxHp) {
-      if (hpValEl) hpValEl.textContent = `${Math.ceil(hp)} / ${maxHp}`;
+      hpValEl.textContent = `${Math.ceil(hp)} / ${Math.round(maxHp)}`;
       lastHp = hp;
       lastMaxHp = maxHp;
     }
@@ -942,38 +1359,44 @@ async function main(): Promise<void> {
       hpFillEl.classList.toggle('warn', hpPct > 25 && hpPct <= 50);
       lastHpPct = hpPct;
     }
-    // Dash status text.
-    const dashReady = game.dash_cooldown_pct() === 0;
+
+    const dashReady = dashPct === 0;
     if (dashReady !== lastDashReady) {
-      if (dashStatusEl) dashStatusEl.textContent = dashReady ? 'READY' : '—';
+      dashStatusEl.textContent = dashReady ? 'READY' : 'RECHARGING';
       lastDashReady = dashReady;
     }
-    // Timer.
+
     const t = game.timer();
-    const mins = Math.floor(t / 60);
-    const secs = Math.floor(t % 60);
-    const timerStr = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    const timerStr = formatTime(t);
     if (timerStr !== lastTimerStr) {
       timerEl.textContent = timerStr;
       lastTimerStr = timerStr;
     }
-    // Wave.
+
     const wave = game.wave();
     if (wave !== lastWave) {
       waveLabelEl.textContent = `WAVE ${wave + 1}`;
       lastWave = wave;
     }
-    const bossActive = game.boss_active();
+
+    const endlessNow = game.is_endless();
+    if (endlessNow !== lastEndless) {
+      endlessBadgeEl.classList.toggle('shown', endlessNow);
+      lastEndless = endlessNow;
+    }
+
     if (bossActive !== lastBossActive) {
       bossHudEl.classList.toggle('shown', bossActive);
       lastBossActive = bossActive;
       lastBossPct = -1;
       lastBossKind = -2;
     }
+    let bossLabel = 'PRISM BOSS';
     if (bossActive) {
       const bossKind = game.boss_kind_index();
+      bossLabel = BOSS_NAMES[bossKind] ?? 'UNKNOWN PRISM';
       if (bossKind !== lastBossKind) {
-        bossNameEl.textContent = BOSS_NAMES[bossKind] ?? 'UNKNOWN PRISM';
+        bossNameEl.textContent = bossLabel;
         lastBossKind = bossKind;
       }
       const bossPct = Math.max(0, Math.min(100, Math.round(game.boss_hp_pct() * 100)));
@@ -982,6 +1405,7 @@ async function main(): Promise<void> {
         lastBossPct = bossPct;
       }
     }
+
     for (let i = 0; i < SHARDS.length; i++) {
       const lvl = game.inventory_level(i);
       if (lvl !== lastPipLevels[i]) {
@@ -1002,14 +1426,13 @@ async function main(): Promise<void> {
         lastPipLevels[i] = lvl;
       }
     }
-    // Synergy HUD — update only when bitmasks change.
-    const activeBits = game.active_synergy_bits();
+
     const nearBits = game.near_synergy_bits();
     if (activeBits !== lastActiveBits || nearBits !== lastNearBits) {
       for (let i = 0; i < synergyTags.length; i++) {
         const tag = synergyTags[i]!;
-        const isActive = (activeBits >>> i & 1) === 1;
-        const isNear = (nearBits >>> i & 1) === 1;
+        const isActive = ((activeBits >>> i) & 1) === 1;
+        const isNear = ((nearBits >>> i) & 1) === 1;
         if (isActive) {
           tag.style.display = '';
           tag.className = 'synergy-tag active';
@@ -1025,18 +1448,10 @@ async function main(): Promise<void> {
       lastNearBits = nearBits;
     }
 
-    // Refresh views after update() — Rust rebuilt the buffers during update.
-    refreshCircles();
-    refreshBeams();
+    // Refresh zero-copy WASM views after update().
+    refreshBuffers();
 
-    // Compute intensity from total shard levels (23 shards × max 6 levels = 138 max, normalize to 40).
-    let totalShardLevels = 0;
-    for (let i = 0; i < SHARDS.length; i++) {
-      totalShardLevels += game.inventory_level(i);
-    }
-    const intensity = Math.min(1.0, totalShardLevels / 40.0);
-
-    // Build augmented beam buffer: inject form_progress (11th float) per beam.
+    // Build augmented beam buffer with smooth growth formation animation.
     const beamCount = beamsLen;
     let renderBeams: Float32Array;
     if (beamCount > 0) {
@@ -1049,48 +1464,71 @@ async function main(): Promise<void> {
         const dst = i * BEAM_AUGMENTED_STRIDE;
         for (let j = 0; j < BEAM_STRIDE_FLOATS; j++) augBeamBuf[dst + j] = beamsView[src + j]!;
 
-        // Key: rounded p1 position + color channel to distinguish multi-beam targets.
         const p1x = beamsView[src + 2]!;
         const p1y = beamsView[src + 3]!;
-        const cr  = beamsView[src + 5]!;
+        const cr = beamsView[src + 5]!;
         const key = `${Math.round(p1x * 0.25)},${Math.round(p1y * 0.25)},${Math.round(cr * 8)}`;
         keysThisFrame.add(key);
 
         let entry = beamBirthTimes.get(key);
         if (!entry) {
-          entry = { birth: now, duration: 10 + Math.random() * 1490 };
+          entry = { birth: now, duration: 28 + Math.random() * 52 };
           beamBirthTimes.set(key, entry);
         }
         augBeamBuf[dst + 10] = Math.min(1.0, (now - entry.birth) / entry.duration);
       }
 
-      // Prune entries for beams that are no longer present.
       for (const key of beamBirthTimes.keys()) {
         if (!keysThisFrame.has(key)) beamBirthTimes.delete(key);
       }
-
       renderBeams = augBeamBuf.subarray(0, needed);
     } else {
       renderBeams = beamsView;
     }
 
+    const camX = game.camera_x();
+    const camY = game.camera_y();
+    const shakeX = game.shake_x();
+    const shakeY = game.shake_y();
+    const arenaR = game.arena_radius();
+    const lowHpFactor = maxHp > 0 ? Math.max(0, (0.30 - hp / maxHp) / 0.30) : 0;
+
     renderer.render(
       pixelW, pixelH,
       viewW, viewH,
-      [game.camera_x(), game.camera_y()],
+      [camX, camY],
       circlesView, circlesLen,
       renderBeams, beamCount,
-      [game.shake_x(), game.shake_y()],
+      [shakeX, shakeY],
       now / 1000,
-      game.arena_radius(),
-      intensity,
+      arenaR,
+      {
+        intensity,
+        screenFlash: game.screen_flash(),
+        damageFlash: game.damage_flash(),
+        lowHp: lowHpFactor,
+        bossMood: bossActive ? 1.0 : 0.0,
+      },
     );
 
-    // FPS readout ~2×/s.
+    // 2D Overlay pass: floating damage numbers, banners, and off-screen boss chevron.
+    overlay.ingestPopups(popupsView, popupsLen);
+    overlay.render(
+      rawDt,
+      camX, camY,
+      shakeX, shakeY,
+      arenaR,
+      bossActive,
+      game.boss_world_x(),
+      game.boss_world_y(),
+      bossLabel,
+    );
+
+    // FPS telemetry readout.
     fpsFrames++;
     if (now - fpsLast > 500) {
       const fps = (fpsFrames * 1000) / (now - fpsLast);
-      statusEl.textContent = `${fps.toFixed(0)} fps · ${circlesLen}c ${beamsLen}b`;
+      statusEl.textContent = `${fps.toFixed(0)} fps · ${game.enemy_count()}e ${circlesLen}s ${beamsLen}b`;
       fpsFrames = 0;
       fpsLast = now;
     }

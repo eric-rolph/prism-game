@@ -981,3 +981,107 @@ fn boss_ttk_report() {
     }
     println!("{:-<64}", "");
 }
+
+#[test]
+fn boss_spawn_clears_excess_crowd_for_readable_arena() {
+    let mut g = Game::new(1280.0, 720.0, 42);
+    for i in 0..180 {
+        let angle = (i as f32) * 0.17;
+        g.spawn_enemy_at(EnemyKind::Drone, angle);
+    }
+    assert!(g.enemies.len() >= 180);
+    g.time = SENTINEL_SPAWN_TIME + 0.1;
+    g.update(DT);
+    assert!(g.boss_active());
+    assert!(
+        g.enemies.len() <= BOSS_SPAWN_SOFT_CAP,
+        "boss entrance should trim standing crowd below soft cap, got {}",
+        g.enemies.len()
+    );
+}
+
+#[test]
+fn continue_endless_resumes_after_session_victory() {
+    let mut g = Game::new(1280.0, 720.0, 7);
+    g.time = SESSION_LENGTH - DT * 0.5;
+    g.update(DT);
+    assert!(g.is_victory());
+    assert!(g.is_dead());
+
+    g.continue_endless();
+    assert!(g.is_endless());
+    assert!(!g.is_dead());
+    assert!(!g.is_victory());
+    assert!((g.hp() - g.max_hp()).abs() < 1e-3);
+
+    g.update(DT);
+    assert!(!g.is_dead(), "endless mode must not immediately re-trigger 15m victory");
+}
+
+#[test]
+fn combat_generates_kill_streak_and_damage_popups() {
+    let mut g = Game::new(1280.0, 720.0, 99);
+    // Place fragile drones near player so initial salvo hits & kills them.
+    for i in 0..4 {
+        let angle = i as f32 * 0.25;
+        let mut pos = g.player.pos;
+        move_on_globe(&mut pos, Vec2::new(angle.cos(), angle.sin()) * 90.0);
+        g.enemies.push(Enemy {
+            pos,
+            radius: 10.0,
+            hp: 10.0,
+            speed: 0.0,
+            kind: EnemyKind::Drone,
+            state: EnemyState::Drifting,
+            state_timer: 0.0,
+            charge_dir: Vec2::ZERO,
+            color: [1.0, 0.3, 0.4],
+            contact_damage: 10.0,
+            slow_timer: 0.0,
+            no_xp: false,
+            spawn_grace: 0.0,
+            mini_boss: None,
+        });
+    }
+    let mut saw_popup = false;
+    for _ in 0..30 {
+        g.update(DT);
+        if !g.popups().is_empty() {
+            saw_popup = true;
+        }
+    }
+    assert!(saw_popup, "beam hits should emit floating damage popups");
+    assert!(g.kill_streak() >= 1, "kills should increment kill streak");
+    assert!(g.peak_kill_streak() >= g.kill_streak());
+    assert!(g.total_damage_dealt() > 0.0);
+}
+
+#[test]
+fn soft_separation_keeps_overlapping_enemies_from_stacking() {
+    let mut g = Game::new(1280.0, 720.0, 123);
+    let base = Vec2::new(220.0, 0.0);
+    for _ in 0..2 {
+        g.enemies.push(Enemy {
+            pos: base,
+            radius: 12.0,
+            hp: 1000.0,
+            speed: 0.0,
+            kind: EnemyKind::Drone,
+            state: EnemyState::Drifting,
+            state_timer: 0.0,
+            charge_dir: Vec2::ZERO,
+            color: [1.0, 0.3, 0.4],
+            contact_damage: 10.0,
+            slow_timer: 0.0,
+            no_xp: false,
+            spawn_grace: 0.0,
+            mini_boss: None,
+        });
+    }
+    for _ in 0..10 {
+        g.update(DT);
+    }
+    assert!(g.enemies.len() >= 2);
+    let sep = globe_distance(g.enemies[0].pos, g.enemies[1].pos);
+    assert!(sep > 1.0, "overlapping enemies should separate, got dist {sep}");
+}

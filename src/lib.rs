@@ -2,6 +2,7 @@ mod entities;
 mod game;
 mod math;
 mod shards;
+mod spatial;
 
 use wasm_bindgen::prelude::*;
 
@@ -12,7 +13,15 @@ pub fn start() {
     }));
 }
 
-/// GPU instance data for a colored, glowing SDF circle. 8 × f32 = 32 bytes.
+/// GPU instance data for colored, glowing SDF geometry. 9 × f32 = 36 bytes.
+/// `shape` selects the GPU SDF silhouette:
+/// - `0.0` = soft luminous sphere / aura / particle
+/// - `1.0` = rotating faceted crystal diamond (XP radiance gems, shard crystals)
+/// - `2.0` = beveled crystalline hexagon (crystal obstacles, shields, mines, brutes)
+/// - `3.0` = razor geometric chevron / shard (drones, dashers, umbra)
+/// - `4.0` = hollow optical wave ring with chromatic rim (pulses, barrier, shockwaves, telegraphs)
+/// - `5.0` = faceted spinning prismatic hero core (player prism)
+/// - `6.0` = radiant crystalline starburst / octagon (elites, orbiters, pulsars, bosses)
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct CircleInstance {
@@ -24,6 +33,18 @@ pub struct CircleInstance {
     pub b: f32,
     pub a: f32,
     pub glow: f32,
+    pub shape: f32,
+}
+
+/// Per-frame floating combat popup record. 4 × f32 = 16 bytes.
+/// `kind`: 0 = normal hit, 1 = crit / heavy / boss hit, 2 = siphon heal, 3 = shield/boss break.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct DamagePopup {
+    pub x: f32,
+    pub y: f32,
+    pub value: f32,
+    pub kind: f32,
 }
 
 /// GPU instance data for a colored, glowing beam (capsule). 10 × f32 = 40 bytes.
@@ -95,6 +116,51 @@ impl Game {
     }
     pub fn beams_len(&self) -> usize {
         self.inner.beams().len()
+    }
+    pub fn popups_ptr(&self) -> *const DamagePopup {
+        self.inner.popups().as_ptr()
+    }
+    pub fn popups_len(&self) -> usize {
+        self.inner.popups().len()
+    }
+
+    // --- Combat juice, telemetry & endless mode ---
+
+    pub fn kill_streak(&self) -> u32 {
+        self.inner.kill_streak()
+    }
+    pub fn peak_kill_streak(&self) -> u32 {
+        self.inner.peak_kill_streak()
+    }
+    pub fn kill_streak_timer_pct(&self) -> f32 {
+        self.inner.kill_streak_timer_pct()
+    }
+    pub fn screen_flash(&self) -> f32 {
+        self.inner.screen_flash()
+    }
+    pub fn damage_flash(&self) -> f32 {
+        self.inner.damage_flash()
+    }
+    pub fn hit_stop_pulse(&self) -> f32 {
+        self.inner.hit_stop_pulse()
+    }
+    pub fn total_damage_dealt(&self) -> f32 {
+        self.inner.total_damage_dealt()
+    }
+    pub fn boss_world_x(&self) -> f32 {
+        self.inner.boss_camera_pos().x
+    }
+    pub fn boss_world_y(&self) -> f32 {
+        self.inner.boss_camera_pos().y
+    }
+    pub fn enemy_count(&self) -> u32 {
+        self.inner.enemy_count()
+    }
+    pub fn is_endless(&self) -> bool {
+        self.inner.is_endless()
+    }
+    pub fn continue_endless(&mut self) {
+        self.inner.continue_endless();
     }
 
     // --- Progression / shard queries ---

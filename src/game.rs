@@ -17,7 +17,8 @@ use crate::math::Rng;
 use crate::shards::{
     compose_salvo, BeamRequest, EvolutionKind, Inventory, ShardKind, UpgradeOffer, SYNERGY_COUNT,
 };
-use crate::{BeamInstance, CircleInstance};
+use crate::spatial::SpatialGrid;
+use crate::{BeamInstance, CircleInstance, DamagePopup};
 use glam::{Vec2, Vec3};
 
 const DAMAGE_SOURCE_COUNT: usize = 4;
@@ -142,8 +143,27 @@ pub struct Game {
     shake_amount: f32,
     shake_offset: Vec2,
 
+    // Combat juice, combo streak, visual flashes & endless mode.
+    kill_streak: u32,
+    kill_streak_timer: f32,
+    peak_kill_streak: u32,
+    screen_flash: f32,
+    damage_flash: f32,
+    hit_stop_pulse: f32,
+    total_damage_dealt: f32,
+    endless_mode: bool,
+    endless_boss_cycle: u32,
+    next_endless_boss_time: f32,
+
+    // Spatial hash grid for O(N) soft-separation & broadphase collision queries.
+    spatial: SpatialGrid,
+
     // Hit-flash: list of enemy indices that were hit this frame (used by draw).
     hit_flash_positions: Vec<Vec2>,
+
+    // Per-frame floating combat popups (world pos, value, kind), projected into popup_buf.
+    raw_popups: Vec<(Vec2, f32, f32)>,
+    popup_buf: Vec<DamagePopup>,
 
     // Draw buffers, rebuilt every frame.
     circle_buf: Vec<CircleInstance>,
@@ -274,6 +294,27 @@ pub const AUDIO_BOSS_PHASE: u32 = 1 << 3;
 pub const AUDIO_SHIELD_BREAK: u32 = 1 << 4;
 pub const AUDIO_DASH_BLAST: u32 = 1 << 5;
 pub const AUDIO_MINE_BURST: u32 = 1 << 6;
+pub const AUDIO_STREAK_MILESTONE: u32 = 1 << 7;
+pub const AUDIO_EVOLUTION: u32 = 1 << 8;
+
+// GPU SDF shape identifiers packed into CircleInstance::shape.
+const SHAPE_ORB: f32 = 0.0;
+const SHAPE_DIAMOND: f32 = 1.0;
+const SHAPE_HEX: f32 = 2.0;
+const SHAPE_CHEVRON: f32 = 3.0;
+const SHAPE_RING: f32 = 4.0;
+const SHAPE_PRISM: f32 = 5.0;
+const SHAPE_STAR: f32 = 6.0;
+
+// Floating combat popup kinds.
+const POPUP_NORMAL: f32 = 0.0;
+const POPUP_CRIT: f32 = 1.0;
+const POPUP_HEAL: f32 = 2.0;
+const POPUP_BREAK: f32 = 3.0;
+const MAX_POPUPS_PER_FRAME: usize = 48;
+const KILL_STREAK_WINDOW: f32 = 3.4;
+const ENEMY_SEPARATION_SPEED: f32 = 58.0;
+const BOSS_CLEAR_RADIUS: f32 = 260.0;
 
 // Boss milestones.
 const SENTINEL_SPAWN_TIME: f32 = 300.0;
@@ -701,7 +742,20 @@ impl Game {
             score: 0,
             shake_amount: 0.0,
             shake_offset: Vec2::ZERO,
+            kill_streak: 0,
+            kill_streak_timer: 0.0,
+            peak_kill_streak: 0,
+            screen_flash: 0.0,
+            damage_flash: 0.0,
+            hit_stop_pulse: 0.0,
+            total_damage_dealt: 0.0,
+            endless_mode: false,
+            endless_boss_cycle: 0,
+            next_endless_boss_time: SESSION_LENGTH + 150.0,
+            spatial: SpatialGrid::new(),
             hit_flash_positions: Vec::new(),
+            raw_popups: Vec::with_capacity(MAX_POPUPS_PER_FRAME),
+            popup_buf: Vec::with_capacity(MAX_POPUPS_PER_FRAME),
             halo_trail_timer: 0.0,
             wave_event_fired: false,
             prism_cannon_timer: 0.0,
@@ -786,7 +840,28 @@ impl Game {
     }
 
     pub fn is_victory(&self) -> bool {
-        self.dead && (self.time >= SESSION_LENGTH || self.void_victory)
+        self.dead && !self.endless_mode && (self.time >= SESSION_LENGTH || self.void_victory)
+    }
+
+    pub fn is_endless(&self) -> bool {
+        self.endless_mode
+    }
+
+    pub fn continue_endless(&mut self) {
+        if !self.is_victory() {
+            return;
+        }
+        self.endless_mode = true;
+        self.dead = false;
+        self.void_victory = false;
+        self.player.hp = self.player.max_hp;
+        self.player.iframe_timer = 1.5;
+        self.screen_flash = 0.85;
+        self.next_endless_boss_time = self.time + 150.0;
+        // Keep live HUD score current during the run.
+        self.score = self.compute_score();
+
+        self.build_draw_buffers();
     }
 
     pub fn boss_active(&self) -> bool {
@@ -809,6 +884,13 @@ impl Game {
             .unwrap_or(0.0)
     }
 
+    pub fn boss_camera_pos(&self) -> Vec2 {
+        self.boss
+            .as_ref()
+            .map(|b| nearest_globe_pos(self.camera, b.pos))
+            .unwrap_or(self.camera)
+    }
+
     pub fn camera(&self) -> Vec2 {
         self.camera
     }
@@ -817,6 +899,267 @@ impl Game {
     }
     pub fn beams(&self) -> &[BeamInstance] {
         &self.beam_buf
+    }
+    pub fn popups(&self) -> &[DamagePopup] {
+        &self.popup_buf
+    }
+    pub fn kill_streak(&self) -> u32 {
+        self.kill_streak
+    }
+    pub fn peak_kill_streak(&self) -> u32 {
+        self.peak_kill_streak
+    }
+    pub fn kill_streak_timer_pct(&self) -> f32 {
+        (self.kill_streak_timer / KILL_STREAK_WINDOW).clamp(0.0, 1.0)
+    }
+    pub fn screen_flash(&self) -> f32 {
+        self.screen_flash
+    }
+    pub fn damage_flash(&self) -> f32 {
+        self.damage_flash
+    }
+    pub fn hit_stop_pulse(&self) -> f32 {
+        self.hit_stop_pulse
+    }
+    pub fn total_damage_dealt(&self) -> f32 {
+        self.total_damage_dealt
+    }
+    pub fn enemy_count(&self) -> u32 {
+        self.enemies.len() as u32
+    }
+
+    fn push_popup(&mut self, world_pos: Vec2, value: f32, kind: f32) {
+        if value < 1.0 {
+            return;
+        }
+        if self.raw_popups.len() < MAX_POPUPS_PER_FRAME {
+            self.raw_popups.push((world_pos, value, kind));
+        } else if kind > POPUP_NORMAL {
+            if let Some(slot) = self
+                .raw_popups
+                .iter_mut()
+                .find(|p| p.2 <= POPUP_NORMAL)
+            {
+                *slot = (world_pos, value, kind);
+            }
+        }
+    }
+
+    fn rebuild_spatial_grid(&mut self) {
+        let origin = self.player.pos;
+        let enemies = &self.enemies;
+        self.spatial
+            .rebuild(enemies.len(), |i| nearest_globe_delta(origin, enemies[i].pos));
+    }
+
+    fn separate_enemies(&mut self, dt: f32) {
+        let count = self.enemies.len();
+        if count < 2 {
+            return;
+        }
+        // Soft separation keeps swarms flowing organically instead of collapsing to 1 pixel.
+        // Capped at 6 local neighbors per enemy via spatial grid -> O(N) deterministic.
+        let mut pushes = vec![Vec2::ZERO; count];
+        for i in 0..count {
+            let e = &self.enemies[i];
+            if e.spawn_grace > 0.0 || e.state == EnemyState::Charging {
+                continue;
+            }
+            let pi = self.spatial.local_pos(i);
+            let ri = e.radius;
+            let mut acc = Vec2::ZERO;
+            self.spatial.visit_neighbors(i, 6, |j| {
+                let pj = self.spatial.local_pos(j);
+                let delta = pi - pj;
+                let min_dist = (ri + self.enemies[j].radius) * 0.90;
+                let dist_sq = delta.length_squared();
+                if dist_sq < min_dist * min_dist {
+                    let dir = if dist_sq > 1e-4 {
+                        delta / dist_sq.sqrt()
+                    } else if i > j {
+                        Vec2::X
+                    } else {
+                        -Vec2::X
+                    };
+                    let overlap = (min_dist - dist_sq.sqrt()) / min_dist.max(1.0);
+                    acc += dir * overlap;
+                }
+            });
+            if acc.length_squared() > 1e-5 {
+                let len = acc.length().min(1.5);
+                pushes[i] = acc.normalize_or_zero() * (ENEMY_SEPARATION_SPEED * len * dt);
+            }
+        }
+        for (i, push) in pushes.into_iter().enumerate() {
+            if push.length_squared() > 1e-6 {
+                move_on_globe(&mut self.enemies[i].pos, push);
+            }
+        }
+    }
+
+    /// Clears excess crowd density when a major boss materializes so the boss arena
+    /// stays readable and beams aren't body-blocked by 1,000+ standing enemies.
+    fn clear_boss_entrance_crowd(&mut self, boss_pos: Vec2) {
+        let target_regular = BOSS_SPAWN_SOFT_CAP / 2;
+        if self.enemies.len() > BOSS_SPAWN_SOFT_CAP {
+            let player_pos = self.player.pos;
+            let mut regular_indices: Vec<(usize, f32)> = self
+                .enemies
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.mini_boss.is_none())
+                .map(|(i, e)| (i, globe_distance(player_pos, e.pos)))
+                .collect();
+            if regular_indices.len() > target_regular {
+                // Keep closest `target_regular` regular enemies (deterministic tie-break by index).
+                regular_indices.sort_by(|a, b| {
+                    a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0))
+                });
+                let mut keep = vec![true; self.enemies.len()];
+                let mut dissolved_particles = 0usize;
+                for &(idx, _) in &regular_indices[target_regular..] {
+                    keep[idx] = false;
+                    if dissolved_particles < 36 {
+                        let pos = self.enemies[idx].pos;
+                        let a = self.rng.angle();
+                        self.particles.push(Particle {
+                            pos,
+                            vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(60.0, 180.0),
+                            life: 0.0,
+                            max_life: self.rng.range(0.25, 0.55),
+                            color: [0.75, 0.55, 1.0],
+                            size: self.rng.range(2.0, 4.5),
+                        });
+                        dissolved_particles += 1;
+                    }
+                }
+                let mut i = 0usize;
+                self.enemies.retain(|_| {
+                    let k = keep[i];
+                    i += 1;
+                    k
+                });
+            }
+        }
+
+        // Radially push remaining non-miniboss enemies out of the boss telegraph zone.
+        for e in &mut self.enemies {
+            if e.mini_boss.is_some() {
+                continue;
+            }
+            let delta = nearest_globe_delta(boss_pos, e.pos);
+            let dist = delta.length();
+            if dist < BOSS_CLEAR_RADIUS {
+                let dir = if dist > 1e-3 {
+                    delta / dist
+                } else {
+                    Vec2::X
+                };
+                move_on_globe(&mut e.pos, dir * (BOSS_CLEAR_RADIUS - dist + 24.0));
+            }
+        }
+
+        // Dramatic visual arrival pulse + flash.
+        self.pulses.push(InterferencePulse {
+            pos: boss_pos,
+            life: 0.0,
+            max_life: 0.75,
+            max_radius: BOSS_CLEAR_RADIUS * 1.15,
+            kind: PulseKind::DashBlast,
+            damage_multiplier: 0.0,
+        });
+        self.screen_flash = self.screen_flash.max(0.65);
+        self.hit_stop_pulse = self.hit_stop_pulse.max(0.50);
+    }
+
+    fn maybe_spawn_endless_boss(&mut self) {
+        if !self.endless_mode || self.boss.is_some() || self.time < self.next_endless_boss_time {
+            return;
+        }
+        let cycle = self.endless_boss_cycle;
+        self.endless_boss_cycle += 1;
+        self.next_endless_boss_time = self.time + 150.0;
+        let hp_scale = 1.35_f32.powi((cycle + 1) as i32);
+
+        let angle = self.rng.angle();
+        let dir = Vec2::new(angle.cos(), angle.sin());
+        let mut pos = self.player.pos;
+        move_on_globe(&mut pos, dir * self.screen_size.length() * 0.48);
+
+        match cycle % 3 {
+            0 => {
+                let hp = SENTINEL_HP * 4.5 * hp_scale;
+                self.boss = Some(Boss {
+                    kind: BossKind::Sentinel,
+                    pos,
+                    radius: SENTINEL_RADIUS,
+                    hp,
+                    max_hp: hp,
+                    speed: 0.0,
+                    contact_damage: 0.0,
+                    state: BossState::Telegraphing,
+                    state_timer: BOSS_TELEGRAPH_TIME,
+                    active_time: 0.0,
+                    phase: 0,
+                    shield_angle: self.rng.angle(),
+                    shield_hp: [SENTINEL_SHIELD_HP * 2.5 * hp_scale; 3],
+                    lobe_hp: [0.0; 3],
+                    lobe_alive: [false; 3],
+                    lobe_orbit: 0.0,
+                    fire_timer: 0.0,
+                });
+            }
+            1 => {
+                let lobe = HYDRA_HP_PER_LOBE * 2.2 * hp_scale;
+                let total_hp = lobe * 3.0;
+                self.boss = Some(Boss {
+                    kind: BossKind::Hydra,
+                    pos,
+                    radius: HYDRA_ORBIT_RADIUS + HYDRA_LOBE_RADIUS,
+                    hp: total_hp,
+                    max_hp: total_hp,
+                    speed: HYDRA_BODY_SPEED * 1.15,
+                    contact_damage: HYDRA_CONTACT_DAMAGE * 1.25,
+                    state: BossState::Telegraphing,
+                    state_timer: BOSS_TELEGRAPH_TIME,
+                    active_time: 0.0,
+                    phase: 0,
+                    shield_angle: 0.0,
+                    shield_hp: [0.0; 3],
+                    lobe_hp: [lobe; 3],
+                    lobe_alive: [true; 3],
+                    lobe_orbit: self.rng.angle(),
+                    fire_timer: HYDRA_FIRE_INTERVAL * 0.5,
+                });
+            }
+            _ => {
+                let hp = VOID_PRISM_HP * 1.15 * hp_scale;
+                self.boss = Some(Boss {
+                    kind: BossKind::VoidPrism,
+                    pos,
+                    radius: VOID_PRISM_RADIUS,
+                    hp,
+                    max_hp: hp,
+                    speed: 0.0,
+                    contact_damage: 0.0,
+                    state: BossState::Telegraphing,
+                    state_timer: BOSS_TELEGRAPH_TIME,
+                    active_time: 0.0,
+                    phase: 0,
+                    shield_angle: 0.0,
+                    shield_hp: [0.0; 3],
+                    lobe_hp: [0.0; 3],
+                    lobe_alive: [false; 3],
+                    lobe_orbit: 0.0,
+                    fire_timer: VOID_PRISM_SHOCKWAVE_INTERVAL_P1,
+                });
+            }
+        }
+        self.projectiles.clear();
+        self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
+        self.shake_amount += 10.0;
+        self.audio_event_bits |= AUDIO_BOSS_SPAWN;
+        self.clear_boss_entrance_crowd(pos);
     }
 
     // Progression accessors (exposed to JS through lib.rs).
@@ -940,6 +1283,8 @@ impl Game {
                 UpgradeOffer::Evolution(evolution) => {
                     self.inventory.unlock_evolution(evolution);
                     self.spawn_evolution_particles(evolution);
+                    self.audio_event_bits |= AUDIO_EVOLUTION;
+                    self.screen_flash = self.screen_flash.max(0.75);
                 }
             }
             self.record_new_synergies();
@@ -1121,14 +1466,28 @@ impl Game {
         self.audio_kill_count = 0;
         self.audio_gem_count = 0;
         self.audio_event_bits = 0;
+        self.hit_stop_pulse = 0.0;
 
         if self.leveling_up || self.dead {
+            self.raw_popups.clear();
+            self.popup_buf.clear();
             return;
         }
 
         self.time += dt;
         self.record_rank_timeline();
         self.hit_flash_positions.clear();
+        self.raw_popups.clear();
+
+        // Decay visual flashes & kill streak combo timer.
+        self.screen_flash = (self.screen_flash - dt * 2.6).max(0.0);
+        self.damage_flash = (self.damage_flash - dt * 3.2).max(0.0);
+        if self.kill_streak_timer > 0.0 {
+            self.kill_streak_timer = (self.kill_streak_timer - dt).max(0.0);
+            if self.kill_streak_timer <= 0.0 {
+                self.kill_streak = 0;
+            }
+        }
 
         // i-frame cooldown.
         if self.player.iframe_timer > 0.0 {
@@ -1268,6 +1627,7 @@ impl Game {
         self.maybe_spawn_sentinel();
         self.maybe_spawn_hydra();
         self.maybe_spawn_void_prism();
+        self.maybe_spawn_endless_boss();
         self.update_boss(dt);
         self.update_void_shockwaves(dt);
 
@@ -1471,6 +1831,11 @@ impl Game {
                 }
             }
         }
+
+        // Spatial-grid O(N) soft separation so swarms flow like liquid geometry.
+        self.rebuild_spatial_grid();
+        self.separate_enemies(dt);
+        self.rebuild_spatial_grid();
 
         self.void_shells.extend(new_void_shells);
 
@@ -2077,6 +2442,7 @@ impl Game {
         }
 
         // Death resolution — loop so that Cascade chain-kills propagate.
+        let kills_before_frame = self.kills_total;
         let mut cascade_depth: u32 = 0;
         loop {
             let mut dying: Vec<usize> = (0..self.enemies.len())
@@ -2107,6 +2473,11 @@ impl Game {
                 break;
             }
         }
+        let kills_this_frame = self.kills_total.saturating_sub(kills_before_frame);
+        if kills_this_frame >= 6 {
+            self.hit_stop_pulse = self.hit_stop_pulse.max(0.42);
+            self.screen_flash = self.screen_flash.max(0.24);
+        }
         if self
             .boss
             .as_ref()
@@ -2115,8 +2486,8 @@ impl Game {
             self.start_boss_death();
         }
 
-        // Session victory (survived 15 minutes).
-        if self.time >= SESSION_LENGTH && !self.dead {
+        // Session victory (survived 15 minutes — skipped once player chooses Endless Mode).
+        if !self.endless_mode && self.time >= SESSION_LENGTH && !self.dead {
             self.dead = true;
             self.score = self.compute_score() + 500; // survival bonus
             self.build_draw_buffers();
@@ -2130,6 +2501,9 @@ impl Game {
             p.vel *= (1.0 - 2.2 * dt).max(0.0);
         }
         self.particles.retain(|p| p.life < p.max_life);
+
+        // Keep live HUD score current during the run.
+        self.score = self.compute_score();
 
         self.build_draw_buffers();
     }
@@ -2170,6 +2544,7 @@ impl Game {
         self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
         self.shake_amount += 8.0;
         self.audio_event_bits |= AUDIO_BOSS_SPAWN;
+        self.clear_boss_entrance_crowd(pos);
     }
 
     fn maybe_spawn_hydra(&mut self) {
@@ -2205,6 +2580,7 @@ impl Game {
         self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
         self.shake_amount += 8.0;
         self.audio_event_bits |= AUDIO_BOSS_SPAWN;
+        self.clear_boss_entrance_crowd(pos);
     }
 
     fn maybe_spawn_void_prism(&mut self) {
@@ -2239,6 +2615,7 @@ impl Game {
         self.boss_breather_timer = BOSS_TELEGRAPH_TIME;
         self.shake_amount += 10.0;
         self.audio_event_bits |= AUDIO_BOSS_SPAWN;
+        self.clear_boss_entrance_crowd(pos);
     }
 
     fn hydra_lobe_pos(boss: &Boss, i: usize) -> Vec2 {
@@ -2706,8 +3083,11 @@ impl Game {
         self.boss_kills += 1;
         self.boss_breather_timer = BOSS_POST_BREATHER;
         self.shake_amount += 18.0;
+        self.screen_flash = self.screen_flash.max(0.90);
+        self.hit_stop_pulse = self.hit_stop_pulse.max(0.85);
+        self.push_popup(boss.pos, boss.max_hp.min(99999.0), POPUP_BREAK);
 
-        if boss.kind == BossKind::VoidPrism && !self.dead {
+        if boss.kind == BossKind::VoidPrism && !self.dead && !self.endless_mode {
             self.void_victory = true;
             self.dead = true;
             self.score = self.compute_score() + 1000;
@@ -2849,6 +3229,9 @@ impl Game {
 
     fn fire_shield_break_burst(&mut self, shield_pos: Vec2) {
         self.audio_event_bits |= AUDIO_SHIELD_BREAK;
+        self.screen_flash = self.screen_flash.max(0.55);
+        self.hit_stop_pulse = self.hit_stop_pulse.max(0.60);
+        self.push_popup(shield_pos, SENTINEL_SHIELD_HP, POPUP_BREAK);
         let damage_scale = 1.0 + self.rank_pressure() * BOSS_WEAPON_DAMAGE_RANK_MULT;
         for i in 0..BOSS_SHIELD_BURST_COUNT {
             let angle = (i as f32 / BOSS_SHIELD_BURST_COUNT as f32) * std::f32::consts::TAU;
@@ -2943,14 +3326,23 @@ impl Game {
         boss_mult: f32,
     ) -> u32 {
         let mut hits = 0;
-        for e in &mut self.enemies {
+        let origin_local = nearest_globe_delta(self.player.pos, origin);
+        let mut candidates: Vec<usize> = Vec::new();
+        self.spatial.query_circle(origin_local, radius, |idx| {
+            if idx < self.enemies.len() {
+                candidates.push(idx);
+            }
+        });
+        for idx in candidates {
+            let e = &mut self.enemies[idx];
             if e.hp <= 0.0 {
                 continue;
             }
             let d = globe_distance(e.pos, origin);
             if d <= radius + e.radius {
                 let falloff = (1.0 - d / radius.max(1.0)).clamp(0.0, 1.0);
-                e.hp -= damage * (0.45 + 0.55 * falloff);
+                let dealt = damage * (0.45 + 0.55 * falloff);
+                e.hp -= dealt;
                 if impulse.abs() > 0.0 && d > 1.0 {
                     let away = nearest_globe_delta(origin, e.pos).normalize_or_zero();
                     let dir = if impulse >= 0.0 { away } else { -away };
@@ -2959,7 +3351,10 @@ impl Game {
                 if slow_duration > 0.0 {
                     e.slow_timer = e.slow_timer.max(slow_duration * (0.45 + 0.55 * falloff));
                 }
-                self.hit_flash_positions.push(e.pos);
+                let epos = e.pos;
+                self.total_damage_dealt += dealt;
+                self.hit_flash_positions.push(epos);
+                self.push_popup(epos, dealt, if dealt >= 95.0 { POPUP_CRIT } else { POPUP_NORMAL });
                 hits += 1;
             }
         }
@@ -3610,28 +4005,51 @@ impl Game {
             .inventory
             .has_synergy(ShardKind::Split, ShardKind::Frost);
 
-        // Primary damage pass.
-        for e in &mut self.enemies {
+        // Primary damage pass (spatial-grid accelerated broadphase).
+        let player_origin = self.player.pos;
+        let a_local = nearest_globe_delta(player_origin, start);
+        let b_local = nearest_globe_delta(player_origin, end);
+        let mut candidates: Vec<usize> = Vec::new();
+        self.spatial
+            .query_segment(a_local, b_local, req.thickness * 0.5, |idx| {
+                if idx < self.enemies.len() {
+                    candidates.push(idx);
+                }
+            });
+        let heavy_shot = req.damage >= 90.0;
+        for idx in candidates {
+            let e = &mut self.enemies[idx];
             if capsule_circle_intersect_globe(start, end, req.thickness * 0.5, e.pos, e.radius) {
+                let is_blizzard_crit = blizzard && e.slow_timer > 0.0;
                 let mut dmg = req.damage;
-                if blizzard && e.slow_timer > 0.0 {
+                if is_blizzard_crit {
                     dmg *= 1.4;
                 }
                 e.hp -= dmg;
-                hit_count += 1;
-                self.hit_flash_positions.push(e.pos);
-                if diffract > 0 {
-                    impacts.push(e.pos);
-                }
+                let epos = e.pos;
                 // Frost: slow enemies on hit.
                 if frost > 0 {
                     e.slow_timer = FROST_SLOW_DURATION * frost as f32;
+                }
+                self.total_damage_dealt += dmg;
+                hit_count += 1;
+                self.hit_flash_positions.push(epos);
+                let pkind = if is_blizzard_crit || heavy_shot {
+                    POPUP_CRIT
+                } else {
+                    POPUP_NORMAL
+                };
+                self.push_popup(epos, dmg, pkind);
+                if diffract > 0 {
+                    impacts.push(epos);
                 }
             }
         }
         if let Some((impact, shield_broken)) =
             self.damage_boss_with_beam(start, end, req.thickness * 0.5, req.damage)
         {
+            self.total_damage_dealt += req.damage;
+            self.push_popup(impact, req.damage, POPUP_CRIT);
             hit_count += 1;
             if diffract > 0 {
                 impacts.push(impact);
@@ -3645,7 +4063,12 @@ impl Game {
         if siphon > 0 && hit_count > 0 {
             let heal = (SIPHON_HEAL_PER_HIT * siphon as f32 * hit_count as f32)
                 .min(SIPHON_MAX_HEAL_PER_SALVO);
+            let before = self.player.hp;
             self.player.hp = (self.player.hp + heal).min(self.player.max_hp);
+            let actual = self.player.hp - before;
+            if actual >= 1.0 {
+                self.push_popup(self.player.pos, actual, POPUP_HEAL);
+            }
         }
 
         // Primary visual.
@@ -3692,7 +4115,17 @@ impl Game {
                 let dir = Vec2::new(a.cos(), a.sin());
                 let end = tangent_endpoint_on_globe(impact, dir * diffract_reach);
 
-                for e in &mut self.enemies {
+                let da_local = nearest_globe_delta(player_origin, impact);
+                let db_local = nearest_globe_delta(player_origin, end);
+                let mut sub_candidates: Vec<usize> = Vec::new();
+                self.spatial
+                    .query_segment(da_local, db_local, diffract_thick * 0.5, |idx| {
+                        if idx < self.enemies.len() {
+                            sub_candidates.push(idx);
+                        }
+                    });
+                for idx in sub_candidates {
+                    let e = &mut self.enemies[idx];
                     if capsule_circle_intersect_globe(
                         impact,
                         end,
@@ -3701,6 +4134,7 @@ impl Game {
                         e.radius,
                     ) {
                         e.hp -= DIFFRACT_MINI_DAMAGE;
+                        self.total_damage_dealt += DIFFRACT_MINI_DAMAGE;
                     }
                 }
                 self.damage_boss_with_secondary_beam(
@@ -3735,6 +4169,15 @@ impl Game {
         self.kills_total += 1;
         self.kills_by_kind[kind as usize] = self.kills_by_kind[kind as usize].saturating_add(1);
         self.audio_kill_count += 1;
+        self.kill_streak = self.kill_streak.saturating_add(1);
+        self.kill_streak_timer = KILL_STREAK_WINDOW;
+        if self.kill_streak > self.peak_kill_streak {
+            self.peak_kill_streak = self.kill_streak;
+        }
+        if matches!(self.kill_streak, 10 | 25 | 50 | 100 | 250 | 500) {
+            self.audio_event_bits |= AUDIO_STREAK_MILESTONE;
+            self.screen_flash = self.screen_flash.max(0.32);
+        }
         self.spawn_death_particles(pos, kind);
 
         if let Some(mini_boss) = mini_boss {
@@ -4046,6 +4489,7 @@ impl Game {
             self.peak_rank = self.peak_rank.max(self.rank);
             self.record_rank_timeline();
             self.audio_event_bits |= AUDIO_RANK_UP;
+            self.screen_flash = self.screen_flash.max(0.55);
             let prism_heart = self.inventory.level(ShardKind::PrismHeart) as f32;
             let heal = (20.0 - self.rank as f32 * 1.0).max(5.0)
                 * (1.0 + prism_heart * PRISM_HEART_HEAL_MULT_PER_LEVEL);
@@ -4157,6 +4601,7 @@ impl Game {
             if self.player.hp <= 0.0 && self.death_cause.is_none() {
                 self.death_cause = Some(source);
             }
+            self.damage_flash = self.damage_flash.max(0.95);
             self.audio_event_bits |= AUDIO_PLAYER_HIT;
         }
 
@@ -4674,9 +5119,20 @@ impl Game {
     fn build_draw_buffers(&mut self) {
         self.circle_buf.clear();
         self.beam_buf.clear();
+        self.popup_buf.clear();
         let camera = self.camera;
 
-        // Blizzard frost fields — icy blue slow zones on the ground.
+        for &(world_pos, value, kind) in &self.raw_popups {
+            let pos = nearest_globe_pos(camera, world_pos);
+            self.popup_buf.push(DamagePopup {
+                x: pos.x,
+                y: pos.y,
+                value,
+                kind,
+            });
+        }
+
+        // Blizzard frost fields — icy blue slow zones with crystalline hex core.
         for f in &self.frost_fields {
             let t = f.life / f.max_life;
             let fade = (1.0 - t).powf(0.6); // linger bright, then fade
@@ -4686,24 +5142,26 @@ impl Game {
                 y: pos.y,
                 radius: f.radius,
                 r: 0.35,
-                g: 0.75,
+                g: 0.78,
                 b: 1.0,
-                a: 0.18 * fade,
-                glow: 0.6 * fade,
+                a: 0.24 * fade,
+                glow: 0.8 * fade,
+                shape: SHAPE_RING,
             });
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: f.radius * 0.3,
+                radius: f.radius * 0.32,
                 r: 0.6,
-                g: 0.92,
+                g: 0.94,
                 b: 1.0,
                 a: 0.45 * fade,
                 glow: 1.8 * fade,
+                shape: SHAPE_HEX,
             });
         }
 
-        // Ground pulses underneath everything else.
+        // Ground pulses underneath everything else — crisp optical wave rings!
         let singularity_visual = self.inventory.has_evolution(EvolutionKind::Singularity);
         for p in &self.pulses {
             let t = p.life / p.max_life;
@@ -4716,23 +5174,25 @@ impl Game {
                         x: pos.x,
                         y: pos.y,
                         radius: r,
-                        r: if singularity_visual { 0.25 } else { 0.4 },
-                        g: if singularity_visual { 0.18 } else { 0.55 },
+                        r: if singularity_visual { 0.36 } else { 0.42 },
+                        g: if singularity_visual { 0.22 } else { 0.72 },
                         b: 1.0,
-                        a: if singularity_visual { 0.35 } else { 0.20 } * fade,
-                        glow: (if singularity_visual { 1.4 } else { 0.9 }) * fade,
+                        a: if singularity_visual { 0.72 } else { 0.56 } * fade,
+                        glow: (if singularity_visual { 1.8 } else { 1.3 }) * fade,
+                        shape: SHAPE_RING,
                     });
                     // Singularity: dark absorption core grows as the ring expands.
                     if singularity_visual {
                         self.circle_buf.push(CircleInstance {
                             x: pos.x,
                             y: pos.y,
-                            radius: (r * 0.38).max(6.0),
-                            r: 0.06,
-                            g: 0.04,
-                            b: 0.18,
-                            a: 0.85 * fade,
-                            glow: 0.0,
+                            radius: (r * 0.34).max(6.0),
+                            r: 0.14,
+                            g: 0.08,
+                            b: 0.42,
+                            a: 0.78 * fade,
+                            glow: 0.2,
+                            shape: SHAPE_HEX,
                         });
                     }
                 }
@@ -4742,21 +5202,23 @@ impl Game {
                         x: pos.x,
                         y: pos.y,
                         radius: r,
-                        r: 0.18,
-                        g: 0.96 * pulse,
-                        b: 0.58,
-                        a: 0.18 * fade,
-                        glow: 1.35 * fade,
+                        r: 0.22,
+                        g: 1.0 * pulse,
+                        b: 0.62,
+                        a: 0.52 * fade,
+                        glow: 1.55 * fade,
+                        shape: SHAPE_RING,
                     });
                     self.circle_buf.push(CircleInstance {
                         x: pos.x,
                         y: pos.y,
                         radius: (r * 0.18).max(7.0),
                         r: 1.0,
-                        g: 0.72,
-                        b: 0.24,
-                        a: 0.62 * fade,
+                        g: 0.76,
+                        b: 0.26,
+                        a: 0.78 * fade,
                         glow: 2.4 * fade,
+                        shape: SHAPE_HEX,
                     });
                     let glyph_r = (r * 0.43).max(12.0);
                     let spin = self.time * 3.2 + p.pos.x * 0.002 + p.pos.y * 0.003;
@@ -4778,12 +5240,13 @@ impl Game {
                         self.circle_buf.push(CircleInstance {
                             x: node.x,
                             y: node.y,
-                            radius: 4.5 + 2.0 * fade,
+                            radius: 4.8 + 2.0 * fade,
                             r: 0.5,
                             g: 1.0,
                             b: 0.72,
-                            a: 0.78 * fade,
+                            a: 0.84 * fade,
                             glow: 2.0 * fade,
+                            shape: SHAPE_DIAMOND,
                         });
                     }
                 }
@@ -4792,21 +5255,23 @@ impl Game {
                         x: pos.x,
                         y: pos.y,
                         radius: r,
-                        r: 0.48,
+                        r: 0.52,
                         g: 1.0,
-                        b: 0.94,
-                        a: 0.20 * fade,
-                        glow: 1.8 * fade,
+                        b: 0.96,
+                        a: 0.74 * fade,
+                        glow: 2.2 * fade,
+                        shape: SHAPE_RING,
                     });
                     self.circle_buf.push(CircleInstance {
                         x: pos.x,
                         y: pos.y,
-                        radius: (r * 0.46).max(9.0),
-                        r: 1.0,
-                        g: 1.0,
+                        radius: (r * 0.62).max(10.0),
+                        r: 0.85,
+                        g: 0.96,
                         b: 1.0,
-                        a: 0.25 * fade,
-                        glow: 0.7 * fade,
+                        a: 0.44 * fade,
+                        glow: 1.1 * fade,
+                        shape: SHAPE_RING,
                     });
                 }
             }
@@ -4818,7 +5283,6 @@ impl Game {
             let alt = self.player.altitude;
             move_on_globe(&mut shadow_pos, Vec2::new(-18.0, 24.0) * alt);
             let pos = nearest_globe_pos(camera, shadow_pos);
-            // Outer diffuse shadow (cast area shrinks as player rises).
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
@@ -4828,8 +5292,8 @@ impl Game {
                 b: 0.04,
                 a: alt * 0.26,
                 glow: 0.0,
+                shape: SHAPE_ORB,
             });
-            // Inner sharp occlusion directly below.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
@@ -4839,6 +5303,7 @@ impl Game {
                 b: 0.0,
                 a: alt * 0.62,
                 glow: 0.0,
+                shape: SHAPE_ORB,
             });
         }
 
@@ -4885,12 +5350,13 @@ impl Game {
                 self.circle_buf.push(CircleInstance {
                     x: pos.x,
                     y: pos.y,
-                    radius: visual_r + 8.0,
+                    radius: visual_r + 10.0,
                     r: 0.5,
-                    g: 0.9,
+                    g: 0.92,
                     b: 1.0,
-                    a: 0.15,
-                    glow: 0.4,
+                    a: 0.36,
+                    glow: 0.7,
+                    shape: SHAPE_RING,
                 });
             }
 
@@ -4900,21 +5366,20 @@ impl Game {
                 self.circle_buf.push(CircleInstance {
                     x: pos.x,
                     y: pos.y,
-                    radius: visual_r + 12.0,
-                    r: 0.2,
-                    g: 0.75,
+                    radius: visual_r + 14.0,
+                    r: 0.25,
+                    g: 0.82,
                     b: 1.0,
-                    a: 0.18 * pulse,
-                    glow: (0.6 + (barrier_lvl + thorns_lvl) as f32 * 0.12) * pulse,
+                    a: 0.42 * pulse,
+                    glow: (0.8 + (barrier_lvl + thorns_lvl) as f32 * 0.14) * pulse,
+                    shape: SHAPE_RING,
                 });
             }
 
             // 1c. Orbiting emitter nodes for beam-modifying shards.
             if emitter_count > 0 {
-                // Fire rate proxy: base 1 rev/s, speed up with total levels.
                 let orbit_speed = 1.2 + total_levels as f32 * 0.04;
-                let orbit_r = 18.0;
-                // Mix color from active beam shards: cyan-to-violet based on chromatic presence.
+                let orbit_r = 19.0;
                 let chrom = self.inventory.level(ShardKind::Chromatic) as f32 / 6.0;
                 let node_r = 0.5 + chrom * 0.5;
                 let node_g = 0.9 - chrom * 0.4;
@@ -4929,12 +5394,13 @@ impl Game {
                     self.circle_buf.push(CircleInstance {
                         x: np.x,
                         y: np.y,
-                        radius: 3.5 + intensity * 1.5,
+                        radius: 4.2 + intensity * 1.6,
                         r: node_r,
                         g: node_g,
                         b: node_b,
-                        a: 0.85,
-                        glow: 1.8 + intensity * 1.0,
+                        a: 0.92,
+                        glow: 1.9 + intensity * 1.0,
+                        shape: SHAPE_DIAMOND,
                     });
                 }
             }
@@ -4943,7 +5409,7 @@ impl Game {
             if total_levels > 10 {
                 let inner_count = 6usize;
                 let inner_speed = 2.5 + total_levels as f32 * 0.05;
-                let inner_r = 11.0;
+                let inner_r = 12.0;
                 for i in 0..inner_count {
                     let angle = -self.time * inner_speed
                         + i as f32 * (std::f32::consts::TAU / inner_count as f32);
@@ -4954,19 +5420,20 @@ impl Game {
                     self.circle_buf.push(CircleInstance {
                         x: np.x,
                         y: np.y,
-                        radius: 2.0 + intensity * 0.8,
+                        radius: 2.6 + intensity * 0.9,
                         r: 0.8,
                         g: 1.0,
-                        b: 0.9,
-                        a: 0.6,
-                        glow: 1.2,
+                        b: 0.95,
+                        a: 0.72,
+                        glow: 1.3,
+                        shape: SHAPE_DIAMOND,
                     });
                 }
             }
 
             // 1e. 12-point geometric ring when any evolution active.
             if evolution_active {
-                let geo_r = 30.0 + (if kaleidoscope_active { 5.0 } else { 0.0 });
+                let geo_r = 31.0 + (if kaleidoscope_active { 5.0 } else { 0.0 });
                 let geo_count = 12usize;
                 let spin = self.time * 0.35;
                 for i in 0..geo_count {
@@ -4983,23 +5450,23 @@ impl Game {
                     self.circle_buf.push(CircleInstance {
                         x: np.x,
                         y: np.y,
-                        radius: 3.0,
+                        radius: 3.6,
                         r: cr,
                         g: cg,
                         b: cb,
-                        a: 0.75 + 0.25 * intensity,
-                        glow: 1.5 + intensity,
+                        a: 0.82 + 0.18 * intensity,
+                        glow: 1.7 + intensity,
+                        shape: SHAPE_DIAMOND,
                     });
                 }
             }
 
             // Targeting ring — dotted circle showing attack intent, design-spec dashed orbit.
-            // Rotates slowly; 12 dots spaced at 30° = visual dash pattern.
             {
                 let ring_r = 28.0;
                 let dot_count = 12usize;
-                let ring_alpha = (0.14 + intensity * 0.10).min(0.28);
-                let spin = self.time * 0.10;
+                let ring_alpha = (0.18 + intensity * 0.12).min(0.32);
+                let spin = self.time * 0.12;
                 for i in 0..dot_count {
                     let angle = spin + i as f32 * std::f32::consts::TAU / dot_count as f32;
                     let offset = Vec2::new(angle.cos(), angle.sin()) * ring_r;
@@ -5007,89 +5474,97 @@ impl Game {
                     move_on_globe(&mut dot_world, offset);
                     let dp = nearest_globe_pos(camera, dot_world);
                     self.circle_buf.push(CircleInstance {
-                        x: dp.x, y: dp.y,
-                        radius: 1.2,
-                        r: 0.66, g: 0.92, b: 1.0,
+                        x: dp.x,
+                        y: dp.y,
+                        radius: 1.4,
+                        r: 0.66,
+                        g: 0.94,
+                        b: 1.0,
                         a: ring_alpha,
-                        glow: 0.0, // crisp dot, no halo
+                        glow: 0.15,
+                        shape: SHAPE_DIAMOND,
                     });
                 }
             }
 
-            // Soft lantern aura — the player is the brightest ambient light source.
+            // Soft lantern aura — restrained so faceted prism crystal reads cleanly.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: visual_r * 2.3,
-                r: 0.75,
-                g: 0.95,
+                radius: visual_r * 2.6,
+                r: 0.45,
+                g: 0.88,
                 b: 1.0,
-                a: 0.10,
-                glow: 1.3 + intensity * 0.5,
+                a: 0.07,
+                glow: 0.95 + intensity * 0.4,
+                shape: SHAPE_ORB,
             });
 
-            // Core player circle — bright cyan-white.
+            // Core player body — spinning faceted prismatic crystal!
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: visual_r,
-                r: 0.9,
-                g: 1.0,
+                radius: visual_r * 1.65,
+                r: 0.72,
+                g: 0.96,
                 b: 1.0,
                 a: 1.0,
-                glow: 3.0 + self.player.altitude * 1.5 + intensity * 0.6,
+                glow: 1.45 + self.player.altitude * 0.8 + intensity * 0.45,
+                shape: SHAPE_PRISM,
             });
 
-            // Halo enhancement: if Halo is owned make core even brighter.
+            // Halo enhancement: bright crystalline center when Halo is owned.
             if halo_lvl > 0 {
                 self.circle_buf.push(CircleInstance {
                     x: pos.x,
                     y: pos.y,
-                    radius: visual_r * 0.55,
+                    radius: visual_r * 0.62,
                     r: 1.0,
-                    g: 1.0,
-                    b: 0.9,
-                    a: 0.9,
-                    glow: 2.0 + halo_lvl as f32 * 0.5,
+                    g: 0.98,
+                    b: 0.85,
+                    a: 0.92,
+                    glow: 2.0 + halo_lvl as f32 * 0.45,
+                    shape: SHAPE_DIAMOND,
                 });
             }
         }
 
-        // Altitude ring — subtle horizon line at jump peak.
+        // Altitude ring — crisp horizon ring at jump peak.
         if self.player.altitude > 0.05 {
             let pos = nearest_globe_pos(camera, self.player.pos);
             let ring_r =
-                self.player.radius * PLAYER_VISUAL_SCALE * (1.0 + self.player.altitude * 0.45) + 7.0;
+                self.player.radius * PLAYER_VISUAL_SCALE * (1.0 + self.player.altitude * 0.45) + 9.0;
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
                 radius: ring_r,
-                r: 0.55,
-                g: 0.88,
+                r: 0.58,
+                g: 0.92,
                 b: 1.0,
-                a: self.player.altitude * 0.35,
-                glow: 0.0,
+                a: self.player.altitude * 0.65,
+                glow: 0.9,
+                shape: SHAPE_RING,
             });
         }
 
         // HP ring around player.
         let hp_frac = self.player.hp / self.player.max_hp;
         if hp_frac < 1.0 {
-            // Red-tinged ring, dimmer as health decreases.
             let pos = nearest_globe_pos(camera, self.player.pos);
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: self.player.radius + 4.0,
-                r: 1.0 - hp_frac * 0.5,
+                radius: self.player.radius * PLAYER_VISUAL_SCALE + 6.0,
+                r: 1.0 - hp_frac * 0.45,
                 g: hp_frac * 0.8,
                 b: hp_frac * 0.5,
-                a: 0.3 + (1.0 - hp_frac) * 0.3,
-                glow: 1.0 + (1.0 - hp_frac) * 1.5,
+                a: 0.45 + (1.0 - hp_frac) * 0.4,
+                glow: 1.2 + (1.0 - hp_frac) * 1.4,
+                shape: SHAPE_RING,
             });
         }
 
-        // Halos.
+        // Halos — luminous golden crystal diamonds.
         for h in &self.halos {
             let mut p = self.player.pos;
             move_on_globe(&mut p, Vec2::new(h.angle.cos(), h.angle.sin()) * h.radius);
@@ -5097,16 +5572,17 @@ impl Game {
             self.circle_buf.push(CircleInstance {
                 x: p.x,
                 y: p.y,
-                radius: h.size,
+                radius: h.size * 1.25,
                 r: 1.0,
-                g: 0.95,
-                b: 0.7,
+                g: 0.94,
+                b: 0.62,
                 a: 1.0,
                 glow: 2.2,
+                shape: SHAPE_DIAMOND,
             });
         }
 
-        // Barrier shield ring.
+        // Barrier shield ring — crisp glowing optical bubble rim!
         if self.player.barrier_max > 0.0 {
             let fill = self.player.barrier_hp / self.player.barrier_max;
             let pos = nearest_globe_pos(camera, self.player.pos);
@@ -5114,11 +5590,12 @@ impl Game {
                 x: pos.x,
                 y: pos.y,
                 radius: BARRIER_RADIUS,
-                r: 0.3,
-                g: 0.7,
+                r: 0.34,
+                g: 0.78,
                 b: 1.0,
-                a: 0.12 * fill,
-                glow: 0.8 * fill,
+                a: 0.36 * fill,
+                glow: 1.2 * fill,
+                shape: SHAPE_RING,
             });
         }
 
@@ -5142,8 +5619,9 @@ impl Game {
                             r: 1.0,
                             g: 0.95,
                             b: 0.75,
-                            a: 0.10 + t * 0.18,
-                            glow: 2.0 + t * 4.0,
+                            a: 0.40 + t * 0.35,
+                            glow: 2.4 + t * 3.5,
+                            shape: SHAPE_RING,
                         });
                         self.circle_buf.push(CircleInstance {
                             x: pos.x,
@@ -5152,36 +5630,39 @@ impl Game {
                             r: 1.0,
                             g: 1.0,
                             b: 1.0,
-                            a: 0.65,
-                            glow: 4.0,
+                            a: 0.72,
+                            glow: 3.8,
+                            shape: SHAPE_STAR,
                         });
                     }
                     BossState::Active | BossState::Dying => {
                         let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
                         let (r, g, b, glow) = match boss.phase {
-                            0 => (1.0_f32, 0.96, 0.88, 4.0_f32),
-                            1 => (1.0, 0.48, 0.18, 4.8),
-                            _ => (1.0, 0.12, 0.12, 5.5),
+                            0 => (1.0_f32, 0.96, 0.88, 3.6_f32),
+                            1 => (1.0, 0.48, 0.18, 4.4),
+                            _ => (1.0, 0.14, 0.14, 5.0),
                         };
                         self.circle_buf.push(CircleInstance {
                             x: pos.x,
                             y: pos.y,
-                            radius: boss.radius + 8.0,
+                            radius: boss.radius + 10.0,
                             r,
                             g,
                             b,
-                            a: 0.18 * dying_alpha,
+                            a: 0.50 * dying_alpha,
                             glow: glow * 1.1 * dying_alpha,
+                            shape: SHAPE_RING,
                         });
                         self.circle_buf.push(CircleInstance {
                             x: pos.x,
                             y: pos.y,
-                            radius: boss.radius,
+                            radius: boss.radius * 1.08,
                             r,
                             g,
                             b,
-                            a: (0.72 + hp_pct * 0.18) * dying_alpha,
+                            a: (0.78 + hp_pct * 0.18) * dying_alpha,
                             glow: glow * dying_alpha,
+                            shape: SHAPE_STAR,
                         });
                         if boss.state == BossState::Active {
                             for i in 0..boss.shield_hp.len() {
@@ -5196,130 +5677,130 @@ impl Game {
                                     y: sp.y,
                                     radius: SENTINEL_SHIELD_RADIUS + 4.0 * shield_fill,
                                     r: 0.55,
-                                    g: 0.9,
+                                    g: 0.92,
                                     b: 1.0,
-                                    a: 0.55 + shield_fill * 0.25,
-                                    glow: 3.0 + shield_fill * 2.0,
+                                    a: 0.70 + shield_fill * 0.25,
+                                    glow: 3.0 + shield_fill * 1.8,
+                                    shape: SHAPE_HEX,
                                 });
                             }
                         }
                     }
                 },
-                BossKind::Hydra => {
-                    match boss.state {
-                        BossState::Telegraphing => {
-                            let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
-                            for i in 0..3usize {
-                                let lp = nearest_globe_pos(camera, Self::hydra_lobe_pos(boss, i));
-                                let [r, g, b] = HYDRA_LOBE_COLORS[i];
-                                self.circle_buf.push(CircleInstance {
-                                    x: lp.x,
-                                    y: lp.y,
-                                    radius: HYDRA_LOBE_RADIUS * (0.4 + t * 0.6),
-                                    r,
-                                    g,
-                                    b,
-                                    a: 0.30 + t * 0.45,
-                                    glow: 2.0 + t * 3.5,
-                                });
-                            }
-                        }
-                        BossState::Active | BossState::Dying => {
-                            // Dim center orb.
+                BossKind::Hydra => match boss.state {
+                    BossState::Telegraphing => {
+                        let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
+                        for i in 0..3usize {
+                            let lp = nearest_globe_pos(camera, Self::hydra_lobe_pos(boss, i));
+                            let [r, g, b] = HYDRA_LOBE_COLORS[i];
                             self.circle_buf.push(CircleInstance {
-                                x: pos.x,
-                                y: pos.y,
-                                radius: HYDRA_LOBE_RADIUS * 0.6,
-                                r: 0.5,
-                                g: 0.5,
-                                b: 0.5,
-                                a: 0.22 * dying_alpha,
-                                glow: 1.2 * dying_alpha,
+                                x: lp.x,
+                                y: lp.y,
+                                radius: HYDRA_LOBE_RADIUS * (0.4 + t * 0.7),
+                                r,
+                                g,
+                                b,
+                                a: 0.36 + t * 0.45,
+                                glow: 2.0 + t * 3.2,
+                                shape: SHAPE_HEX,
                             });
-                            // Living lobes.
-                            for i in 0..3usize {
-                                if boss.lobe_hp[i] <= 0.0 && boss.state != BossState::Dying {
-                                    continue;
-                                }
-                                let lobe_fill =
-                                    (boss.lobe_hp[i] / HYDRA_HP_PER_LOBE).clamp(0.0, 1.0);
-                                let lp = nearest_globe_pos(camera, Self::hydra_lobe_pos(boss, i));
-                                let [r, g, b] = HYDRA_LOBE_COLORS[i];
-                                self.circle_buf.push(CircleInstance {
-                                    x: lp.x,
-                                    y: lp.y,
-                                    radius: HYDRA_LOBE_RADIUS + 5.0 * lobe_fill,
-                                    r,
-                                    g,
-                                    b,
-                                    a: (0.55 + lobe_fill * 0.3) * dying_alpha,
-                                    glow: (3.5 + lobe_fill * 2.5) * dying_alpha,
-                                });
-                            }
                         }
                     }
-                }
+                    BossState::Active | BossState::Dying => {
+                        self.circle_buf.push(CircleInstance {
+                            x: pos.x,
+                            y: pos.y,
+                            radius: HYDRA_LOBE_RADIUS * 0.7,
+                            r: 0.65,
+                            g: 0.65,
+                            b: 0.75,
+                            a: 0.34 * dying_alpha,
+                            glow: 1.4 * dying_alpha,
+                            shape: SHAPE_STAR,
+                        });
+                        for i in 0..3usize {
+                            if boss.lobe_hp[i] <= 0.0 && boss.state != BossState::Dying {
+                                continue;
+                            }
+                            let lobe_fill = (boss.lobe_hp[i] / HYDRA_HP_PER_LOBE).clamp(0.0, 1.0);
+                            let lp = nearest_globe_pos(camera, Self::hydra_lobe_pos(boss, i));
+                            let [r, g, b] = HYDRA_LOBE_COLORS[i];
+                            self.circle_buf.push(CircleInstance {
+                                x: lp.x,
+                                y: lp.y,
+                                radius: HYDRA_LOBE_RADIUS + 5.0 * lobe_fill,
+                                r,
+                                g,
+                                b,
+                                a: (0.68 + lobe_fill * 0.28) * dying_alpha,
+                                glow: (3.2 + lobe_fill * 2.2) * dying_alpha,
+                                shape: SHAPE_HEX,
+                            });
+                        }
+                    }
+                },
                 BossKind::VoidPrism => {
                     let hp_pct = (boss.hp / boss.max_hp).clamp(0.0, 1.0);
                     match boss.state {
                         BossState::Telegraphing => {
                             let t = (1.0 - boss.state_timer / BOSS_TELEGRAPH_TIME).clamp(0.0, 1.0);
-                            // Dark pulsing void core materializing.
                             self.circle_buf.push(CircleInstance {
                                 x: pos.x,
                                 y: pos.y,
-                                radius: VOID_PRISM_RADIUS * (0.2 + t * 1.8),
-                                r: 0.6,
-                                g: 0.3,
+                                radius: VOID_PRISM_RADIUS * (0.3 + t * 1.7),
+                                r: 0.65,
+                                g: 0.32,
                                 b: 1.0,
-                                a: 0.08 + t * 0.14,
-                                glow: 1.5 + t * 5.0,
+                                a: 0.30 + t * 0.40,
+                                glow: 2.0 + t * 4.5,
+                                shape: SHAPE_RING,
                             });
                             self.circle_buf.push(CircleInstance {
                                 x: pos.x,
                                 y: pos.y,
-                                radius: VOID_PRISM_RADIUS * (0.35 + t * 0.65),
-                                r: 0.05,
-                                g: 0.0,
-                                b: 0.12,
-                                a: 0.55 + t * 0.35,
-                                glow: 2.0 + t * 3.0,
+                                radius: VOID_PRISM_RADIUS * (0.4 + t * 0.65),
+                                r: 0.25,
+                                g: 0.08,
+                                b: 0.55,
+                                a: 0.62 + t * 0.32,
+                                glow: 2.2 + t * 2.8,
+                                shape: SHAPE_PRISM,
                             });
                         }
                         BossState::Active | BossState::Dying => {
-                            let glow_base = if boss.phase == 1 { 6.0 } else { 4.5 };
-                            // Outer void aura — pale violet rim.
+                            let glow_base = if boss.phase == 1 { 5.2 } else { 4.0 };
                             self.circle_buf.push(CircleInstance {
                                 x: pos.x,
                                 y: pos.y,
                                 radius: boss.radius + 14.0,
-                                r: 0.7,
+                                r: 0.72,
                                 g: 0.35,
                                 b: 1.0,
-                                a: (0.12 + hp_pct * 0.08) * dying_alpha,
-                                glow: glow_base * 1.2 * dying_alpha,
+                                a: (0.45 + hp_pct * 0.25) * dying_alpha,
+                                glow: glow_base * 1.15 * dying_alpha,
+                                shape: SHAPE_RING,
                             });
-                            // Dark core body.
                             self.circle_buf.push(CircleInstance {
                                 x: pos.x,
                                 y: pos.y,
-                                radius: boss.radius,
-                                r: 0.04,
-                                g: 0.0,
-                                b: 0.10,
-                                a: (0.88 + hp_pct * 0.12) * dying_alpha,
+                                radius: boss.radius * 1.05,
+                                r: 0.24,
+                                g: 0.06,
+                                b: 0.52,
+                                a: (0.86 + hp_pct * 0.14) * dying_alpha,
                                 glow: glow_base * dying_alpha,
+                                shape: SHAPE_PRISM,
                             });
-                            // Bright inner rim ring.
                             self.circle_buf.push(CircleInstance {
                                 x: pos.x,
                                 y: pos.y,
-                                radius: boss.radius * 0.72,
-                                r: 0.8,
+                                radius: boss.radius * 0.66,
+                                r: 0.85,
                                 g: 0.55,
                                 b: 1.0,
-                                a: (0.35 + hp_pct * 0.25) * dying_alpha,
-                                glow: (glow_base * 0.8) * dying_alpha,
+                                a: (0.55 + hp_pct * 0.25) * dying_alpha,
+                                glow: (glow_base * 0.85) * dying_alpha,
+                                shape: SHAPE_STAR,
                             });
                         }
                     }
@@ -5327,7 +5808,7 @@ impl Game {
             }
         }
 
-        // Void shockwaves — expanding dark rings.
+        // Void shockwaves — crisp expanding violet wave rings.
         for sw in &self.void_shockwaves {
             let sw_pos = nearest_globe_pos(camera, sw.pos);
             let r = sw.current_radius();
@@ -5336,161 +5817,217 @@ impl Game {
                 x: sw_pos.x,
                 y: sw_pos.y,
                 radius: r,
-                r: 0.55,
-                g: 0.2,
-                b: 0.9,
-                a: fade * 0.22,
-                glow: 2.5 * fade,
+                r: 0.68,
+                g: 0.24,
+                b: 1.0,
+                a: fade * 0.72,
+                glow: 2.8 * fade,
+                shape: SHAPE_RING,
             });
-            if r > 8.0 {
+            if r > 12.0 {
                 self.circle_buf.push(CircleInstance {
                     x: sw_pos.x,
                     y: sw_pos.y,
-                    radius: r - 6.0,
-                    r: 0.04,
-                    g: 0.0,
-                    b: 0.08,
-                    a: fade * 0.30,
-                    glow: 1.0,
+                    radius: r - 8.0,
+                    r: 0.28,
+                    g: 0.06,
+                    b: 0.62,
+                    a: fade * 0.36,
+                    glow: 1.1,
+                    shape: SHAPE_RING,
                 });
             }
         }
 
-        // VoidShells — descending dark orbs with target warning rings.
+        // VoidShells — descending dark crystalline orbs with crisp telegraph rings.
         for s in &self.void_shells {
             let pos = nearest_globe_pos(camera, s.target);
-            let t = 1.0 - s.altitude; // 0.0 = just spawned, 1.0 = landing
-            let visual_r = s.radius * (3.5 - t * 2.5); // large at altitude, shrinks as it lands
+            let t = 1.0 - s.altitude;
+            let visual_r = s.radius * (3.5 - t * 2.5);
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
                 radius: visual_r,
-                r: 0.45,
-                g: 0.08,
-                b: 0.9,
-                a: 0.5 + t * 0.3,
-                glow: 2.5 - t * 1.0,
+                r: 0.52,
+                g: 0.12,
+                b: 1.0,
+                a: 0.62 + t * 0.3,
+                glow: 2.5 - t * 0.9,
+                shape: SHAPE_STAR,
             });
-            // Warning target ring grows brighter as shell approaches.
-            // Ring radius matches the landing damage radius so the telegraph is honest.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
                 radius: VOID_SHELL_LAND_RADIUS_DAMAGE,
-                r: 0.55,
-                g: 0.0,
-                b: 0.7,
-                a: t * 0.18,
-                glow: t * 0.5,
+                r: 0.72,
+                g: 0.12,
+                b: 0.92,
+                a: 0.22 + t * 0.45,
+                glow: 0.6 + t * 1.2,
+                shape: SHAPE_RING,
             });
         }
 
-        // Enemies — design-spec 3-layer rendering: atmospheric glow + crisp fill + white core.
-        // Layering on additive blend: outer wide halo → solid body (glow≈0 = crisp) → hot center.
+        // Enemies — distinct geometric SDF silhouettes by combat role.
         let hit_set: Vec<Vec2> = self.hit_flash_positions.clone();
         for e in &self.enemies {
             let pos = nearest_globe_pos(camera, e.pos);
             let is_hit = hit_set.iter().any(|h| globe_distance(*h, e.pos) < 1.0);
+            let body_shape = if e.mini_boss.is_some() {
+                SHAPE_STAR
+            } else {
+                match e.kind {
+                    EnemyKind::Drone | EnemyKind::Dasher | EnemyKind::Umbra => SHAPE_CHEVRON,
+                    EnemyKind::Brute | EnemyKind::Splitter => SHAPE_HEX,
+                    EnemyKind::Orbiter | EnemyKind::Emitter | EnemyKind::Pulsar => SHAPE_STAR,
+                }
+            };
 
             if is_hit {
-                // Hit flash: single bright white burst.
                 self.circle_buf.push(CircleInstance {
-                    x: pos.x, y: pos.y,
-                    radius: e.radius * 1.5,
-                    r: 1.0, g: 1.0, b: 1.0, a: 1.0,
-                    glow: 3.5,
+                    x: pos.x,
+                    y: pos.y,
+                    radius: e.radius * 1.55,
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                    glow: 3.6,
+                    shape: body_shape,
                 });
             } else {
                 let (er, eg, eb, base_alpha, glow_mult) = match e.state {
                     EnemyState::Telegraphing => {
-                        let flash = if (e.state_timer * 12.0) as u32 % 2 == 0 { 1.8 } else { 0.7 };
+                        let flash = if (e.state_timer * 12.0) as u32 % 2 == 0 {
+                            1.9
+                        } else {
+                            0.7
+                        };
                         (e.color[0], e.color[1], e.color[2], 1.0_f32, flash)
                     }
                     EnemyState::Pulsing => {
                         let pulse = (1.0 - e.state_timer / PULSAR_PULSE_TIME).clamp(0.0, 1.0);
-                        (1.0_f32, 0.95 + pulse * 0.05, 0.35 + pulse * 0.35,
-                         0.72 + pulse * 0.20, 1.8 + pulse * 3.0)
+                        (
+                            1.0_f32,
+                            0.95 + pulse * 0.05,
+                            0.35 + pulse * 0.35,
+                            0.76 + pulse * 0.20,
+                            1.8 + pulse * 3.0,
+                        )
                     }
                     _ if e.kind == EnemyKind::Umbra => {
                         let phase = (self.time * 2.7 + e.state_timer).sin() * 0.5 + 0.5;
-                        (e.color[0], e.color[1], e.color[2], 0.18 + phase * 0.62, 0.4 + phase * 2.0)
+                        (
+                            e.color[0],
+                            e.color[1],
+                            e.color[2],
+                            0.22 + phase * 0.62,
+                            0.4 + phase * 2.0,
+                        )
                     }
                     _ if e.kind == EnemyKind::Orbiter && e.state == EnemyState::Orbiting => {
-                        let collapse = (1.0 - (e.charge_dir.x - ORBITER_MIN_RADIUS) / 160.0).clamp(0.0, 1.0);
-                        (e.color[0], e.color[1], e.color[2], 1.0, 1.0 + collapse * 2.0)
+                        let collapse =
+                            (1.0 - (e.charge_dir.x - ORBITER_MIN_RADIUS) / 160.0).clamp(0.0, 1.0);
+                        (
+                            e.color[0],
+                            e.color[1],
+                            e.color[2],
+                            1.0,
+                            1.0 + collapse * 2.0,
+                        )
                     }
                     _ if e.mini_boss.is_some() => {
                         let pulse = (self.time * 4.5).sin() * 0.5 + 0.5;
-                        (e.color[0], e.color[1], e.color[2], 1.0, 1.6 + pulse * 2.2)
+                        (
+                            e.color[0],
+                            e.color[1],
+                            e.color[2],
+                            1.0,
+                            1.6 + pulse * 2.2,
+                        )
                     }
                     _ => (e.color[0], e.color[1], e.color[2], 1.0_f32, 1.0_f32),
                 };
 
-                // Layer 1: Atmospheric glow — restrained. Soft halo belongs to
-                // friendly light; threats read crisp and hot, not pillowy.
+                // Layer 1: Atmospheric glow.
                 self.circle_buf.push(CircleInstance {
-                    x: pos.x, y: pos.y,
+                    x: pos.x,
+                    y: pos.y,
                     radius: e.radius * 2.0,
-                    r: er, g: eg, b: eb,
+                    r: er,
+                    g: eg,
+                    b: eb,
                     a: base_alpha * 0.08,
-                    glow: glow_mult * 0.7,
+                    glow: glow_mult * 0.75,
+                    shape: SHAPE_ORB,
                 });
 
-                // Layer 2: Crisp solid body — near-zero glow gives hard-edged circle.
+                // Layer 2: Crisp faceted geometric threat body.
                 self.circle_buf.push(CircleInstance {
-                    x: pos.x, y: pos.y,
-                    radius: e.radius,
-                    r: er, g: eg, b: eb,
-                    a: base_alpha * 0.95,
-                    glow: 0.06,
+                    x: pos.x,
+                    y: pos.y,
+                    radius: e.radius * 1.12,
+                    r: er,
+                    g: eg,
+                    b: eb,
+                    a: base_alpha * 0.96,
+                    glow: 0.25 * glow_mult,
+                    shape: body_shape,
                 });
 
-                // Layer 3: White-hot inner core (skipped for stealth Umbra).
+                // Layer 3: White-hot crystalline inner core.
                 if e.kind != EnemyKind::Umbra {
-                    let core_alpha = if e.mini_boss.is_some() { 0.85 } else { 0.62 };
+                    let core_alpha = if e.mini_boss.is_some() { 0.88 } else { 0.68 };
                     self.circle_buf.push(CircleInstance {
-                        x: pos.x, y: pos.y,
-                        radius: e.radius * 0.38,
-                        r: 1.0, g: 1.0, b: 0.95,
+                        x: pos.x,
+                        y: pos.y,
+                        radius: e.radius * 0.42,
+                        r: 1.0,
+                        g: 1.0,
+                        b: 0.96,
                         a: core_alpha * base_alpha,
-                        glow: 0.25 * glow_mult,
+                        glow: 0.4 * glow_mult,
+                        shape: SHAPE_DIAMOND,
                     });
                 }
 
-                // Frost slow overlay: ice crystal tint when slowed.
+                // Frost slow overlay: icy crystalline ring when slowed.
                 if e.slow_timer > 0.0 {
                     let ice_t = (e.slow_timer / FROST_SLOW_DURATION).clamp(0.0, 1.0);
                     self.circle_buf.push(CircleInstance {
-                        x: pos.x, y: pos.y,
-                        radius: e.radius * 1.15,
-                        r: 0.38, g: 0.85, b: 1.0,
-                        a: ice_t * 0.38,
-                        glow: 0.35,
+                        x: pos.x,
+                        y: pos.y,
+                        radius: e.radius * 1.32,
+                        r: 0.42,
+                        g: 0.88,
+                        b: 1.0,
+                        a: ice_t * 0.55,
+                        glow: 0.7,
+                        shape: SHAPE_RING,
                     });
                 }
             }
         }
 
-        // Radiance gems — pickup-only crystals, not enemy-like round dots.
+        // Radiance gems — unmistakable rotating faceted emerald/sapphire/gold crystals!
         for g in &self.gems {
             let pos = nearest_globe_pos(camera, g.pos);
-            let pulse = 1.0 + (g.life * 7.5).sin() * 0.25;
+            let pulse = 1.0 + (g.life * 7.5).sin() * 0.22;
             let fade = if g.life > GEM_LIFETIME - 2.0 {
                 (GEM_LIFETIME - g.life) / 2.0
             } else {
                 1.0
             };
             let (r, g_col, b, tier_glow) = if g.value >= 5 {
-                (1.0, 0.82, 0.24, 2.0)
+                (1.0, 0.84, 0.26, 2.2)
             } else if g.value >= 3 {
-                (0.28, 0.72, 1.0, 1.8)
+                (0.30, 0.78, 1.0, 1.9)
             } else {
-                (0.20, 1.0, 0.68, 1.6)
+                (0.22, 1.0, 0.72, 1.7)
             };
-            let radius = GEM_VISUAL_RADIUS;
-            let core_radius = radius * 0.52;
+            let radius = GEM_VISUAL_RADIUS * 1.15;
+            let core_radius = radius * 0.54;
 
-            // Colored pickup shell — bright enough to read peripherally.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
@@ -5498,20 +6035,21 @@ impl Game {
                 r,
                 g: g_col,
                 b,
-                a: 0.50 * fade,
+                a: 0.72 * fade,
                 glow: tier_glow * pulse * fade,
+                shape: SHAPE_DIAMOND,
             });
 
-            // White-hot center makes the collectible read as "reward" instead of threat.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
                 radius: core_radius,
-                r: 0.92,
+                r: 0.94,
                 g: 1.0,
-                b: 0.92,
-                a: 0.8 * fade,
-                glow: tier_glow * 1.4 * pulse * fade,
+                b: 0.96,
+                a: 0.88 * fade,
+                glow: tier_glow * 1.35 * pulse * fade,
+                shape: SHAPE_DIAMOND,
             });
         }
 
@@ -5528,6 +6066,7 @@ impl Game {
                 b: p.color[2],
                 a: t,
                 glow: 2.0 * t,
+                shape: SHAPE_ORB,
             });
         }
 
@@ -5652,44 +6191,46 @@ impl Game {
             });
         }
 
-        // Projectiles — small magenta orbs.
+        // Projectiles — bright magenta energy shards.
         for p in &self.projectiles {
             let pos = nearest_globe_pos(camera, p.pos);
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: p.radius,
-                r: 0.9,
-                g: 0.2,
-                b: 0.7,
+                radius: p.radius * 1.25,
+                r: 1.0,
+                g: 0.25,
+                b: 0.78,
                 a: 1.0,
-                glow: 2.0,
+                glow: 2.2,
+                shape: SHAPE_DIAMOND,
             });
         }
 
-        // Crystals — semi-transparent teal obstacles.
+        // Crystals — beveled translucent teal prism obstacles.
         for c in &self.crystals {
             let pos = nearest_globe_pos(camera, c.pos);
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
                 radius: c.radius,
-                r: 0.3,
-                g: 0.7,
-                b: 0.8,
-                a: 0.35,
-                glow: 0.4,
+                r: 0.28,
+                g: 0.78,
+                b: 0.92,
+                a: 0.44,
+                glow: 0.75,
+                shape: SHAPE_HEX,
             });
-            // Inner bright core.
             self.circle_buf.push(CircleInstance {
                 x: pos.x,
                 y: pos.y,
-                radius: c.radius * 0.3,
-                r: 0.5,
-                g: 0.9,
+                radius: c.radius * 0.34,
+                r: 0.58,
+                g: 0.95,
                 b: 1.0,
-                a: 0.6,
-                glow: 1.5,
+                a: 0.72,
+                glow: 1.6,
+                shape: SHAPE_DIAMOND,
             });
         }
 

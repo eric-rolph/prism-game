@@ -1,595 +1,731 @@
-// All GLSL 300 ES (WebGL2). Kept as template strings so Vite bundles them
-// into the JS output — no separate fetch for shader files.
+// GLSL 300 ES shaders for Prism's SOTA optical WebGL2 pipeline:
+//   1. Deep-space starfield + Fresnel sapphire crystal globe + fine anti-aliased grid + caustics
+//   2. Instanced faceted geometric SDF shapes (orbs, diamonds, crystal hexes, chevrons, hollow wave rings, spinning prism, stars)
+//   3. Instanced optical plasma beams with spectral fringe, photon ripple, and emitter/impact flares
+//   4. 4-level Dual Kawase HDR bloom pyramid (soft-knee prefilter + 5-tap down + 8-tap tent up)
+//   5. ACES Filmic tone mapping + temporal persistence + dynamic combat flashes & low-HP vignette
 
-// ─── Circle shader ───────────────────────────────────────────────────────
-// Instance attrs per circle: pos(2) + radius(1) + rgba(4) + glow(1) = 8 floats.
-// We render each circle as a quad expanded beyond the radius to leave room
-// for the glow falloff, then the SDF picks the shape back up.
+// ─── 1. SDF Faceted Geometry (Circles, Crystals, Rings, Prisms, Stars) ───
 
-const QUAD_EXPAND = 3.0; // quad edge sits at 3× the radius
+export const CIRCLE_VERT = `#version 300 es
+precision highp float;
 
-export const CIRCLE_VERT = /* glsl */ `#version 300 es
-layout(location=0) in vec2 a_quad;      // per-vertex, -1..1
+layout(location = 0) in vec2  a_quad;
+layout(location = 1) in vec2  a_center;
+layout(location = 2) in float a_radius;
+layout(location = 3) in vec4  a_color;
+layout(location = 4) in float a_glow;
+layout(location = 5) in float a_shape;
 
-// per-instance
-layout(location=1) in vec2 a_pos;
-layout(location=2) in float a_radius;
-layout(location=3) in vec4 a_color;
-layout(location=4) in float a_glow;
-
-uniform vec2 u_viewport;
-uniform vec2 u_camera;
-uniform vec2 u_shake;
+uniform vec2  u_resolution;
+uniform vec2  u_camera;
+uniform vec2  u_shake;
 uniform float u_arena_radius;
 
-out vec2 v_local;   // -QUAD_EXPAND..+QUAD_EXPAND; edge of circle at ±1
-out vec4 v_color;
+out vec2  v_uv;
+out vec4  v_color;
 out float v_glow;
+out float v_shape;
+out float v_seed;
+out float v_radius;
 
-vec2 projectGlobe(vec2 local, float radius) {
-  float d = length(local);
-  if (d < 1e-4) return local;
-  float theta = min(d / radius, 1.55334);
-  return local * (sin(theta) * radius / d);
+vec2 projectGlobe(vec2 rel) {
+  float d = length(rel);
+  float theta = d / max(u_arena_radius, 1.0);
+  if (theta < 0.0001) return rel;
+  return rel * (sin(theta) / theta);
 }
 
 void main() {
-  const float EXPAND = ${QUAD_EXPAND.toFixed(1)};
-  v_local = a_quad * EXPAND;
-  v_color = a_color;
-  v_glow = a_glow;
-
-  vec2 local = (a_pos - u_camera) + a_quad * a_radius * EXPAND;
-  vec2 screen = projectGlobe(local, max(u_arena_radius, 1.0)) + u_viewport * 0.5 + u_shake;
-  vec2 clip = (screen / u_viewport) * 2.0 - 1.0;
-  clip.y = -clip.y;
-
-  gl_Position = vec4(clip, 0.0, 1.0);
-}
-`;
-
-export const CIRCLE_FRAG = /* glsl */ `#version 300 es
-precision highp float;
-
-in vec2 v_local;
-in vec4 v_color;
-in float v_glow;
-
-out vec4 fragColor;
-
-void main() {
-  float d = length(v_local);
-
-  // Solid core with antialiased edge at d = 1.0
-  float core = 1.0 - smoothstep(0.94, 1.04, d);
-  // Soft exponential glow that falls off through the expanded quad
-  float glow = exp(-d * d * 0.9) * v_glow;
-
-  vec3 col = v_color.rgb * (core + glow);
-  float alpha = max(core * v_color.a, glow * 0.6);
-  fragColor = vec4(col * alpha, alpha);
-}
-`;
-
-// ─── Beam shader ─────────────────────────────────────────────────────────
-// Instance attrs per beam: p0(2) + p1(2) + thickness(1) + rgba(4) + glow(1) = 10 floats.
-// Vertex shader builds an oriented bounding rect around the segment; fragment
-// uses an SDF capsule with:
-//   - White-hot inner core
-//   - Spectral rainbow fringe on the outer edge
-//   - Noise-based energy ripple along the beam length
-//   - Wide exponential glow falloff in the beam's tint color
-
-export const BEAM_VERT = /* glsl */ `#version 300 es
-layout(location=0) in vec2 a_quad;
-
-layout(location=1) in vec2 a_p0;
-layout(location=2) in vec2 a_p1;
-layout(location=3) in float a_thickness;
-layout(location=4) in vec4 a_color;
-layout(location=5) in float a_glow;
-layout(location=6) in float a_form_progress;
-
-uniform vec2 u_viewport;
-uniform vec2 u_camera;
-uniform vec2 u_shake;
-uniform float u_time;
-uniform float u_arena_radius;
-
-out vec2 v_world;
-out vec2 v_p0;
-out vec2 v_p1;
-out float v_thickness;
-out vec4 v_color;
-out float v_glow;
-out float v_time;
-out float v_form_progress;
-
-vec2 projectGlobe(vec2 local, float radius) {
-  float d = length(local);
-  if (d < 1e-4) return local;
-  float theta = min(d / radius, 1.55334);
-  return local * (sin(theta) * radius / d);
-}
-
-void main() {
-  float pad = 12.0 + a_thickness * 3.5;
-
-  vec2 delta = a_p1 - a_p0;
-  float len = length(delta);
-  vec2 dir = len > 1e-5 ? delta / len : vec2(1.0, 0.0);
-  vec2 perp = vec2(-dir.y, dir.x);
-  vec2 center = (a_p0 + a_p1) * 0.5;
-
-  float halfLen = len * 0.5 + pad;
-  float halfThick = a_thickness * 0.5 + pad;
-
-  vec2 world = center + dir * (a_quad.x * halfLen) + perp * (a_quad.y * halfThick);
-  vec2 local = world - u_camera;
-
-  v_world = local;
-  v_p0 = a_p0 - u_camera;
-  v_p1 = a_p1 - u_camera;
-  v_thickness = a_thickness;
-  v_color = a_color;
-  v_glow = a_glow;
-  v_time = u_time;
-  v_form_progress = a_form_progress;
-
-  vec2 screen = projectGlobe(local, max(u_arena_radius, 1.0)) + u_viewport * 0.5 + u_shake;
-  vec2 clip = (screen / u_viewport) * 2.0 - 1.0;
-  clip.y = -clip.y;
-
-  gl_Position = vec4(clip, 0.0, 1.0);
-}
-`;
-
-export const BEAM_FRAG = /* glsl */ `#version 300 es
-precision highp float;
-
-in vec2 v_world;
-in vec2 v_p0;
-in vec2 v_p1;
-in float v_thickness;
-in vec4 v_color;
-in float v_glow;
-in float v_time;
-in float v_form_progress;
-
-out vec4 fragColor;
-
-// SDF: distance from point p to segment (a, b), plus parametric t along segment.
-vec2 sdSegmentT(vec2 p, vec2 a, vec2 b) {
-  vec2 pa = p - a;
-  vec2 ba = b - a;
-  float t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-5), 0.0, 1.0);
-  float d = length(pa - ba * t);
-  return vec2(d, t);
-}
-
-// Spectral rainbow: maps a 0-1 value to a smooth RGB rainbow.
-vec3 spectral(float t) {
-  vec3 c = vec3(
-    0.5 + 0.5 * cos(6.28318 * (t + 0.0)),
-    0.5 + 0.5 * cos(6.28318 * (t + 0.33)),
-    0.5 + 0.5 * cos(6.28318 * (t + 0.67))
-  );
-  return c;
-}
-
-// Fast hash-based noise for energy ripple.
-float hash(float n) { return fract(sin(n) * 43758.5453123); }
-float noise1d(float p) {
-  float fl = floor(p);
-  float fc = fract(p);
-  fc = fc * fc * (3.0 - 2.0 * fc);
-  return mix(hash(fl), hash(fl + 1.0), fc);
-}
-
-void main() {
-  vec2 dt = sdSegmentT(v_world, v_p0, v_p1);
-  float dist = dt.x;
-  float t = dt.y;
-  float r = v_thickness * 0.5;
-
-  // Formation animation: beam grows from p0 (t=0) toward p1 (t=1) over form_progress.
-  float progress = v_form_progress;
-
-  // Clip everything beyond the formation front. Tight transition to avoid halo bleed.
-  float frontFade = 1.0 - smoothstep(progress - 0.04, progress + 0.006, t);
-  if (frontFade <= 0.003) discard;
-
-  // Tip spark: bright dot that travels with the formation front. Confined to the beam
-  // cross-section (dies at dist > r + 4px) so it never lights up the quad's empty corners.
-  float tipT    = exp(-abs(t - progress) * 32.0);
-  float tipCross = 1.0 - smoothstep(0.0, r + 4.0, dist);
-  float tipFlash = tipT * tipCross * (1.0 - progress * 0.75) * 1.8;
-
-  // Use plain dist everywhere — no jitter (it was the source of the square-block artifact).
-  float effectiveDist = dist;
-
-  // Per-beam phase seed derived from color (each beam type desyncs independently).
-  float beam_phase = fract(dot(v_color.rgb, vec3(1.0, 2.0, 3.0))) * 6.28318;
-  // Hue proxy — shifts spectral fringe to be centered on beam's own color family.
-  float beam_hue = fract(dot(v_color.rgb, vec3(0.333, 0.667, 1.0)));
-
-  // Energy ripple — slower frequencies, phase-offset per beam to prevent sync.
-  float ripple = noise1d(t * 8.0 + v_time * 6.0 + beam_phase) * 0.18 + 0.85;
-  float ripple2 = noise1d(t * 14.0 - v_time * 4.0 + beam_phase * 1.37) * 0.12 + 0.92;
-  float energy = ripple * ripple2;
-
-  // Core zones (from center outward):
-  // Zone 1: white-hot inner core (0 to r*0.35)
-  // Zone 2: beam color (r*0.35 to r*0.85)
-  // Zone 3: spectral fringe (r*0.85 to r*1.15)
-  // Zone 4: outer glow falloff (r*1.15+)
-
-  float innerEdge = r * 0.35;
-  float colorEdge = r * 0.85;
-  float fringeEdge = r * 1.15;
-
-  // White-hot inner core — use effectiveDist so the tip widens with jitter.
-  float innerCore = 1.0 - smoothstep(innerEdge - 0.5, innerEdge + 0.5, effectiveDist);
-  vec3 hotWhite = vec3(1.0, 0.98, 0.95);
-
-  // Main color body.
-  float colorBody = (1.0 - smoothstep(colorEdge - 1.0, colorEdge + 1.0, effectiveDist));
-  vec3 beamColor = v_color.rgb;
-
-  // Spectral fringe — rainbow dispersion at beam edges.
-  float fringeZone = smoothstep(colorEdge - 1.0, colorEdge + 0.5, effectiveDist)
-                   * (1.0 - smoothstep(fringeEdge - 0.5, fringeEdge + 2.0, effectiveDist));
-  // Shift spectrum by beam hue so each beam type has its own color family at edges.
-  float specPhase = dist / max(r, 1.0) + t * 0.5 + v_time * 0.25 + beam_hue;
-  vec3 rainbow = spectral(specPhase) * 1.3;
-
-  // Outer glow falloff — tight so beams stay crisp, no wide halos.
-  float glowDist = max(dist - r, 0.0);
-  float glow = exp(-glowDist * 0.40) * v_glow;
-
-  // Photon ripple — slowed and phase-offset per beam to prevent synchronized flash.
-  float photonRipple = sin(t * 5.0 + v_time * 4.5 + beam_phase) * 0.06 + 1.0;
-
-  // Prism core dispersion: interference bands tinted toward beam color identity.
-  vec3 prismCore = vec3(0.0);
-  if (dist < r * 0.5) {
-    float bandR = max(0.0, sin(t * 14.0 + v_time * 3.5 + beam_phase) * 0.5 + 0.5);
-    float bandG = max(0.0, sin(t * 14.0 + v_time * 3.5 + beam_phase + 2.094) * 0.5 + 0.5);
-    float bandB = max(0.0, sin(t * 14.0 + v_time * 3.5 + beam_phase + 4.189) * 0.5 + 0.5);
-    float coreMask = 1.0 - smoothstep(0.0, r * 0.5, dist);
-    vec3 tintedBands = mix(vec3(bandR, bandG, bandB),
-                           v_color.rgb * vec3(bandR, bandG, bandB) + 0.3, 0.45);
-    prismCore = tintedBands * coreMask * 0.42;
-  }
-
-  // Compose layers — reduced brightness to keep beams crisp and distinct.
-  vec3 col = hotWhite * innerCore * energy * 1.6
-           + beamColor * colorBody * energy * 1.0
-           + rainbow * fringeZone * energy * 0.5
-           + beamColor * glow * 0.3
-           + prismCore * photonRipple
-           + hotWhite * tipFlash;  // arc tip spark at formation front
-
-  col *= photonRipple;
-
-  // Apply formation clipping to everything.
-  col *= frontFade;
-
-  float alpha = max(colorBody * v_color.a * energy,
-                max(innerCore * energy,
-                max(fringeZone * 0.6 * energy,
-                max(glow * 0.2,
-                    tipFlash * 0.9)))) * frontFade;
-
-  fragColor = vec4(col * alpha, alpha);
-}
-`;
-
-// ─── Background globe shader ─────────────────────────────────────────────
-// Renders the play field as a seamless local patch of a traversable globe.
-// World x/y are arc lengths: x is longitude, y is meridian travel.
-
-export const GRID_VERT = /* glsl */ `#version 300 es
-layout(location=0) in vec2 a_quad;
-
-out vec2 v_uv;
-
-void main() {
-  v_uv = a_quad * 0.5 + 0.5;
-  gl_Position = vec4(a_quad, 0.0, 1.0);
-}
-`;
-
-export const GRID_FRAG = /* glsl */ `#version 300 es
-precision highp float;
-
-uniform vec2 u_viewport;
-uniform vec2 u_camera;
-uniform float u_time;
-uniform float u_arena_radius;
-
-in vec2 v_uv;
-out vec4 fragColor;
-
-const float PI = 3.14159265;
-const float TAU = 6.28318531;
-
-float angularLine(float angle, float period, float width) {
-  float d = abs(fract(angle / period + 0.5) - 0.5) * period;
-  return 1.0 - smoothstep(width, width * 1.8, d);
-}
-
-vec3 globeNormalFromLonLat(float lon, float lat) {
-  float c = cos(lat);
-  return normalize(vec3(sin(lon) * c, sin(lat), cos(lon) * c));
-}
-
-vec3 globeEast(float lon) {
-  return normalize(vec3(cos(lon), 0.0, -sin(lon)));
-}
-
-vec3 globeNorth(float lon, float lat) {
-  return normalize(vec3(-sin(lon) * sin(lat), cos(lat), -cos(lon) * sin(lat)));
-}
-
-void main() {
-  float radius = max(u_arena_radius, 1.0);
-  vec2 screen = vec2((v_uv.x - 0.5) * u_viewport.x, (0.5 - v_uv.y) * u_viewport.y);
-  float screenR = length(screen);
-  float sphereMask = 1.0 - smoothstep(radius - 8.0, radius + 18.0, screenR);
-  if (sphereMask <= 0.0) {
-    fragColor = vec4(0.0);
+  vec2 rel = a_center - u_camera;
+  float dist = length(rel);
+  float horizon = u_arena_radius * 1.5707963;
+  if (dist > horizon) {
+    gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
     return;
   }
 
-  float camLon = u_camera.x / radius;
-  float camLat = u_camera.y / radius;
-  vec3 center = globeNormalFromLonLat(camLon, camLat);
-  vec3 east = globeEast(camLon);
-  vec3 north = globeNorth(camLon, camLat);
-  float z = sqrt(max(radius * radius - screenR * screenR, 0.0));
-  vec3 normal = normalize(center * z + east * screen.x + north * screen.y);
+  vec2 proj = projectGlobe(rel);
+  float theta = dist / max(u_arena_radius, 1.0);
+  float foreshorten = max(cos(theta), 0.14);
 
-  float longitude = atan(normal.x, normal.z);
-  float latitude = asin(clamp(normal.y, -1.0, 1.0));
+  // Rings need minimal extra padding; soft/glowing shapes get wider halo headroom.
+  float pad = (a_shape > 3.5 && a_shape < 4.5) ? 1.35 : 2.35;
+  float scaledR = a_radius * pad * sqrt(foreshorten);
 
-  float meridians = angularLine(longitude, TAU / 24.0, 0.0032);
-  float parallels = angularLine(latitude, PI / 14.0, 0.0032);
-  float equator = angularLine(latitude, PI, 0.006);
-  float gridLine = max(max(meridians, parallels), equator * 0.75);
+  vec2 world = proj + a_quad * scaledR;
+  vec2 ndc = (world + u_shake) / (u_resolution * 0.5);
+  ndc.y = -ndc.y;
+  gl_Position = vec4(ndc, 0.0, 1.0);
 
-  float pulse = 0.7 + 0.3 * sin(u_time * 1.5);
-  vec3 lightDir = normalize(vec3(-0.35, 0.48, 0.80));
-  float diffuse = max(dot(normal, lightDir), 0.0);
-  float polarGlow = pow(abs(normal.y), 10.0);
-  float dateLine = angularLine(longitude, PI, 0.005);
-  float limb = pow(1.0 - clamp(z / radius, 0.0, 1.0), 2.2);
-
-  vec3 surfaceColor = vec3(0.010, 0.015, 0.040) * (0.50 + diffuse * 0.50)
-                    + vec3(0.010, 0.065, 0.105) * (0.35 + 0.65 * normal.y * normal.y)
-                    + vec3(0.045, 0.020, 0.090) * limb * 0.65;
-  vec3 gridColor = vec3(0.10, 0.50, 0.88) * gridLine * (0.12 + limb * 0.07);
-
-  // Caustic pattern: interference of 3 sine waves for an underwater shimmer.
-  float caustic = sin(longitude * 12.0 + u_time * 0.8)
-                * sin(latitude * 14.0 + u_time * 0.6) * 0.5 + 0.5;
-  vec3 landmarkColor = vec3(0.22, 0.78, 1.00) * (polarGlow * 0.16 + dateLine * 0.08 * pulse)
-                     + caustic * 0.04 * sphereMask * vec3(0.3, 0.7, 1.0);
-
-  vec3 col = surfaceColor + gridColor + landmarkColor;
-  float alpha = (0.11 + gridLine * 0.08 + polarGlow * 0.05 + limb * 0.07) * sphereMask;
-
-  fragColor = vec4(col, clamp(alpha, 0.0, 1.0));
+  v_uv     = a_quad * pad;
+  v_color  = a_color;
+  v_glow   = a_glow;
+  v_shape  = a_shape;
+  v_seed   = fract(sin(dot(a_center * 0.013, vec2(12.9898, 78.233))) * 43758.5453);
+  v_radius = a_radius;
 }
 `;
 
-// ─── Bloom: separable Gaussian ───────────────────────────────────────────
-// Architecture: scene→half-res (box downsample) → H→V × 2 cycles (Gaussian)
-//               → full-res (9-tap tent upsample) → composite.
-//
-// WHY separable: 2D Gaussian = G1D_H × G1D_V, which is radially symmetric.
-// A single-pass 2D grid kernel (tent/box) is a separable BOX filter, which
-// produces SQUARE bloom. Doing H then V with Gaussian weights produces
-// circular bloom with zero staircase/block artifacts regardless of resolution.
-
-// Downsample: 4-tap box filter. Maps 2×2 source pixels → 1 output pixel.
-// u_texel = 1/source_resolution.
-export const BLOOM_DOWN_FRAG = /* glsl */ `#version 300 es
+export const CIRCLE_FRAG = `#version 300 es
 precision highp float;
 
-uniform sampler2D u_src;
-uniform vec2 u_texel;
+in vec2  v_uv;
+in vec4  v_color;
+in float v_glow;
+in float v_shape;
+in float v_seed;
+in float v_radius;
 
-in vec2 v_uv;
+uniform float u_time;
+
+out vec4 fragColor;
+
+mat2 rot2(float a) {
+  float s = sin(a), c = cos(a);
+  return mat2(c, -s, s, c);
+}
+
+// Inigo Quilez exact 2D SDFs.
+float sdHexagon(vec2 p, float r) {
+  const vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
+  p = abs(p);
+  p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
+  p -= vec2(clamp(p.x, -k.z * r, k.z * r), r);
+  return length(p) * sign(p.y);
+}
+
+float sdDiamond(vec2 p, float r) {
+  vec2 q = abs(p);
+  return (q.x * 1.18 + q.y * 0.88 - r) * 0.72;
+}
+
+float sdTriangle(vec2 p, float r) {
+  const float k = 1.732050808;
+  p.x = abs(p.x) - r;
+  p.y = p.y + r / k;
+  if (p.x + k * p.y > 0.0) p = vec2(p.x - k * p.y, -k * p.x - p.y) * 0.5;
+  p.x -= clamp(p.x, -2.0 * r, 0.0);
+  return -length(p) * sign(p.y);
+}
+
+float sdStar8(vec2 p, float r) {
+  float d1 = sdDiamond(p, r);
+  float d2 = sdDiamond(rot2(0.78539816) * p, r);
+  return min(d1, d2);
+}
+
+vec3 spectrum(float t) {
+  return 0.52 + 0.48 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
+}
+
+void main() {
+  int shape = int(v_shape + 0.5);
+  float d = length(v_uv);
+  float aa = max(fwidth(d), 0.035);
+
+  vec3 col = v_color.rgb;
+  float alpha = 0.0;
+  float glowBoost = 1.0 + v_glow * 0.65;
+
+  if (shape == 0) {
+    // Soft luminous orb / ambient aura / particle.
+    float core = 1.0 - smoothstep(1.0 - aa * 2.0, 1.0 + aa, d);
+    float halo = exp(-d * d * 1.95) * v_glow * 0.38;
+    alpha = (core + halo) * v_color.a;
+    col = mix(v_color.rgb, vec3(1.0), core * 0.25 * clamp(v_glow * 0.3, 0.0, 1.0));
+    col *= (core * (1.0 + v_glow * 0.55) + halo * 1.4) / max(core + halo, 0.001);
+  } else if (shape == 1) {
+    // Rotating faceted crystal diamond (XP radiance gems, halos, shard nodes).
+    float spin = u_time * 1.85 + v_seed * 6.2831;
+    vec2 p = rot2(spin) * v_uv;
+    float sd = sdDiamond(p, 0.88);
+    float fill = 1.0 - smoothstep(-aa, aa, sd);
+    float rim  = exp(-abs(sd) * 14.0);
+    float halo = exp(-max(sd, 0.0) * 3.8) * v_glow * 0.34;
+    // Internal specular crystal facets across quadrants.
+    float facet = 0.72 + 0.28 * sign(p.x * p.y) * 0.5 + 0.35 * exp(-abs(p.x) * 8.0) + 0.25 * exp(-abs(p.y) * 8.0);
+    vec3 prismRim = mix(v_color.rgb, vec3(1.0), 0.55) + spectrum(v_seed + u_time * 0.35) * 0.18;
+    vec3 bodyCol = v_color.rgb * facet * (1.1 + v_glow * 0.38) + prismRim * rim * 0.95;
+    col = bodyCol * fill + v_color.rgb * halo * 1.35;
+    alpha = clamp(fill + rim * 0.45 + halo, 0.0, 1.5) * v_color.a;
+  } else if (shape == 2) {
+    // Beveled crystalline hexagon (crystal obstacles, shields, mines, brutes).
+    float spin = u_time * 0.45 + v_seed * 6.2831;
+    vec2 p = rot2(spin) * v_uv;
+    float sd = sdHexagon(p, 0.78);
+    float fill = 1.0 - smoothstep(-aa, aa, sd);
+    float rim  = exp(-abs(sd) * 15.0);
+    float innerBevel = exp(-abs(sd + 0.22) * 18.0) * fill;
+    float halo = exp(-max(sd, 0.0) * 3.6) * v_glow * 0.32;
+    float facetShade = 0.78 + 0.22 * cos(atan(p.y, p.x) * 3.0 + spin);
+    vec3 rimCol = mix(v_color.rgb, vec3(0.85, 0.97, 1.0), 0.55);
+    col = (v_color.rgb * facetShade * (0.95 + v_glow * 0.30) + rimCol * (rim * 1.15 + innerBevel * 0.45)) * fill
+        + rimCol * rim * 0.55
+        + v_color.rgb * halo * 1.25;
+    alpha = clamp(fill + rim * 0.55 + halo, 0.0, 1.5) * v_color.a;
+  } else if (shape == 3) {
+    // Razor geometric chevron / triangle shard (drones, dashers, umbra).
+    float spin = u_time * 1.45 + v_seed * 6.2831;
+    vec2 p = rot2(spin) * v_uv;
+    float sd = sdTriangle(p, 0.78);
+    float fill = 1.0 - smoothstep(-aa, aa, sd);
+    float rim  = exp(-abs(sd) * 16.0);
+    float halo = exp(-max(sd, 0.0) * 4.2) * v_glow * 0.30;
+    float spine = exp(-abs(p.x) * 10.0) * fill * 0.38;
+    vec3 hot = mix(v_color.rgb, vec3(1.0, 0.96, 0.92), 0.55);
+    col = (v_color.rgb * (1.0 + v_glow * 0.32) + hot * (rim * 0.95 + spine)) * fill
+        + hot * rim * 0.40
+        + v_color.rgb * halo;
+    alpha = clamp(fill + rim * 0.40 + halo, 0.0, 1.4) * v_color.a;
+  } else if (shape == 4) {
+    // Hollow optical wave ring with subtle chromatic dispersion (pulses, barrier, shockwaves).
+    float radiusNorm = 0.90;
+    float ringW = clamp(0.055 + 1.8 / max(v_radius, 14.0), 0.035, 0.14);
+    float disp = ringW * 0.42;
+    float rOut = exp(-pow((d - (radiusNorm + disp)) / ringW, 2.0));
+    float gMid = exp(-pow((d - radiusNorm) / ringW, 2.0));
+    float bIn  = exp(-pow((d - (radiusNorm - disp)) / ringW, 2.0));
+    float coreRing = exp(-pow((d - radiusNorm) / (ringW * 0.45), 2.0));
+    float interior = (1.0 - smoothstep(0.0, radiusNorm, d)) * smoothstep(radiusNorm * 0.55, radiusNorm, d) * 0.14;
+    vec3 chroma = vec3(
+      v_color.r * (0.72 * rOut + 0.38 * gMid),
+      v_color.g * gMid,
+      v_color.b * (0.72 * bIn + 0.38 * gMid)
+    );
+    col = chroma * (1.25 + v_glow * 0.55) + vec3(1.0) * coreRing * 0.45 + v_color.rgb * interior;
+    alpha = clamp(max(max(rOut, gMid), bIn) + coreRing * 0.35 + interior, 0.0, 1.4) * v_color.a;
+  } else if (shape == 5) {
+    // Spinning faceted prismatic crystal core (Player Prism & Void Prism).
+    // Preserves crisp crystalline facets & rainbow Fresnel edges instead of clipping to white.
+    float spin = u_time * 0.95;
+    vec2 p = rot2(spin) * v_uv;
+    float sdHex = sdHexagon(p, 0.86);
+    float sdTri = sdTriangle(rot2(-spin * 1.8) * v_uv, 0.56);
+    float fill = 1.0 - smoothstep(-aa, aa, sdHex);
+    float outerRim = exp(-abs(sdHex) * 18.0);
+    float innerPrism = exp(-abs(sdTri) * 20.0) * fill;
+    float halo = exp(-max(sdHex, 0.0) * 3.4) * (0.28 + min(v_glow, 2.2) * 0.14);
+
+    // Spectral rainbow dispersion curving around the prism facets.
+    float ang = atan(p.y, p.x);
+    vec3 rainbow = spectrum(ang / 6.2831853 + u_time * 0.25);
+    float facetShade = 0.55 + 0.45 * cos(ang * 3.0);
+    float facetLines = exp(-abs(sin(ang * 3.0)) * 12.0) * fill * 0.48;
+    float coreStar = exp(-d * d * 18.0);
+
+    vec3 glassInterior = mix(v_color.rgb * 0.34, v_color.rgb * 0.68, facetShade);
+    vec3 body = glassInterior
+              + rainbow * (outerRim * 1.25 + facetLines * 0.95 + innerPrism * 0.90)
+              + vec3(0.95, 1.0, 1.0) * (coreStar * 0.85 + outerRim * 0.45 + innerPrism * 0.35);
+    col = body * fill + mix(v_color.rgb, rainbow, 0.68) * (outerRim * 0.60 + halo);
+    alpha = clamp(fill + outerRim * 0.55 + halo, 0.0, 1.35) * v_color.a;
+  } else {
+    // Shape 6: Radiant crystalline 8-point starburst (Sentinel, Orbiters, Pulsars, Mini-Bosses).
+    float spin = u_time * 1.15 + v_seed * 6.2831;
+    vec2 p = rot2(spin) * v_uv;
+    float sd = sdStar8(p, 0.84);
+    float fill = 1.0 - smoothstep(-aa, aa, sd);
+    float rim  = exp(-abs(sd) * 14.0);
+    float halo = exp(-max(sd, 0.0) * 3.2) * v_glow * 0.36;
+    float core = exp(-d * d * 7.5);
+    vec3 rimCol = mix(v_color.rgb, vec3(1.0, 0.96, 0.88), 0.6);
+    col = (v_color.rgb * (1.0 + v_glow * 0.35) + rimCol * (rim * 1.0 + core * 0.75)) * fill
+        + rimCol * rim * 0.45
+        + v_color.rgb * halo * 1.3;
+    alpha = clamp(fill + rim * 0.45 + halo, 0.0, 1.5) * v_color.a;
+  }
+
+  if (alpha < 0.002) discard;
+  fragColor = vec4(col * alpha, alpha);
+}
+`;
+
+// ─── 2. Optical Plasma Beams (SDF Capsules with Spectral Fringe & Tip Flares) ───
+
+export const BEAM_VERT = `#version 300 es
+precision highp float;
+
+layout(location = 0) in vec2  a_quad;
+layout(location = 1) in vec2  a_p0;
+layout(location = 2) in vec2  a_p1;
+layout(location = 3) in float a_thickness;
+layout(location = 4) in vec4  a_color;
+layout(location = 5) in float a_glow;
+layout(location = 6) in float a_form_progress;
+
+uniform vec2  u_resolution;
+uniform vec2  u_camera;
+uniform vec2  u_shake;
+uniform float u_arena_radius;
+
+out vec2  v_uv;
+out float v_len;
+out float v_thickness;
+out vec4  v_color;
+out float v_glow;
+out float v_form_progress;
+out vec2  v_p0_proj;
+out float v_pad;
+
+vec2 projectGlobe(vec2 rel) {
+  float d = length(rel);
+  float theta = d / max(u_arena_radius, 1.0);
+  if (theta < 0.0001) return rel;
+  return rel * (sin(theta) / theta);
+}
+
+void main() {
+  vec2 r0 = a_p0 - u_camera;
+  vec2 r1 = a_p1 - u_camera;
+  float horizon = u_arena_radius * 1.5707963;
+  if (length(r0) > horizon && length(r1) > horizon) {
+    gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
+    return;
+  }
+
+  vec2 p0 = projectGlobe(r0);
+  vec2 p1 = projectGlobe(r1);
+  vec2 delta = p1 - p0;
+  float len = length(delta);
+  vec2 dir = len > 0.0001 ? delta / len : vec2(1.0, 0.0);
+  vec2 perp = vec2(-dir.y, dir.x);
+
+  float pad = a_thickness * 5.2 + 16.0;
+  float along = (a_quad.x * 0.5 + 0.5) * len + a_quad.x * pad;
+  float side  = a_quad.y * pad;
+
+  vec2 world = p0 + dir * along + perp * side;
+  vec2 ndc = (world + u_shake) / (u_resolution * 0.5);
+  ndc.y = -ndc.y;
+  gl_Position = vec4(ndc, 0.0, 1.0);
+
+  v_uv            = vec2(along, side);
+  v_len           = len;
+  v_thickness     = a_thickness;
+  v_color         = a_color;
+  v_glow          = a_glow;
+  v_form_progress = a_form_progress;
+  v_p0_proj       = p0;
+  v_pad           = pad;
+}
+`;
+
+export const BEAM_FRAG = `#version 300 es
+precision highp float;
+
+in vec2  v_uv;
+in float v_len;
+in float v_thickness;
+in vec4  v_color;
+in float v_glow;
+in float v_form_progress;
+in vec2  v_p0_proj;
+in float v_pad;
+
+uniform float u_time;
+
 out vec4 fragColor;
 
 void main() {
-  // Sample at ±0.5 texel — each bilinear tap averages a 2×2 source block.
-  vec3 s1 = texture(u_src, v_uv + vec2(-0.5, -0.5) * u_texel).rgb;
-  vec3 s2 = texture(u_src, v_uv + vec2( 0.5, -0.5) * u_texel).rgb;
-  vec3 s3 = texture(u_src, v_uv + vec2(-0.5,  0.5) * u_texel).rgb;
-  vec3 s4 = texture(u_src, v_uv + vec2( 0.5,  0.5) * u_texel).rgb;
-  vec3 c = (s1 + s2 + s3 + s4) * 0.25;
+  float effectiveLen = max(v_len * clamp(v_form_progress, 0.05, 1.0), 0.5);
+  float clampedX = clamp(v_uv.x, 0.0, effectiveLen);
+  vec2 nearest = vec2(clampedX, 0.0);
+  float dist = length(v_uv - nearest);
+  float r = max(v_thickness * 0.5, 0.6);
 
-  // Soft-knee highlight extraction: only genuinely bright pixels feed the
-  // bloom chain. The dim globe surface and HUD-adjacent haze stay out, so
-  // light blooms without the whole frame fogging up (the old blowout).
-  // Knee spans below 1.0 so the RGBA8 fallback (values clamp at 1.0) still
-  // passes saturated beam/core pixels.
-  float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  float knee = smoothstep(0.60, 1.10, luma);
-  fragColor = vec4(c * knee, 1.0);
+  // Seamless radial feather mask guarantees zero rectangular quad clipping at beam tips.
+  float edgeFeather = 1.0 - smoothstep(v_pad * 0.52, v_pad * 0.96, dist);
+  if (edgeFeather <= 0.001) discard;
+
+  // Normalized along-beam coordinate.
+  float t = clamp(v_uv.x / max(effectiveLen, 1.0), 0.0, 1.0);
+
+  // White-hot optical plasma core + exponential refraction halo.
+  float core = exp(-pow(dist / (r * 0.85), 2.0) * 1.9);
+  float midGlow = exp(-dist / (r * 1.75 + 2.0));
+  float wideGlow = exp(-dist / (r * 3.4 + 4.5)) * 0.34;
+
+  // Travelling photon interference pulse along the light ray.
+  float phase = dot(v_p0_proj, vec2(0.017, 0.023));
+  float ripple = 0.86 + 0.14 * sin(v_uv.x * 0.14 - u_time * 34.0 + phase);
+  float shimmer = 0.90 + 0.10 * cos(v_uv.x * 0.06 + u_time * 18.0);
+
+  // Subtle lateral spectral dispersion fringe (R/G/B split across beam edge).
+  float sideNorm = v_uv.y / max(r * 2.4, 1.0);
+  vec3 fringe = vec3(
+    smoothstep(-0.2, 1.4, sideNorm),
+    1.0 - abs(sideNorm) * 0.55,
+    smoothstep(-0.2, 1.4, -sideNorm)
+  );
+  vec3 dispersed = mix(v_color.rgb, v_color.rgb * 0.65 + fringe * 0.55, 0.42 * midGlow * (1.0 - core));
+
+  // Emitter origin flare & scorching impact tip flare.
+  float originFlare = exp(-length(v_uv) / (r * 2.4 + 3.5)) * 0.65;
+  float tipFlare    = exp(-length(v_uv - vec2(effectiveLen, 0.0)) / (r * 2.8 + 4.2)) * 0.82;
+  float endFade     = smoothstep(0.0, 0.03, t) * (0.72 + 0.28 * (1.0 - t));
+
+  float energy = ((core * 1.55 + midGlow * 0.72 + wideGlow) * ripple * shimmer * (0.82 + 0.18 * endFade)
+               + originFlare + tipFlare) * edgeFeather;
+
+  vec3 col = (dispersed * (0.92 + v_glow * 0.42) * (midGlow * 0.9 + wideGlow + originFlare * 0.7 + tipFlare * 0.9)
+           + vec3(1.0, 0.99, 1.0) * (core * (1.15 + v_glow * 0.38) + tipFlare * 0.55)) * edgeFeather;
+
+  float alpha = clamp(energy, 0.0, 1.8) * v_color.a;
+  if (alpha < 0.002) discard;
+
+  fragColor = vec4(col * v_color.a, alpha);
 }
 `;
 
-// Horizontal 13-tap Gaussian pass (σ=2.0 in half-res texels = σ=4 screen px).
-// u_texel = 1/source_resolution (half-res FBO).
-export const BLOOM_H_FRAG = /* glsl */ `#version 300 es
+// ─── 3. Deep-Space Starfield + Sapphire Crystal Globe + Caustics ────────
+
+export const GRID_VERT = `#version 300 es
 precision highp float;
 
-uniform sampler2D u_src;
-uniform vec2 u_texel;
-
-in vec2 v_uv;
-out vec4 fragColor;
-
-void main() {
-  vec3 col =
-    texture(u_src, v_uv + vec2(-6.0, 0.0) * u_texel).rgb * 0.0022 +
-    texture(u_src, v_uv + vec2(-5.0, 0.0) * u_texel).rgb * 0.0088 +
-    texture(u_src, v_uv + vec2(-4.0, 0.0) * u_texel).rgb * 0.0270 +
-    texture(u_src, v_uv + vec2(-3.0, 0.0) * u_texel).rgb * 0.0649 +
-    texture(u_src, v_uv + vec2(-2.0, 0.0) * u_texel).rgb * 0.1211 +
-    texture(u_src, v_uv + vec2(-1.0, 0.0) * u_texel).rgb * 0.1760 +
-    texture(u_src, v_uv                  ).rgb * 0.1997 +
-    texture(u_src, v_uv + vec2( 1.0, 0.0) * u_texel).rgb * 0.1760 +
-    texture(u_src, v_uv + vec2( 2.0, 0.0) * u_texel).rgb * 0.1211 +
-    texture(u_src, v_uv + vec2( 3.0, 0.0) * u_texel).rgb * 0.0649 +
-    texture(u_src, v_uv + vec2( 4.0, 0.0) * u_texel).rgb * 0.0270 +
-    texture(u_src, v_uv + vec2( 5.0, 0.0) * u_texel).rgb * 0.0088 +
-    texture(u_src, v_uv + vec2( 6.0, 0.0) * u_texel).rgb * 0.0022;
-  fragColor = vec4(col, 1.0);
-}
-`;
-
-// Vertical 13-tap Gaussian pass (σ=2.0 in half-res texels = σ=4 screen px).
-// Applied after BLOOM_H_FRAG; H×V = circular 2D Gaussian — no square bloom.
-export const BLOOM_V_FRAG = /* glsl */ `#version 300 es
-precision highp float;
-
-uniform sampler2D u_src;
-uniform vec2 u_texel;
-
-in vec2 v_uv;
-out vec4 fragColor;
-
-void main() {
-  vec3 col =
-    texture(u_src, v_uv + vec2(0.0, -6.0) * u_texel).rgb * 0.0022 +
-    texture(u_src, v_uv + vec2(0.0, -5.0) * u_texel).rgb * 0.0088 +
-    texture(u_src, v_uv + vec2(0.0, -4.0) * u_texel).rgb * 0.0270 +
-    texture(u_src, v_uv + vec2(0.0, -3.0) * u_texel).rgb * 0.0649 +
-    texture(u_src, v_uv + vec2(0.0, -2.0) * u_texel).rgb * 0.1211 +
-    texture(u_src, v_uv + vec2(0.0, -1.0) * u_texel).rgb * 0.1760 +
-    texture(u_src, v_uv                  ).rgb * 0.1997 +
-    texture(u_src, v_uv + vec2(0.0,  1.0) * u_texel).rgb * 0.1760 +
-    texture(u_src, v_uv + vec2(0.0,  2.0) * u_texel).rgb * 0.1211 +
-    texture(u_src, v_uv + vec2(0.0,  3.0) * u_texel).rgb * 0.0649 +
-    texture(u_src, v_uv + vec2(0.0,  4.0) * u_texel).rgb * 0.0270 +
-    texture(u_src, v_uv + vec2(0.0,  5.0) * u_texel).rgb * 0.0088 +
-    texture(u_src, v_uv + vec2(0.0,  6.0) * u_texel).rgb * 0.0022;
-  fragColor = vec4(col, 1.0);
-}
-`;
-
-// Final upsample: 9-tap tent filter from half-res bloom to full-res.
-// This removes the visible half-res cell edges that survive a naked bilinear
-// stretch, especially around bright additive primitives.
-export const BLOOM_UP_FRAG = /* glsl */ `#version 300 es
-precision highp float;
-
-uniform sampler2D u_src;
-uniform vec2 u_texel;
-
-in vec2 v_uv;
-out vec4 fragColor;
-
-void main() {
-  vec2 dx = vec2(u_texel.x, 0.0);
-  vec2 dy = vec2(0.0, u_texel.y);
-
-  vec3 col =
-    texture(u_src, v_uv - dx - dy).rgb * 1.0 +
-    texture(u_src, v_uv      - dy).rgb * 2.0 +
-    texture(u_src, v_uv + dx - dy).rgb * 1.0 +
-    texture(u_src, v_uv - dx     ).rgb * 2.0 +
-    texture(u_src, v_uv          ).rgb * 4.0 +
-    texture(u_src, v_uv + dx     ).rgb * 2.0 +
-    texture(u_src, v_uv - dx + dy).rgb * 1.0 +
-    texture(u_src, v_uv      + dy).rgb * 2.0 +
-    texture(u_src, v_uv + dx + dy).rgb * 1.0;
-
-  fragColor = vec4(col * 0.0625, 1.0);
-}
-`;
-
-// ─── Full-screen composite ───────────────────────────────────────────────
-// Reads base scene + bloom result from dual-filter chain. Applies
-// chromatic aberration, temporal persistence, vignette, and Reinhard tonemap.
-
-export const FULLSCREEN_VERT = /* glsl */ `#version 300 es
-layout(location=0) in vec2 a_quad;
+layout(location = 0) in vec2 a_pos;
 out vec2 v_uv;
+
 void main() {
-  v_uv = a_quad * 0.5 + 0.5;
-  gl_Position = vec4(a_quad, 0.0, 1.0);
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+  v_uv = a_pos * 0.5 + 0.5;
 }
 `;
 
-export const COMPOSITE_FRAG = /* glsl */ `#version 300 es
+export const GRID_FRAG = `#version 300 es
 precision highp float;
+
+in vec2 v_uv;
+
+uniform vec2  u_resolution;
+uniform vec2  u_camera;
+uniform vec2  u_shake;
+uniform float u_arena_radius;
+uniform float u_time;
+uniform float u_intensity;
+uniform float u_boss_mood;
+
+out vec4 fragColor;
+
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+// Smooth dual-layer optical caustics on sphere normal.
+float causticWave(vec3 n, float t) {
+  float a = sin(n.x * 13.0 + n.y * 9.0 + t * 0.9) * cos(n.z * 11.0 - n.x * 7.0 - t * 0.7);
+  float b = sin(n.y * 17.0 - n.z * 12.0 + t * 1.15) * cos(n.x * 14.0 + n.y * 10.0 + t * 0.6);
+  float c = abs(a + b) * 0.5;
+  return pow(clamp(1.0 - c, 0.0, 1.0), 3.6);
+}
+
+void main() {
+  vec2 screen = (v_uv - 0.5) * u_resolution;
+  screen.y = -screen.y;
+  vec2 p = screen - u_shake;
+
+  float R = max(u_arena_radius, 1.0);
+  vec2 q = p / R;
+  float r2 = dot(q, q);
+  float r = sqrt(r2);
+
+  // Deep space backdrop outside the globe limb (starfield + faint prismatic aurora).
+  if (r2 >= 1.0) {
+    vec3 space = vec3(0.004, 0.007, 0.018);
+
+    // Subtle cosmic nebula wash.
+    float neb = 0.5 + 0.5 * sin(v_uv.x * 4.5 + v_uv.y * 2.8 + u_time * 0.08);
+    space += mix(vec3(0.008, 0.022, 0.048), vec3(0.024, 0.010, 0.042), neb) * 0.65;
+
+    // Crisp multi-layer procedural starfield.
+    for (int layer = 0; layer < 2; layer++) {
+      float scale = (layer == 0) ? 95.0 : 175.0;
+      vec2 sp = (screen + u_camera * (layer == 0 ? 0.02 : 0.04)) / scale;
+      vec2 cell = floor(sp);
+      vec2 f = fract(sp) - 0.5;
+      float rnd = hash21(cell + float(layer) * 31.7);
+      if (rnd > 0.87) {
+        vec2 jitter = vec2(hash21(cell + 7.1), hash21(cell + 19.3)) - 0.5;
+        float starD = length(f - jitter * 0.55);
+        float twinkle = 0.65 + 0.35 * sin(u_time * (2.2 + rnd * 4.0) + rnd * 40.0);
+        float star = exp(-starD * starD * 190.0) * twinkle * (layer == 0 ? 0.95 : 0.60);
+        vec3 starCol = mix(vec3(0.65, 0.88, 1.0), vec3(1.0, 0.90, 0.72), fract(rnd * 17.0));
+        space += starCol * star;
+      }
+    }
+
+    // Outer atmospheric Fresnel corona hugging the curved sphere limb!
+    float outerDist = r - 1.0;
+    float corona = exp(-outerDist * 14.0) * 0.52 + exp(-outerDist * 4.5) * 0.14;
+    vec3 coronaCol = mix(vec3(0.18, 0.76, 1.0), vec3(0.75, 0.32, 1.0), u_boss_mood * 0.65 + 0.18 * sin(u_time * 0.4));
+    space += coronaCol * corona * (0.85 + 0.35 * u_intensity);
+
+    fragColor = vec4(space, 1.0);
+    return;
+  }
+
+  // Exact orthographic inverse projection onto the unit sphere centered on u_camera.
+  float z = sqrt(max(0.0, 1.0 - r2));
+  vec3 localN = vec3(q.x, q.y, z);
+
+  float camLon = u_camera.x / R;
+  float camLat = u_camera.y / R;
+  float sLon = sin(camLon), cLon = cos(camLon);
+  float sLat = sin(camLat), cLat = cos(camLat);
+
+  vec3 camNormal = vec3(sLon * cLat, sLat, cLon * cLat);
+  vec3 camEast   = vec3(cLon, 0.0, -sLon);
+  vec3 camNorth  = vec3(-sLon * sLat, cLat, -cLon * sLat);
+
+  vec3 worldN = normalize(camEast * localN.x + camNorth * localN.y + camNormal * localN.z);
+
+  float lat = asin(clamp(worldN.y, -1.0, 1.0));
+  float lon = atan(worldN.x, worldN.z);
+
+  // Jewel-like obsidian-sapphire crystal glass base with physical Fresnel limb depth.
+  float fresnel = pow(1.0 - z, 2.8);
+  vec3 centerTint = mix(vec3(0.011, 0.020, 0.044), vec3(0.026, 0.012, 0.046), u_boss_mood * 0.65);
+  vec3 limbTint   = mix(vec3(0.045, 0.145, 0.245), vec3(0.165, 0.055, 0.240), u_boss_mood * 0.65);
+  vec3 col = mix(centerTint, limbTint, fresnel);
+
+  // Crisp anti-aliased meridian & parallel optical coordinate lines (15° minor, 45° major).
+  float lonStep = 3.14159265 / 12.0; // 15°
+  float latStep = 3.14159265 / 12.0;
+
+  float lonCoord = lon / lonStep;
+  float latCoord = lat / latStep;
+
+  float dLon = abs(fract(lonCoord + 0.5) - 0.5) / max(fwidth(lonCoord), 0.002);
+  float dLat = abs(fract(latCoord + 0.5) - 0.5) / max(fwidth(latCoord), 0.002);
+
+  // Fade meridian crowding cleanly near the poles.
+  float polarFade = smoothstep(0.08, 0.35, cos(lat));
+  float minorLon = (1.0 - smoothstep(0.0, 1.35, dLon)) * polarFade;
+  float minorLat = 1.0 - smoothstep(0.0, 1.35, dLat);
+
+  float dLonMaj = abs(fract(lonCoord / 3.0 + 0.5) - 0.5) * 3.0 / max(fwidth(lonCoord), 0.002);
+  float dLatMaj = abs(fract(latCoord / 3.0 + 0.5) - 0.5) * 3.0 / max(fwidth(latCoord), 0.002);
+  float majorLon = (1.0 - smoothstep(0.0, 1.65, dLonMaj)) * polarFade;
+  float majorLat = 1.0 - smoothstep(0.0, 1.65, dLatMaj);
+
+  // Subtle glowing micro-beacons at grid intersections.
+  float node = minorLon * minorLat;
+  float majorNode = majorLon * majorLat;
+
+  vec3 gridCol = mix(vec3(0.14, 0.56, 0.86), vec3(0.62, 0.30, 0.95), u_boss_mood * 0.55);
+  float gridVis = (0.35 + 0.65 * z);
+  col += gridCol * (minorLon + minorLat) * 0.085 * gridVis;
+  col += mix(gridCol, vec3(0.62, 0.94, 1.0), 0.45) * (majorLon + majorLat) * 0.135 * gridVis;
+  col += vec3(0.55, 0.92, 1.0) * (node * 0.16 + majorNode * 0.34) * gridVis;
+
+  // Dual-wave prismatic refractive caustics flowing across the glass globe.
+  float c1 = causticWave(worldN, u_time * 0.72);
+  float c2 = causticWave(worldN * 1.35 + vec3(0.7, -0.4, 0.3), -u_time * 0.55);
+  vec3 causticCol = mix(vec3(0.10, 0.48, 0.78), vec3(0.45, 0.24, 0.85), c2);
+  col += causticCol * (c1 * 0.075 + c2 * 0.055) * (0.75 + u_intensity * 0.95) * (0.4 + 0.6 * z);
+
+  // Glowing polar vortex rings at |lat| > 1.0 rad (~57°).
+  float absLat = abs(lat);
+  float polarZone = smoothstep(0.95, 1.38, absLat);
+  if (polarZone > 0.001) {
+    float polarRings = 0.5 + 0.5 * sin(absLat * 26.0 - u_time * 2.8);
+    col += vec3(0.32, 0.88, 1.0) * polarZone * (0.14 + 0.16 * polarRings);
+  }
+
+  // Sharp inner iridescent limb edge highlight.
+  float rimGlow = smoothstep(0.86, 1.0, r) * (1.0 - smoothstep(0.992, 1.001, r));
+  vec3 rimTint = mix(vec3(0.35, 0.88, 1.0), vec3(0.86, 0.42, 1.0), u_boss_mood * 0.65);
+  col += rimTint * rimGlow * (0.58 + 0.25 * u_intensity);
+
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+// ─── 4. Dual Kawase Bloom Pyramid (Prefilter + 5-Tap Down + 8-Tap Up) ───
+
+export const FULLSCREEN_VERT = `#version 300 es
+precision highp float;
+
+layout(location = 0) in vec2 a_pos;
+out vec2 v_uv;
+
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+  v_uv = a_pos * 0.5 + 0.5;
+}
+`;
+
+// Soft-knee luminance threshold prefilter + initial 4-tap box downsample.
+export const BLOOM_PREFILTER_FRAG = `#version 300 es
+precision highp float;
+
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform vec2 u_texel;
+
+out vec4 fragColor;
+
+vec3 prefilter(vec3 c) {
+  float br = max(c.r, max(c.g, c.b));
+  const float threshold = 0.58;
+  const float knee = 0.42;
+  float soft = clamp(br - threshold + knee, 0.0, 2.0 * knee);
+  soft = (soft * soft) / (4.0 * knee + 0.00001);
+  float contrib = max(soft, br - threshold) / max(br, 0.0001);
+  return c * max(contrib, 0.0);
+}
+
+void main() {
+  vec2 h = u_texel * 0.5;
+  vec3 c = (
+    prefilter(texture(u_tex, v_uv + vec2(-h.x, -h.y)).rgb) +
+    prefilter(texture(u_tex, v_uv + vec2( h.x, -h.y)).rgb) +
+    prefilter(texture(u_tex, v_uv + vec2(-h.x,  h.y)).rgb) +
+    prefilter(texture(u_tex, v_uv + vec2( h.x,  h.y)).rgb)
+  ) * 0.25;
+  fragColor = vec4(c, 1.0);
+}
+`;
+
+// Dual Kawase 5-tap downsample (center*4 + 4 half-pixel diagonals).
+export const KAWASE_DOWN_FRAG = `#version 300 es
+precision highp float;
+
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform vec2 u_texel;
+
+out vec4 fragColor;
+
+void main() {
+  vec2 o = u_texel * 1.0;
+  vec3 sum = texture(u_tex, v_uv).rgb * 4.0;
+  sum += texture(u_tex, v_uv - o).rgb;
+  sum += texture(u_tex, v_uv + o).rgb;
+  sum += texture(u_tex, v_uv + vec2(o.x, -o.y)).rgb;
+  sum += texture(u_tex, v_uv - vec2(o.x, -o.y)).rgb;
+  fragColor = vec4(sum * 0.125, 1.0);
+}
+`;
+
+// Dual Kawase 8-tap tent upsample (weights: 4 cardinals * 1 + 4 diagonals * 2, / 12).
+export const KAWASE_UP_FRAG = `#version 300 es
+precision highp float;
+
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform vec2 u_texel;
+uniform float u_weight;
+
+out vec4 fragColor;
+
+void main() {
+  vec2 o = u_texel * 1.0;
+  vec3 sum = vec3(0.0);
+  sum += texture(u_tex, v_uv + vec2(-o.x * 2.0, 0.0)).rgb;
+  sum += texture(u_tex, v_uv + vec2(-o.x,  o.y)).rgb * 2.0;
+  sum += texture(u_tex, v_uv + vec2(0.0,   o.y * 2.0)).rgb;
+  sum += texture(u_tex, v_uv + vec2( o.x,  o.y)).rgb * 2.0;
+  sum += texture(u_tex, v_uv + vec2( o.x * 2.0, 0.0)).rgb;
+  sum += texture(u_tex, v_uv + vec2( o.x, -o.y)).rgb * 2.0;
+  sum += texture(u_tex, v_uv + vec2(0.0,  -o.y * 2.0)).rgb;
+  sum += texture(u_tex, v_uv + vec2(-o.x, -o.y)).rgb * 2.0;
+  fragColor = vec4((sum / 12.0) * u_weight, 1.0);
+}
+`;
+
+// ─── 5. Final Composite (ACES Filmic + Persistence + Combat Flashes) ───
+
+export const COMPOSITE_FRAG = `#version 300 es
+precision highp float;
+
+in vec2 v_uv;
 
 uniform sampler2D u_scene;
 uniform sampler2D u_bloom;
 uniform sampler2D u_prev;
-uniform float u_persistence;
-uniform float u_intensity;
 uniform float u_time;
+uniform float u_intensity;
+uniform float u_bloom_scale;
+uniform float u_screen_flash;
+uniform float u_damage_flash;
+uniform float u_low_hp;
 
-in vec2 v_uv;
 out vec4 fragColor;
 
+// Narkowicz ACES Filmic tone mapping curve (vibrant HDR chroma + clean white roll-off).
+vec3 acesFilmic(vec3 x) {
+  const float a = 2.51;
+  const float b = 0.03;
+  const float c = 2.43;
+  const float d = 0.59;
+  const float e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 void main() {
-  vec2 dir = v_uv - 0.5;
+  vec2 centered = v_uv - 0.5;
+  float r2 = dot(centered, centered);
 
-  // Minimal chromatic aberration — barely perceptible fringe at screen edges only.
-  float aberr = (0.0002 + length(dir) * 0.0004) * (1.0 + u_intensity * 0.08);
+  // Radial spectral chromatic aberration — subtle during calm, kicks on intense builds / hits.
+  float caAmt = (0.0008 + u_intensity * 0.0022 + u_damage_flash * 0.0055) * u_bloom_scale;
+  vec2 caDir = centered * caAmt * (0.4 + r2 * 2.4);
 
-  vec3 base;
-  base.r = texture(u_scene, v_uv + dir * aberr).r;
-  base.g = texture(u_scene, v_uv).g;
-  base.b = texture(u_scene, v_uv - dir * aberr).b;
+  vec3 scene = vec3(
+    texture(u_scene, v_uv + caDir).r,
+    texture(u_scene, v_uv).g,
+    texture(u_scene, v_uv - caDir).b
+  );
 
-  // Temporal persistence — disabled by default (u_persistence = 0 from renderer).
-  vec3 prev = texture(u_prev, v_uv).rgb;
-  base = max(base, prev * u_persistence);
-
-  // Bloom — thresholded input (see BLOOM_DOWN_FRAG), so this can carry real
-  // weight: a meaningful floor from the first frame, growing with the build.
+  // Multi-octave Dual Kawase bloom — smooth logarithmic growth as shards stack.
   vec3 bloom = texture(u_bloom, v_uv).rgb;
-  float bloomScale = 0.45 + u_intensity * 0.55;
+  float bloomGain = (0.58 + 0.52 * log(1.0 + u_intensity * 2.4)) * u_bloom_scale;
 
-  vec3 col = base + bloom * bloomScale;
+  // Temporal light persistence (silky laser afterglow without muddy trails).
+  vec3 prev = texture(u_prev, v_uv).rgb;
+  float persist = (0.14 + u_intensity * 0.06) * clamp(u_bloom_scale, 0.35, 1.0);
 
-  // Soft radial pulse keyed to time.
-  col += col * 0.012 * sin(u_time * 2.0 + length(dir) * 8.0);
+  vec3 hdr = scene + bloom * bloomGain + prev * persist;
 
-  // Vignette — subtle darkening at edges.
-  col *= 1.0 - length(dir) * 0.5;
+  // Prismatic milestone / level-up / shield-break flash.
+  if (u_screen_flash > 0.001) {
+    float radialFlash = smoothstep(0.95, 0.05, sqrt(r2));
+    hdr += vec3(0.42, 0.86, 1.0) * u_screen_flash * (0.16 + 0.24 * radialFlash);
+  }
 
-  // Subtle scan-line CRT feel.
-  col *= 1.0 - 0.015 * mod(gl_FragCoord.y, 2.0);
+  // Damage flash & low-HP heartbeat crimson vignette.
+  float edge = smoothstep(0.18, 0.72, sqrt(r2));
+  if (u_damage_flash > 0.001) {
+    hdr += vec3(1.15, 0.14, 0.18) * u_damage_flash * edge * 0.55;
+  }
+  if (u_low_hp > 0.001) {
+    float heartbeat = 0.55 + 0.45 * pow(0.5 + 0.5 * sin(u_time * 5.2), 2.0);
+    hdr += vec3(0.95, 0.08, 0.14) * u_low_hp * heartbeat * edge * 0.42;
+  }
 
-  // Reinhard tonemap + gamma.
-  col = col / (1.0 + col);
-  col = pow(col, vec3(1.0 / 2.2));
+  // Subtle theatrical vignette framing the spherical arena.
+  float vig = 1.0 - r2 * 0.46;
+  hdr *= clamp(vig, 0.48, 1.0);
 
-  fragColor = vec4(col, 1.0);
+  // ACES Filmic tone mapping + crisp sRGB gamma.
+  vec3 mapped = acesFilmic(hdr * 1.08);
+  vec3 srgb = pow(mapped, vec3(1.0 / 2.2));
+
+  fragColor = vec4(srgb, 1.0);
 }
 `;
 
-// ─── Persistence copy shader ─────────────────────────────────────────────
-// Simple blit of the composited frame into the persistence buffer.
-
-export const COPY_FRAG = /* glsl */ `#version 300 es
+export const COPY_FRAG = `#version 300 es
 precision highp float;
 
-uniform sampler2D u_src;
-
 in vec2 v_uv;
+uniform sampler2D u_tex;
+
 out vec4 fragColor;
 
 void main() {
-  fragColor = texture(u_src, v_uv);
+  fragColor = texture(u_tex, v_uv);
 }
 `;

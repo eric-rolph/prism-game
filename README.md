@@ -3,100 +3,114 @@
 [![Play Live](https://img.shields.io/badge/Play%20Live-prism.ericrolph.workers.dev-38bdf8)](https://prism.ericrolph.workers.dev/)
 [![Rust + WASM](https://img.shields.io/badge/Rust-WebAssembly%20%2B%20GLSL-f97316?logo=rust&logoColor=white)](https://github.com/eric-rolph/prism-game)
 
-Auto-firing light, refracted through shards you collect. A Vampire-Survivors-paced action game rendered as geometric light, built in Rust + WASM, deployed to Cloudflare Workers.
+Auto-firing light, refracted through shards you collect. A Vampire-Survivors-paced geometric roguelite on a 3D traversable crystal sphere — built in **Rust + WebAssembly + WebGL2 + procedural Web Audio DSP** and deployed to Cloudflare Workers (~94 kB gzip, zero external assets, strict `default-src 'none'` CSP).
 
-**[▶ Play at prism.ericrolph.workers.dev](https://prism.ericrolph.workers.dev/)**
+**[▶ Play Live at prism.ericrolph.workers.dev](https://prism.ericrolph.workers.dev/)**
 
 <p align="center">
   <a href="https://prism.ericrolph.workers.dev/">
-    <img src="docs/preview.png" alt="Prism Rust + WASM spherical light arena" width="760" />
+    <img src="docs/preview.png" alt="Prism live combat — faceted crystal prism refracting plasma beams across a curved sapphire globe with Dual Kawase HDR bloom and floating damage numbers" width="760" />
   </a>
 </p>
 
-**Controls:** WASD or arrow keys. On touch devices, drag anywhere — it becomes a virtual analog stick. When a rank-up modal appears, click a card or press `1` / `2` / `3`. `Esc` to pause.
+<p align="center">
+  <img src="docs/preview-title.png" alt="Prism Title Screen with live spinning crystal globe and Daily Seed mode" width="760" />
+</p>
+
+**Controls:**
+- **Keyboard:** `WASD` / Arrow keys to move · `Space` / `Shift` to Phase Dash · `1` / `2` / `3` to pick shards (`R` Reroll, `X` Skip) · `Esc` to Pause & inspect build
+- **Gamepad:** Left stick / D-pad to move · `A` / `RB` / `RT` to Dash · `Start` to Pause · D-pad/`LB`/`RB` + `A`/`Y`/`B` in rank-up modal
+- **Touch:** Drag anywhere for a virtual analog stick · Double-tap to Dash
 
 ## What it is
 
-You move across the surface of a 3D sphere. Light beams auto-fire toward the nearest enemy. Every level-up offers three shard upgrades — each one modifies how your beams behave (split, refract, mirror, chromatic dispersion, homing, echo, frost, arc, etc.). Stack enough shards and synergies unlock, evolving your build into something spectacular. The visual complexity scales with your build: a fresh run is a few thin cyan lines; a late-game evolved build is hundreds of overlapping spectral beams, orbiting geometry, and prismatic caustic effects filling the screen.
+You glide across the surface of a luminous 3D sphere along exact great-circle geodesics. Light beams auto-fire toward nearby threats. Every rank-up offers three shard upgrades that compose multiplicatively (`Split`, `Refract`, `Mirror`, `Chromatic`, `Lens`, `Diffract`, `Echo`, `Halo`, `Cascade`, `Interference`, `Arc`, `Minefield`, `Lance`, and more). Stack shards to unlock **19 synergies** and **5 level-6 evolutions** as a trickle of thin cyan rays blossoms into hundreds of spectral beams, gravity wells, and crystalline constellations.
 
-Fifteen-minute runs. 23 shards. 5 evolutions. 3 boss milestones.
+- **15-minute runs + Optional Endless Overdrive** after victory (or defeating the Void Prism)
+- **Daily Seed Challenge** (deterministic UTC date seed shared worldwide) + `?seed=<n>` shareable URLs
+- **23 shards · 19 synergies · 5 evolutions · 8 enemy archetypes · 3 multi-phase bosses**
 
-## Visuals
+## Visuals & Rendering Pipeline (WebGL2)
 
-- **Globe surface** — you traverse a traversable sphere rendered in GLSL with correct spherical-arc movement; the background shows meridians, parallels, polar glow, and animated caustic interference patterns
-- **Light beams** — SDF capsule shader with white-hot inner core, spectral rainbow fringe, photon ripple, prism core interference bands, and per-upgrade chromatic split (R/G/B sub-beams)
-- **Player body** — grows as upgrades stack: emitter nodes orbit at increasing radius, a counter-rotating inner ring appears at depth, a rainbow 12-point geometric crown activates when evolutions unlock
-- **Post-processing** — separable Gaussian bloom (intensity scales logarithmically with your build), temporal persistence trails, chromatic aberration, CRT scan-line, radial vignette, Reinhard tonemap
+- **Sapphire Fresnel Crystal Globe & Deep-Space Starfield** — inverse-projected 3D sphere with anti-aliased `fwidth` meridian/parallel coordinates, glowing grid micro-beacons, dual-wave animated prismatic caustics, polar vortex rings, iridescent Fresnel limb corona, and multi-layer twinkling stars outside the horizon
+- **GPU Faceted Geometric SDF Silhouettes** — instanced signed-distance shaders render distinct readable silhouettes per entity role: spinning prismatic hero crystal, rotating faceted diamond radiance gems, beveled crystal hexagons (obstacles, brutes, shields, mines), razor chevron swarm units, 8-point starburst elites/bosses, and **hollow optical wave rings** with subtle spectral RGB dispersion for interference pulses, dash blasts, barriers, and void shockwaves
+- **Optical Plasma Beams** — SDF capsules with white-hot inner plasma core, travelling photon interference ripple, lateral spectral dispersion fringe, seamless edge-feathered halos, and emitter/impact tip flares
+- **4-Level Dual Kawase HDR Bloom Pyramid + ACES Filmic Tonemap** — soft-knee luminance bright-pass → 4-octave downsample (`1/2 → 1/4 → 1/8 → 1/16`) → 8-tap tent additive upsample → Narkowicz ACES Filmic tone mapping, temporal persistence trails, build-scaled chromatic aberration, dynamic combat flashes, and low-HP heartbeat vignette
+- **WebGL Context Loss & Restore Recovery** + selectable visual intensity (`HIGH` / `BALANCED` / `REDUCED`)
+- **2D Floating Combat Overlay** — DPR-aware canvas rendering coalesced floating damage/crit/heal numbers, kill-streak & synergy/evolution milestone banners, and an off-screen directional boss chevron tracker
+
+## Procedural Crystalline Audio Engine (Web Audio DSP)
+
+Zero external audio files — 100% synthesized in real time:
+- **Modal Glass-Bell Synthesis** using physical inharmonic bar partials (`1.0`, `2.756`, `5.404`) locked to a **D Lydian pentatonic lattice** so rapid gem pickup cascades climb melodically without dissonance
+- **Stereo Ping-Pong Glass Cavern Delay** + master **`DynamicsCompressorNode`** + smooth **low-pass modal ducking** (`18.5 kHz ↔ 460 Hz`) when rank-up or pause overlays open
+- **Adaptive Ambient & Combat Pulse Bed** that shifts harmonic density and rhythmic arpeggiation as build intensity and boss encounters escalate
+
+## Simulation Architecture (Rust + WASM)
+
+- **Zero-Copy WASM ↔ JS Linear Memory Bridge** — Rust packs flat `#[repr(C)]` buffers (`CircleInstance` 9 floats, `BeamInstance` 10 floats, `DamagePopup` 4 floats); TypeScript reads `Float32Array` views directly over `wasm.memory.buffer` with zero serialization
+- **Zero-Allocation Flat Spatial Hash Grid (`src/spatial.rs`)** — O(N) tangent-plane spatial grid accelerates beam/area broadphase collision and deterministic enemy soft-separation so 1,000+ late-game swarms flow like liquid geometry instead of collapsing onto one pixel
+- **Boss-Arena Crowd Relief** — major boss arrivals trigger a radial entrance shockwave and outer-crowd cull so boss engagements remain crisp, readable, and balanced within the 20–45 s TTK band
+- **Combat Juice & Telemetry** — kill-streak combo tracker with decay bar, presentation-side hit-stop micro-slowmo on shield breaks & mega-kills, live DPS / Pause Build Inspector, local Top-5 leaderboard, and 1-click Copy Seed/Telemetry summary
 
 ## Stack
 
-- **Rust** → `wasm-pack` → WebAssembly (simulation, shard logic, collision, globe math)
-- **WebGL2** + **TypeScript** + **Vite** (renderer, HUD, bootstrap)
-- **Cloudflare Workers** static assets via **Wrangler**
-- **GitHub Actions** deploys on push to `main`
-
-## Architecture
-
-**Render pipeline (4 passes):**
-1. Globe background — spherical surface with meridian grid, parallels, caustics
-2. Geometry — instanced SDF circles (player body, enemies, particles, orbitals) + SDF capsules (beams) → HDR FBO, additive blending
-3. Bloom — box downsample → separable 13-tap Gaussian (H+V × 2 cycles at half-res) → 9-tap tent upsample to full-res
-4. Composite — chromatic aberration (scales with upgrade intensity), temporal persistence, logarithmic bloom, radial pulse, vignette, Reinhard tonemap, gamma
-
-**Zero-copy WASM↔JS boundary.** Rust packs each frame's draw calls into two flat `Vec<CircleInstance>` / `Vec<BeamInstance>` buffers with `#[repr(C)]`; JavaScript reads the pointers + lengths and creates `Float32Array` views directly over WASM linear memory. No serialization, no marshalling.
-
-**Globe math.** World x/y are arc lengths on an equirectangular chart. `move_on_globe` uses the rotation formula `next = normal·cos(θ) + dir·sin(θ)` to move exactly along a great-circle geodesic. The vertex shader projects the flat local patch back onto the sphere via `sin(θ)/θ` to keep circle/beam shapes correct.
+- **Rust** → `wasm-pack` + `wasm-opt` → WebAssembly (simulation, spatial grid, shard operators, geodesic globe math)
+- **WebGL2** + **GLSL 300 ES** + **TypeScript** + **Vite** (renderer, 2D overlay, Web Audio DSP, HUD)
+- **Cloudflare Workers** static assets via **Wrangler** with strict `Content-Security-Policy`
+- **GitHub Actions** CI (`cargo test`) + live Workers deploy on push to `main`
 
 ## Prerequisites
 
-- Rust stable (pinned in `rust-toolchain.toml`)
+- Rust stable (pinned in `rust-toolchain.toml`) with `wasm32-unknown-unknown` target
 - [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/)
 - Node 22+
 
 ## Local development
 
 ```bash
-# Rebuild the WASM module whenever anything under src/ changes.
-wasm-pack build --target web --out-dir web/wasm --out-name prism --dev
+# Run deterministic Rust simulation & spatial-grid tests
+cargo test
 
-# In another terminal:
+# Rebuild the WASM module whenever anything under src/ changes
+wasm-pack build --release --target web --out-dir web/wasm --out-name prism
+
+# Start the Vite dev server
 cd web
-npm install
+npm ci
 npm run dev
 ```
 
 Open http://localhost:5173.
 
-## Deploy
-
-One-time: add `CLOUDFLARE_API_TOKEN` (Workers Scripts: Edit) and `CLOUDFLARE_ACCOUNT_ID` as GitHub repo secrets. Then push to `main`. The workflow in `.github/workflows/deploy.yml` builds and deploys.
-
 ## Layout
 
 ```
-prism/
+prism-game/
 ├── Cargo.toml                      Rust package manifest
 ├── rust-toolchain.toml             Pinned toolchain
 ├── src/
-│   ├── lib.rs                      #[wasm_bindgen] surface
-│   ├── game.rs                     State, update loop, globe math, draw buffers
-│   ├── shards.rs                   23 shard operators + compose_salvo pipeline
+│   ├── lib.rs                      #[wasm_bindgen] surface + #[repr(C)] GPU/popup structs
+│   ├── game.rs                     Simulation loop, globe geodesics, bosses, endless mode, draw packing
+│   ├── spatial.rs                  Zero-allocation flat spatial hash grid for O(N) queries & separation
+│   ├── shards.rs                   23 shard operators, 19 synergies, 5 evolutions, compose_salvo
 │   ├── entities.rs                 Plain data structs
-│   └── math.rs                     Seeded xorshift RNG
+│   ├── math.rs                     Deterministic seeded xorshift RNG
+│   └── game_tests.rs               Deterministic smoke, boss TTK, crowd relief & endless mode tests
 ├── web/
-│   ├── index.html                  Canvas + HUD
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── vite.config.ts
+│   ├── index.html                  Strict-CSP self-contained shell, Title/Daily UI, HUD, Pause Inspector
+│   ├── public/
+│   │   ├── _headers                Strict Cloudflare security & CSP headers
+│   │   └── favicon.svg             Geometric prism SVG favicon
 │   └── src/
-│       ├── main.ts                 Bootstrap + RAF loop + HUD/modal + intensity
-│       ├── renderer.ts             WebGL2 pipeline
-│       ├── shaders.ts              GLSL 300 ES — beams, circles, globe, bloom, composite
-│       ├── audio.ts                Web Audio procedural voices
-│       └── input.ts                Keyboard + touch
+│       ├── main.ts                 Bootstrap, RAF loop, attract globe, HUD, Endless & Daily Seed
+│       ├── renderer.ts             WebGL2 5-pass Dual Kawase HDR pipeline + context-loss recovery
+│       ├── shaders.ts              GLSL 300 ES — faceted SDFs, beams, globe/starfield, Kawase, ACES
+│       ├── overlay.ts              2D canvas floating damage numbers, banners & off-screen boss arrow
+│       ├── audio.ts                Crystalline modal Web Audio DSP + stereo delay + adaptive pulse
+│       └── input.ts                Keyboard, touch virtual stick & Gamepad API controller
 ├── wrangler.toml                   Cloudflare Workers config
-├── .github/workflows/deploy.yml    CI
-└── .gitignore
+└── .github/workflows/              ci.yml (cargo test) + deploy.yml (WASM + Vite + Workers)
 ```
 
 ## Shards
@@ -133,20 +147,6 @@ prism/
 |---|---|---|
 | Afterimage Engine | Echo 6 + Momentum 6 | Dashing leaves firing echoes |
 | Whiteout | Frost 6 + Diffract 6 | Frozen kills burst into freezing rays |
-| Kaleidoscope | Split 6 + Mirror 6 | Every salvo fires a 24-ray great-circle ring |
+| Kaleidoscope | Split 6 + Mirror 6 | Every salvo fires a great-circle prismatic ring |
 | Singularity | Magnet 6 + Interference 6 | Interference rings become gravity wells |
 | Solar Crown | Halo 6 + Barrier 6 | Halo contacts recharge barrier; barrier hits flare orbitals |
-
-## Roadmap
-
-1. ✅ Pipeline — Rust/WASM + WebGL2 + Cloudflare Workers CI
-2. ✅ Renderer — SDF beams + circles, additive blend, multi-scale bloom, chromatic aberration, persistence, tonemap
-3. ✅ Shard system — 23 operators, compose_salvo pipeline, level-up picker, rarity, synergy HUD
-4. ✅ Survival — 15-minute session, wave pressure, 8 enemy roles, XP gems, dash
-5. ✅ Boss milestones — Sentinel, Hydra, Void Prism
-6. ✅ Upgrade economy — skip/reroll/passives, 5 level-6 evolutions
-7. ✅ Procedural audio — Web Audio voices for beams, gems, rank-ups, synergies, bosses
-8. ✅ Run goals — post-run stats, local high scores
-9. ✅ Globe movement — true spherical-arc traversal, correct great-circle geodesics
-10. ✅ Player body evolution — layered visual geometry that builds out as upgrades stack
-11. ✅ Spectral light physics — prism core interference fringes, photon ripple, chromatic sub-beams, logarithmic bloom scaling
