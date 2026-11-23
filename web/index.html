@@ -8,21 +8,19 @@
     <title>PRISM — Refracted Light Roguelite</title>
     <style>
       :root {
-        --bg:      #02030a;
-        --accent:  #a8f4ff;
-        --accent2: #c9a3ff;
-        --gold:    #ffd740;
-        --red:     #ff6e6e;
-        --green:   #66ff9e;
-        --surface: rgba(10, 22, 42, 0.42);
-        --border:  rgba(168, 244, 255, 0.18);
-        --dim:     rgba(168, 244, 255, 0.56);
-        --faint:   rgba(168, 244, 255, 0.22);
-        --glow-sm: 0 0 12px rgba(168, 244, 255, 0.35);
-        --glow-md: 0 0 26px rgba(168, 244, 255, 0.28);
-        --font-mono: "Cascadia Mono", "JetBrains Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
-        --font-display: "Segoe UI Variable Display", "Inter", system-ui, -apple-system, sans-serif;
-        --text-shadow-hud: 0 1px 4px rgba(0, 0, 0, 1), 0 0 14px rgba(0, 0, 0, 0.85);
+        --bg: #02030a;
+        --ink: #eefaff;
+        --accent: #7df4ff;
+        --accent2: #c99bff;
+        --gold: #ffd95e;
+        --rose: #ff6b8b;
+        --mint: #66ffaa;
+        --dim: rgba(184, 240, 255, 0.58);
+        --faint: rgba(184, 240, 255, 0.24);
+        --line: rgba(132, 236, 255, 0.22);
+        --font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+        --font-display: "Segoe UI Variable Display", "Bahnschrift", "Inter", system-ui, -apple-system, sans-serif;
+        --hud-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 14px rgba(0, 0, 0, 0.85);
       }
 
       *, *::before, *::after { box-sizing: border-box; }
@@ -34,10 +32,12 @@
         background: var(--bg);
         overflow: hidden;
         font-family: var(--font-mono);
-        color: var(--accent);
+        color: var(--ink);
         -webkit-user-select: none;
         user-select: none;
       }
+
+      body.aim-cursor-hidden #canvas { cursor: none; }
 
       #canvas {
         display: block;
@@ -55,455 +55,14 @@
         z-index: 3;
       }
 
-      /* ── Subtle scanline polish ───────────────────── */
-      #scanlines {
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        z-index: 1;
-        background: repeating-linear-gradient(
-          to bottom,
-          transparent 0px,
-          transparent 2px,
-          rgba(0, 0, 0, 0.045) 2px,
-          rgba(0, 0, 0, 0.045) 4px
-        );
-      }
-      #scanline-sweep {
-        position: fixed;
-        left: 0; right: 0;
-        height: 80px;
-        background: linear-gradient(to bottom,
-          transparent 0%,
-          rgba(168, 244, 255, 0.022) 50%,
-          transparent 100%);
-        pointer-events: none;
-        z-index: 2;
-        animation: scan 9s linear infinite;
-      }
-      @keyframes scan {
-        0%   { transform: translateY(-80px); }
-        100% { transform: translateY(100vh); }
-      }
-
-      /* ── FPS status ───────────────────────────────── */
-      #status {
-        position: fixed;
-        bottom: 4px;
-        right: 8px;
-        font-size: 9px;
-        letter-spacing: 1px;
-        opacity: 0.28;
-        pointer-events: none;
-        z-index: 5;
-      }
-
-      /* ── Top system status bar ────────────────────── */
-      #sys-bar {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 30px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 0 16px;
-        font-size: 9px;
-        letter-spacing: 2px;
-        color: rgba(168, 244, 255, 0.50);
-        background: linear-gradient(to bottom, rgba(2, 4, 12, 0.72) 0%, rgba(2, 4, 12, 0.0) 100%);
-        backdrop-filter: blur(6px);
-        -webkit-backdrop-filter: blur(6px);
-        pointer-events: none;
-        z-index: 8;
-      }
-      #sys-bar-left  { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      #sys-bar-mid   { flex: 1; text-align: center; color: rgba(168, 244, 255, 0.34); }
-      #sys-bar-right {
-        flex: 1;
-        display: flex;
-        justify-content: flex-end;
-        align-items: center;
-        gap: 12px;
-        pointer-events: auto;
-      }
-      .sys-action {
-        background: none;
-        border: 1px solid rgba(168, 244, 255, 0.16);
-        color: rgba(168, 244, 255, 0.65);
-        font-family: var(--font-mono);
-        font-size: 8px;
-        letter-spacing: 2px;
-        padding: 3px 8px;
-        cursor: pointer;
-        border-radius: 2px;
-        transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
-      }
-      .sys-action:hover {
-        color: var(--accent);
-        border-color: rgba(168, 244, 255, 0.45);
-        background: rgba(168, 244, 255, 0.08);
-      }
-      #sys-uplink { color: #7dffb0; animation: blink 1.8s infinite; }
-      @keyframes blink {
-        0%, 100% { opacity: 1; }
-        50%      { opacity: 0.4; }
-      }
-
-      /* ── HUD container ────────────────────────────── */
-      #hud {
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        z-index: 5;
-        transition: opacity 280ms ease;
-      }
-      #hud.hidden { opacity: 0; }
-
-      .hud-panel { background: transparent; border: none; }
-
-      /* ── HP + DASH panel (top-left) ───────────────── */
-      #vitals {
-        position: absolute;
-        top: 38px;
-        left: 14px;
-        display: flex;
-        flex-direction: column;
-        gap: 7px;
-        width: 174px;
-        padding: 10px 12px;
-      }
-      .vitals-row {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-      }
-      .vitals-label {
-        font-size: 8px;
-        letter-spacing: 3px;
-        color: var(--dim);
-        display: flex;
-        justify-content: space-between;
-        text-shadow: var(--text-shadow-hud);
-      }
-      #hp-bar {
-        height: 6px;
-        background: rgba(0, 0, 0, 0.52);
-        border: 1px solid rgba(168, 244, 255, 0.14);
-        position: relative;
-        overflow: hidden;
-      }
-      #dash-bar {
-        height: 4px;
-        background: rgba(0, 0, 0, 0.42);
-        position: relative;
-        overflow: hidden;
-      }
-      #hp-fill {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        background: linear-gradient(90deg, #56d6ff, var(--accent));
-        box-shadow: 0 0 12px rgba(168, 244, 255, 0.55);
-        transition: width 120ms ease-out, background 200ms ease-out;
-      }
-      #hp-fill.warn {
-        background: linear-gradient(90deg, #ff8f3c, #ffc86c);
-        box-shadow: 0 0 12px rgba(255, 174, 108, 0.55);
-      }
-      #hp-fill.crit {
-        background: linear-gradient(90deg, #ff2e55, #ff6e7f);
-        box-shadow: 0 0 14px rgba(255, 91, 110, 0.7);
-        animation: blink 0.9s infinite;
-      }
-      #dash-fill {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        background: linear-gradient(90deg, var(--accent2), var(--accent));
-        box-shadow: 0 0 8px rgba(168, 244, 255, 0.5);
-        transition: width 80ms linear;
-      }
-      #dash-hint {
-        font-size: 8px;
-        letter-spacing: 1px;
-        color: var(--faint);
-        margin-top: 2px;
-        text-shadow: var(--text-shadow-hud);
-      }
-
-      /* ── Timer + Wave (top-center) ────────────────── */
-      #timer-wrap {
-        position: absolute;
-        top: 34px;
-        left: 50%;
-        transform: translateX(-50%);
-        text-align: center;
-        pointer-events: none;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 2px;
-        padding: 8px 20px 10px;
-      }
-      #timer {
-        font-size: 28px;
-        font-weight: 300;
-        letter-spacing: 6px;
-        color: rgba(255, 255, 255, 0.96);
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 22px rgba(168, 244, 255, 0.55), 0 0 42px rgba(168, 244, 255, 0.22);
-        font-variant-numeric: tabular-nums;
-      }
-      #wave-label {
-        font-size: 9px;
-        letter-spacing: 3px;
-        color: rgba(255, 184, 116, 0.92);
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 10px rgba(255, 174, 108, 0.45);
-        margin-bottom: 2px;
-      }
-      #endless-badge {
-        display: none;
-        font-size: 8px;
-        letter-spacing: 3px;
-        color: var(--gold);
-        text-shadow: 0 0 10px rgba(255, 215, 64, 0.7);
-        margin-top: 2px;
-      }
-      #endless-badge.shown { display: block; }
-
-      /* ── Boss HP bar ──────────────────────────────── */
-      #boss-hud {
-        position: absolute;
-        top: 96px;
-        left: 50%;
-        transform: translateX(-50%);
-        width: min(380px, 60vw);
-        display: none;
-        text-align: center;
-        pointer-events: none;
-      }
-      #boss-hud.shown { display: block; }
-      #boss-name {
-        font-size: 9px;
-        letter-spacing: 4px;
-        color: rgba(255, 224, 174, 0.92);
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 14px rgba(255, 160, 80, 0.55);
-        margin-bottom: 5px;
-      }
-      #boss-bar {
-        height: 7px;
-        background: rgba(255, 220, 170, 0.14);
-        overflow: hidden;
-        clip-path: polygon(0 0, 100% 0, calc(100% - 6px) 100%, 6px 100%);
-      }
-      #boss-fill {
-        height: 100%;
-        width: 0%;
-        background: linear-gradient(90deg, #ff4455, #ffb05c, #fff5cc);
-        box-shadow: 0 0 18px rgba(255, 110, 80, 0.85);
-        transition: width 100ms linear;
-      }
-
-      /* ── Rank + Kills + Streak + Synergies (top-right) ── */
-      #stats {
-        position: absolute;
-        top: 38px;
-        right: 14px;
-        text-align: right;
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        min-width: 170px;
-        max-width: 240px;
-        padding: 10px 12px;
-      }
-      #rank-label {
-        font-size: 9px;
-        letter-spacing: 3px;
-        color: var(--dim);
-        text-shadow: var(--text-shadow-hud);
-      }
-      #rank {
-        font-family: var(--font-display);
-        font-size: 34px;
-        font-weight: 300;
-        letter-spacing: 3px;
-        color: rgba(255, 255, 255, 0.96);
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), var(--glow-sm);
-        line-height: 1;
-        margin-bottom: 2px;
-      }
-      #kills {
-        font-size: 9px;
-        letter-spacing: 2px;
-        color: var(--dim);
-        text-shadow: var(--text-shadow-hud);
-      }
-      #combo-wrap {
-        margin-top: 6px;
-        display: none;
-        flex-direction: column;
-        align-items: flex-end;
-        gap: 3px;
-      }
-      #combo-wrap.shown { display: flex; }
-      #combo-val {
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 3px;
-        color: #7ef2ff;
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 12px rgba(126, 242, 255, 0.65);
-      }
-      #combo-val.hot {
-        color: var(--gold);
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 16px rgba(255, 215, 64, 0.85);
-      }
-      #combo-val.super {
-        color: #ff8df2;
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 18px rgba(255, 110, 240, 0.9);
-      }
-      #combo-bar {
-        width: 96px;
-        height: 2px;
-        background: rgba(168, 244, 255, 0.16);
-        overflow: hidden;
-      }
-      #combo-fill {
-        height: 100%;
-        width: 100%;
-        background: linear-gradient(90deg, var(--accent2), var(--gold));
-        transition: width 70ms linear;
-      }
-      #synergies-section {
-        margin-top: 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        align-items: flex-end;
-      }
-      #synergies-label {
-        font-size: 8px;
-        letter-spacing: 3px;
-        color: rgba(168, 244, 255, 0.34);
-        margin-bottom: 3px;
-        text-shadow: var(--text-shadow-hud);
-      }
-      #synergies-hud {
-        display: flex;
-        flex-direction: column;
-        align-items: flex-end;
-        gap: 3px;
-      }
-      .synergy-tag {
-        font-size: 8px;
-        letter-spacing: 2px;
-        padding: 2px 0;
-        transition: opacity 200ms ease, color 200ms ease;
-        text-shadow: var(--text-shadow-hud);
-      }
-      .synergy-tag.active {
-        color: var(--gold);
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 1), 0 0 9px rgba(255, 215, 64, 0.65);
-      }
-      .synergy-tag.near {
-        color: rgba(168, 244, 255, 0.38);
-      }
-
-      /* ── XP bar (bottom-center) ───────────────────── */
-      #xp-outer {
-        position: absolute;
-        left: 50%;
-        transform: translateX(-50%);
-        bottom: 18px;
-        width: min(640px, 58vw);
-        padding: 8px 12px;
-      }
-      #xp-label {
-        display: flex;
-        justify-content: space-between;
-        font-size: 8px;
-        letter-spacing: 2px;
-        color: var(--dim);
-        margin-bottom: 4px;
-        text-shadow: var(--text-shadow-hud);
-      }
-      #xp-wrap {
-        height: 4px;
-        background: rgba(0, 0, 0, 0.45);
-        border: 1px solid rgba(168, 244, 255, 0.12);
-        overflow: hidden;
-        width: 100%;
-      }
-      #xp-fill {
-        height: 100%;
-        width: 0%;
-        background: linear-gradient(90deg, #56ccff, #d4fbff);
-        box-shadow: 0 0 16px #7fd3ff;
-        transition: width 120ms ease-out;
-      }
-
-      /* ── Shard tray (bottom-left) ─────────────────── */
-      #shards-tray {
-        position: absolute;
-        left: 14px;
-        bottom: 14px;
-        display: flex;
-        flex-wrap: wrap;
-        max-width: 245px;
-        gap: 6px;
-        align-items: flex-end;
-        padding: 8px 10px;
-        min-height: 20px;
-      }
-      .shard-pip-wrap {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 3px;
-      }
-      .shard-pip {
-        width: 26px;
-        height: 30px;
-        clip-path: polygon(50% 0%, 95% 25%, 95% 75%, 50% 100%, 5% 75%, 5% 25%);
-        background: transparent;
-        border: 1px solid var(--faint);
-        transition: box-shadow 200ms ease, background 200ms ease;
-      }
-      .shard-pip-label {
-        font-size: 8px;
-        letter-spacing: 1px;
-        font-weight: 600;
-        line-height: 1;
-        text-shadow: var(--text-shadow-hud);
-      }
-
-      /* ── Wave clear banner ────────────────────────── */
-      #wave-clear {
-        position: fixed;
-        top: 38%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        font-size: 18px;
-        letter-spacing: 10px;
-        font-weight: 300;
-        color: var(--accent);
-        opacity: 0;
-        pointer-events: none;
-        z-index: 6;
-        transition: opacity 300ms ease-out;
-        text-shadow: var(--glow-md);
-      }
-      #wave-clear.shown { opacity: 0.92; }
-
-      /* ── Corner reticles ──────────────────────────── */
+      /* ── Subtle optical frame reticles ────────────── */
       .corner {
         position: fixed;
-        width: 24px;
-        height: 24px;
+        width: 22px;
+        height: 22px;
         pointer-events: none;
         z-index: 4;
-        opacity: 0.35;
+        opacity: 0.34;
       }
       .corner::before, .corner::after {
         content: '';
@@ -517,162 +76,567 @@
       .corner-bl { bottom: 0; left: 0; transform: scaleY(-1); }
       .corner-br { bottom: 0; right: 0; transform: scale(-1); }
 
+      #status {
+        position: fixed;
+        bottom: 5px;
+        right: 10px;
+        font-size: 9px;
+        letter-spacing: 1px;
+        opacity: 0.28;
+        pointer-events: none;
+        z-index: 5;
+      }
+
+      /* ── Top slim telemetry bar ───────────────────── */
+      #sys-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 16px;
+        font-size: 9px;
+        letter-spacing: 2px;
+        color: rgba(184, 240, 255, 0.52);
+        background: linear-gradient(to bottom, rgba(2, 4, 14, 0.78) 0%, rgba(2, 4, 14, 0) 100%);
+        pointer-events: none;
+        z-index: 12;
+      }
+      #sys-bar-left  { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #sys-bar-mid   { flex: 1; text-align: center; color: rgba(184, 240, 255, 0.36); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #sys-bar-right {
+        flex: 1;
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 8px;
+        pointer-events: auto;
+      }
+      .sys-action {
+        background: rgba(6, 16, 36, 0.55);
+        border: 1px solid rgba(132, 236, 255, 0.2);
+        color: rgba(208, 246, 255, 0.72);
+        font-family: var(--font-mono);
+        font-size: 8px;
+        letter-spacing: 2px;
+        padding: 3px 9px;
+        cursor: pointer;
+        clip-path: polygon(5px 0, 100% 0, calc(100% - 5px) 100%, 0 100%);
+        transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+      }
+      .sys-action:hover {
+        color: #fff;
+        border-color: rgba(125, 244, 255, 0.65);
+        background: rgba(125, 244, 255, 0.14);
+      }
+      #sys-uplink { color: #7dffb0; margin-left: 4px; }
+
+      /* ── HUD container ────────────────────────────── */
+      #hud {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 5;
+        transition: opacity 280ms ease;
+      }
+      #hud.hidden { opacity: 0; }
+
+      /* ── Top-left Vitals + Aim Trainer Telemetry ──── */
+      #vitals {
+        position: absolute;
+        top: 40px;
+        left: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        width: 196px;
+      }
+      .vitals-row { display: flex; flex-direction: column; gap: 3px; }
+      .vitals-label {
+        font-size: 8.5px;
+        letter-spacing: 3px;
+        color: var(--dim);
+        display: flex;
+        justify-content: space-between;
+        text-shadow: var(--hud-shadow);
+      }
+      #hp-bar {
+        height: 6px;
+        background: rgba(0, 0, 0, 0.55);
+        clip-path: polygon(4px 0, 100% 0, calc(100% - 4px) 100%, 0 100%);
+        position: relative;
+        overflow: hidden;
+      }
+      #dash-bar {
+        height: 4px;
+        background: rgba(0, 0, 0, 0.45);
+        clip-path: polygon(3px 0, 100% 0, calc(100% - 3px) 100%, 0 100%);
+        position: relative;
+        overflow: hidden;
+      }
+      #hp-fill {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        background: linear-gradient(90deg, #42c9ff, #9cf7ff);
+        box-shadow: 0 0 12px rgba(125, 244, 255, 0.55);
+        transition: width 110ms ease-out, background 200ms ease-out;
+      }
+      #hp-fill.warn { background: linear-gradient(90deg, #ff8c38, #ffd06b); }
+      #hp-fill.crit { background: linear-gradient(90deg, #ff2752, #ff708a); }
+      #dash-fill {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        background: linear-gradient(90deg, var(--accent2), var(--accent));
+        transition: width 70ms linear;
+      }
+      #dash-hint {
+        font-size: 7.5px;
+        letter-spacing: 1.5px;
+        color: var(--faint);
+        text-shadow: var(--hud-shadow);
+      }
+
+      /* Live FPS Aim-Trainer HUD block (auto-appears when aiming with mouse or right stick) */
+      #aim-hud {
+        margin-top: 8px;
+        padding: 7px 10px;
+        border-left: 2px solid var(--gold);
+        background: linear-gradient(90deg, rgba(255, 217, 94, 0.11), rgba(6, 14, 30, 0));
+        display: none;
+        flex-direction: column;
+        gap: 3px;
+        text-shadow: var(--hud-shadow);
+      }
+      #aim-hud.shown { display: flex; }
+      #aim-hud-top {
+        display: flex;
+        justify-content: space-between;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 2.5px;
+        color: var(--gold);
+      }
+      #aim-hud-sub {
+        display: flex;
+        justify-content: space-between;
+        font-size: 8px;
+        letter-spacing: 1.5px;
+        color: rgba(226, 248, 255, 0.78);
+      }
+
+      /* ── Top-center Timer + Wave ──────────────────── */
+      #timer-wrap {
+        position: absolute;
+        top: 34px;
+        left: 50%;
+        transform: translateX(-50%);
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+      }
+      #wave-label {
+        font-size: 9px;
+        letter-spacing: 4px;
+        color: #ffc27a;
+        text-shadow: var(--hud-shadow);
+      }
+      #timer {
+        font-family: var(--font-display);
+        font-size: 32px;
+        font-weight: 300;
+        letter-spacing: 6px;
+        color: #ffffff;
+        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 24px rgba(125, 244, 255, 0.55);
+        font-variant-numeric: tabular-nums;
+      }
+      #endless-badge {
+        display: none;
+        font-size: 8px;
+        letter-spacing: 3px;
+        color: var(--gold);
+        text-shadow: 0 0 10px rgba(255, 217, 94, 0.75);
+      }
+      #endless-badge.shown { display: block; }
+
+      #boss-hud {
+        position: absolute;
+        top: 100px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(400px, 62vw);
+        display: none;
+        text-align: center;
+      }
+      #boss-hud.shown { display: block; }
+      #boss-name {
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 5px;
+        color: #ffdba3;
+        text-shadow: var(--hud-shadow);
+        margin-bottom: 5px;
+      }
+      #boss-bar {
+        height: 8px;
+        background: rgba(255, 220, 170, 0.14);
+        clip-path: polygon(8px 0, 100% 0, calc(100% - 8px) 100%, 0 100%);
+        overflow: hidden;
+      }
+      #boss-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #ff3e64, #ffae52, #fff4c4);
+        box-shadow: 0 0 18px rgba(255, 110, 80, 0.85);
+        transition: width 90ms linear;
+      }
+
+      /* ── Top-right Rank + Kills + Combo + Synergies ── */
+      #stats {
+        position: absolute;
+        top: 40px;
+        right: 16px;
+        text-align: right;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 175px;
+      }
+      #rank-label { font-size: 8.5px; letter-spacing: 3.5px; color: var(--dim); text-shadow: var(--hud-shadow); }
+      #rank {
+        font-family: var(--font-display);
+        font-size: 36px;
+        font-weight: 300;
+        letter-spacing: 2px;
+        line-height: 1;
+        color: #fff;
+        text-shadow: 0 1px 4px rgba(0, 0, 0, 1), 0 0 16px rgba(125, 244, 255, 0.45);
+      }
+      #kills { font-size: 9px; letter-spacing: 2px; color: var(--dim); text-shadow: var(--hud-shadow); }
+      #combo-wrap {
+        margin-top: 6px;
+        display: none;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 3px;
+      }
+      #combo-wrap.shown { display: flex; }
+      #combo-val {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 3px;
+        color: var(--accent);
+        text-shadow: var(--hud-shadow);
+      }
+      #combo-val.hot { color: var(--gold); }
+      #combo-val.super { color: #ff8df2; }
+      #combo-bar { width: 100px; height: 2px; background: rgba(168, 244, 255, 0.16); overflow: hidden; }
+      #combo-fill { height: 100%; width: 100%; background: linear-gradient(90deg, var(--accent2), var(--gold)); }
+      #synergies-section { margin-top: 10px; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+      #synergies-label { font-size: 8px; letter-spacing: 3px; color: rgba(184, 240, 255, 0.35); text-shadow: var(--hud-shadow); }
+      #synergies-hud { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+      .synergy-tag { font-size: 8.5px; letter-spacing: 2px; text-shadow: var(--hud-shadow); }
+      .synergy-tag.active { color: var(--gold); }
+      .synergy-tag.near { color: rgba(184, 240, 255, 0.38); }
+
+      /* ── Bottom XP + Shard Tray ───────────────────── */
+      #xp-outer {
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: 18px;
+        width: min(620px, 56vw);
+      }
+      #xp-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 8.5px;
+        letter-spacing: 2.5px;
+        color: var(--dim);
+        margin-bottom: 5px;
+        text-shadow: var(--hud-shadow);
+      }
+      #xp-wrap {
+        height: 5px;
+        background: rgba(0, 0, 0, 0.5);
+        clip-path: polygon(4px 0, 100% 0, calc(100% - 4px) 100%, 0 100%);
+        overflow: hidden;
+      }
+      #xp-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #42c9ff, #c99bff, #ffffff);
+        box-shadow: 0 0 14px #7fd3ff;
+        transition: width 120ms ease-out;
+      }
+
+      #shards-tray {
+        position: absolute;
+        left: 16px;
+        bottom: 16px;
+        display: flex;
+        flex-wrap: wrap;
+        max-width: 260px;
+        gap: 6px;
+        align-items: flex-end;
+      }
+      .shard-pip-wrap { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+      .shard-pip {
+        width: 24px;
+        height: 28px;
+        clip-path: polygon(50% 0%, 96% 25%, 96% 75%, 50% 100%, 4% 75%, 4% 25%);
+        border: 1px solid var(--faint);
+      }
+      .shard-pip-label { font-size: 8px; font-weight: 600; line-height: 1; text-shadow: var(--hud-shadow); }
+
+      #wave-clear {
+        position: fixed;
+        top: 38%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-family: var(--font-display);
+        font-size: 22px;
+        letter-spacing: 12px;
+        font-weight: 300;
+        color: var(--accent);
+        opacity: 0;
+        pointer-events: none;
+        z-index: 6;
+        transition: opacity 280ms ease-out;
+        text-shadow: 0 0 28px rgba(125, 244, 255, 0.65);
+      }
+      #wave-clear.shown { opacity: 0.92; }
+
+      /* ── Shared kinetic chamfered game buttons ─────── */
+      .prism-btn {
+        position: relative;
+        padding: 14px 34px;
+        border: none;
+        background: linear-gradient(115deg, rgba(56, 206, 255, 0.24), rgba(162, 110, 255, 0.22));
+        color: #f4fdff;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 4.5px;
+        cursor: pointer;
+        clip-path: polygon(12px 0, 100% 0, calc(100% - 12px) 100%, 0 100%);
+        box-shadow: inset 0 0 0 1px rgba(132, 240, 255, 0.55);
+        transition: transform 150ms cubic-bezier(.2,.8,.2,1), background 180ms ease, filter 180ms ease;
+        overflow: hidden;
+      }
+      .prism-btn::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(110deg, transparent 25%, rgba(255, 255, 255, 0.26) 50%, transparent 75%);
+        transform: translateX(-120%);
+        transition: transform 420ms ease;
+      }
+      .prism-btn:hover::after { transform: translateX(120%); }
+      .prism-btn:hover, .prism-btn:focus-visible {
+        outline: none;
+        transform: translateY(-2px);
+        background: linear-gradient(115deg, rgba(72, 224, 255, 0.36), rgba(186, 132, 255, 0.32));
+        filter: drop-shadow(0 0 18px rgba(125, 244, 255, 0.45));
+      }
+      .prism-btn.gold {
+        background: linear-gradient(115deg, rgba(255, 210, 82, 0.24), rgba(255, 132, 72, 0.18));
+        color: #fff2bd;
+        box-shadow: inset 0 0 0 1px rgba(255, 217, 94, 0.58);
+      }
+      .prism-btn.gold:hover, .prism-btn.gold:focus-visible {
+        background: linear-gradient(115deg, rgba(255, 217, 94, 0.36), rgba(255, 148, 82, 0.28));
+        filter: drop-shadow(0 0 18px rgba(255, 217, 94, 0.45));
+      }
+      .prism-btn.ghost {
+        padding: 11px 24px;
+        font-size: 9.5px;
+        letter-spacing: 3px;
+        font-weight: 500;
+        background: rgba(8, 18, 38, 0.62);
+        color: rgba(206, 246, 255, 0.85);
+        box-shadow: inset 0 0 0 1px rgba(132, 236, 255, 0.26);
+      }
+      .prism-btn.ghost:hover {
+        background: rgba(125, 244, 255, 0.16);
+        color: #ffffff;
+      }
+      .prism-btn:disabled { opacity: 0.28; cursor: default; transform: none; filter: none; }
+
       /* ── Shared overlay base ──────────────────────── */
       .overlay {
         position: fixed;
         inset: 0;
         display: none;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
         z-index: 30;
-        background: rgba(2, 4, 12, 0.72);
-        backdrop-filter: blur(16px) saturate(140%);
-        -webkit-backdrop-filter: blur(16px) saturate(140%);
-        animation: fade-in 220ms ease-out;
+        animation: fade-in 200ms ease-out;
       }
       .overlay.shown { display: flex; }
       @keyframes fade-in {
-        from { opacity: 0; transform: translateY(-6px); }
-        to   { opacity: 1; transform: translateY(0); }
+        from { opacity: 0; }
+        to   { opacity: 1; }
       }
 
-      /* ── Title / Boot Screen (floats over live spinning globe!) ── */
+      /* ── BESPOKE TITLE SCREEN (Asymmetric Kinetic Editorial Layout) ── */
       #title-screen {
         z-index: 45;
-        background: radial-gradient(circle at 50% 48%, rgba(2, 6, 18, 0.25) 0%, rgba(2, 3, 10, 0.72) 78%);
-        backdrop-filter: blur(3px);
-        -webkit-backdrop-filter: blur(3px);
+        pointer-events: none;
+        align-items: center;
+        justify-content: flex-start;
+        padding: clamp(28px, 6vw, 84px);
+        background: linear-gradient(
+          102deg,
+          rgba(2, 5, 16, 0.88) 0%,
+          rgba(3, 8, 22, 0.62) 44%,
+          rgba(2, 5, 16, 0.08) 76%,
+          rgba(2, 5, 16, 0.32) 100%
+        );
+      }
+      #title-column {
+        pointer-events: auto;
+        max-width: 530px;
+        display: flex;
+        flex-direction: column;
         gap: 18px;
-        padding: 28px 20px;
-        text-align: center;
       }
-      #title-emblem {
-        width: 82px;
-        height: 82px;
-        filter: drop-shadow(0 0 22px rgba(120, 230, 255, 0.65));
-        animation: prism-float 5.5s ease-in-out infinite;
+      #title-kicker {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 9px;
+        letter-spacing: 4.5px;
+        color: var(--accent);
       }
-      @keyframes prism-float {
-        0%, 100% { transform: translateY(0px) rotate(0deg); }
-        50%      { transform: translateY(-6px) rotate(3deg); }
+      #title-kicker::before {
+        content: '';
+        width: 24px;
+        height: 2px;
+        background: linear-gradient(90deg, var(--accent), var(--accent2));
       }
       #title-wordmark {
         font-family: var(--font-display);
-        font-size: clamp(54px, 9vw, 88px);
-        font-weight: 300;
-        letter-spacing: 22px;
-        padding-left: 22px;
-        color: #f4fdff;
-        line-height: 1;
-        text-shadow: 0 0 34px rgba(120, 232, 255, 0.65), 0 0 70px rgba(176, 120, 255, 0.35);
+        font-size: clamp(64px, 10vw, 108px);
+        font-weight: 700;
+        letter-spacing: 14px;
+        line-height: 0.92;
+        margin: 0;
+        background: linear-gradient(125deg, #ffffff 15%, #9af6ff 55%, #d6adff 82%, #ffe28a 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        filter: drop-shadow(0 0 32px rgba(125, 244, 255, 0.32));
       }
-      #title-sub {
-        font-size: 10px;
-        letter-spacing: 5px;
-        color: rgba(168, 244, 255, 0.72);
-        text-shadow: var(--text-shadow-hud);
+      #title-spectrum-rule {
+        height: 2px;
+        width: 100%;
+        background: linear-gradient(90deg, #62f4ff 0%, #c99bff 42%, #ffd95e 72%, transparent 100%);
       }
-      #title-pills {
+      #title-lead {
+        font-size: 12px;
+        line-height: 1.75;
+        color: rgba(214, 244, 255, 0.80);
+        letter-spacing: 0.6px;
+        max-width: 470px;
+      }
+      #title-guide {
         display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 8px;
-        margin-top: 2px;
+        flex-direction: column;
+        gap: 9px;
+        padding: 4px 0;
       }
-      .title-pill {
-        font-size: 8px;
-        letter-spacing: 2.5px;
-        padding: 4px 10px;
-        border: 1px solid rgba(168, 244, 255, 0.2);
-        background: rgba(6, 16, 34, 0.55);
-        color: rgba(196, 245, 255, 0.78);
-        border-radius: 2px;
+      .guide-step {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        font-size: 10px;
+        line-height: 1.5;
+        color: rgba(196, 238, 255, 0.72);
       }
+      .guide-num {
+        font-weight: 700;
+        color: var(--gold);
+        letter-spacing: 2px;
+        flex-shrink: 0;
+      }
+      .guide-step strong { color: #f2fdff; font-weight: 600; letter-spacing: 1px; }
+
       #title-actions {
         display: flex;
         flex-wrap: wrap;
-        justify-content: center;
-        gap: 14px;
-        margin-top: 10px;
-      }
-      .cta-btn {
-        padding: 14px 36px;
-        border: 1px solid rgba(168, 244, 255, 0.48);
-        border-radius: 2px;
-        background: linear-gradient(135deg, rgba(64, 196, 255, 0.20), rgba(168, 120, 255, 0.14));
-        color: #f0fdff;
-        font-family: var(--font-mono);
-        font-size: 12px;
-        font-weight: 600;
-        letter-spacing: 5px;
-        cursor: pointer;
-        box-shadow: 0 0 26px rgba(102, 224, 255, 0.22);
-        transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease, background 180ms ease;
-      }
-      .cta-btn:hover, .cta-btn:focus-visible {
-        outline: none;
-        transform: translateY(-2px);
-        border-color: rgba(168, 244, 255, 0.88);
-        background: linear-gradient(135deg, rgba(84, 212, 255, 0.30), rgba(186, 138, 255, 0.22));
-        box-shadow: 0 0 34px rgba(120, 232, 255, 0.42);
-      }
-      .cta-btn.secondary {
-        border-color: rgba(255, 215, 64, 0.38);
-        background: linear-gradient(135deg, rgba(255, 215, 64, 0.12), rgba(255, 148, 72, 0.08));
-        color: #ffe899;
-        box-shadow: 0 0 22px rgba(255, 215, 64, 0.14);
-      }
-      .cta-btn.secondary:hover, .cta-btn.secondary:focus-visible {
-        border-color: rgba(255, 215, 64, 0.85);
-        background: linear-gradient(135deg, rgba(255, 215, 64, 0.24), rgba(255, 158, 72, 0.16));
-        box-shadow: 0 0 32px rgba(255, 215, 64, 0.35);
+        gap: 12px;
+        margin-top: 4px;
       }
       #title-best {
-        font-size: 9px;
-        letter-spacing: 3px;
+        font-size: 9.5px;
+        letter-spacing: 2.5px;
         color: var(--gold);
-        text-shadow: 0 0 12px rgba(255, 215, 64, 0.45);
         min-height: 14px;
       }
-      #title-controls {
-        margin-top: 8px;
-        font-size: 9px;
-        letter-spacing: 2.2px;
-        color: rgba(168, 244, 255, 0.52);
-        line-height: 1.9;
-        max-width: 620px;
+      #title-keys {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 14px;
+        font-size: 8.5px;
+        letter-spacing: 1.5px;
+        color: rgba(184, 236, 255, 0.56);
+        padding-top: 6px;
+        border-top: 1px solid rgba(132, 236, 255, 0.12);
       }
-      #title-controls b {
-        color: rgba(226, 250, 255, 0.88);
-        font-weight: 500;
+      .kbd {
+        display: inline-block;
+        padding: 1px 6px;
+        margin-right: 4px;
+        font-size: 8px;
+        font-weight: 700;
+        color: #eefaff;
+        border: 1px solid rgba(132, 236, 255, 0.32);
+        background: rgba(125, 244, 255, 0.08);
       }
 
-      /* ── Level-up overlay ─────────────────────────── */
+      /* ── BESPOKE HOLOGRAPHIC SHARD PICKER (Balatro × Transistor craft) ── */
       #levelup {
-        gap: 22px;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 20px;
         padding: 24px 20px;
         overflow-y: auto;
+        background: radial-gradient(circle at 50% 42%, rgba(8, 16, 40, 0.72) 0%, rgba(2, 4, 12, 0.90) 100%);
+        backdrop-filter: blur(12px) saturate(140%);
+        -webkit-backdrop-filter: blur(12px) saturate(140%);
+      }
+      #levelup-header {
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
       }
       #levelup-title {
         font-size: 9px;
         letter-spacing: 6px;
-        color: var(--dim);
+        color: var(--gold);
       }
       #levelup-rank {
         font-family: var(--font-display);
-        font-size: 42px;
-        font-weight: 300;
-        letter-spacing: 4px;
-        color: rgba(255, 255, 255, 0.96);
-        text-shadow: 0 0 32px rgba(168, 244, 255, 0.55);
+        font-size: clamp(32px, 5vw, 48px);
+        font-weight: 700;
+        letter-spacing: 6px;
+        color: #fff;
+        text-shadow: 0 0 28px rgba(125, 244, 255, 0.55);
       }
       #levelup-cards {
         display: flex;
-        gap: 16px;
+        gap: 20px;
         flex-wrap: wrap;
         justify-content: center;
-        padding: 0 16px;
+        perspective: 900px;
       }
       #levelup-footer {
         display: flex;
@@ -681,383 +645,415 @@
         justify-content: center;
       }
 
-      /* ── Shard card ───────────────────────────────── */
       .shard-card {
-        width: 214px;
-        min-height: 244px;
-        padding: 20px 18px;
-        border: 1px solid var(--border);
-        border-radius: 3px;
-        background: var(--surface);
+        --sc: #7df4ff;
+        --mx: 50%;
+        --my: 50%;
+        width: 244px;
+        min-height: 310px;
+        padding: 22px 20px 18px;
+        border: none;
+        background:
+          radial-gradient(circle at var(--mx) var(--my), color-mix(in srgb, var(--sc) 22%, transparent), transparent 60%),
+          linear-gradient(155deg, rgba(12, 24, 52, 0.92) 0%, rgba(5, 10, 26, 0.96) 100%);
+        clip-path: polygon(16px 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%, 0 16px);
         display: flex;
         flex-direction: column;
         gap: 10px;
         cursor: pointer;
-        transition: transform 180ms ease, border-color 200ms ease, box-shadow 220ms ease, background 200ms ease;
         font-family: var(--font-mono);
         text-align: left;
-        color: var(--accent);
+        color: var(--ink);
         position: relative;
-        overflow: hidden;
+        transform-style: preserve-3d;
+        transition: transform 160ms cubic-bezier(.2,.8,.2,1), filter 180ms ease;
+        box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--sc) 42%, transparent);
       }
       .shard-card::before {
         content: '';
         position: absolute;
         top: 0; left: 0; right: 0;
-        height: 1px;
-        background: linear-gradient(90deg, transparent, var(--accent), transparent);
-        opacity: 0;
-        transition: opacity 200ms ease;
+        height: 3px;
+        background: linear-gradient(90deg, transparent, var(--sc), #ffffff, var(--sc), transparent);
       }
-      .shard-card:hover, .shard-card:focus, .shard-card.gamepad-focus {
-        transform: translateY(-4px);
+      .shard-card:hover, .shard-card:focus-visible, .shard-card.gamepad-focus {
         outline: none;
-        border-color: rgba(168, 244, 255, 0.62);
-        background: rgba(168, 244, 255, 0.10);
-        box-shadow: 0 0 32px rgba(168, 244, 255, 0.22), inset 0 0 20px rgba(168, 244, 255, 0.06);
+        filter: drop-shadow(0 10px 26px color-mix(in srgb, var(--sc) 35%, transparent));
+        box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--sc) 88%, #fff);
       }
-      .shard-card:hover::before, .shard-card.gamepad-focus::before { opacity: 1; }
 
-      .shard-icon {
-        width: 44px;
-        height: 50px;
-        clip-path: polygon(50% 0%, 100% 27%, 100% 73%, 50% 100%, 0% 73%, 0% 27%);
-        box-shadow: 0 0 18px currentColor, inset 0 0 12px rgba(0, 0, 0, 0.4);
-        flex-shrink: 0;
+      .shard-top-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
       }
-      .shard-rarity {
-        font-size: 7px;
-        letter-spacing: 4px;
-        text-transform: uppercase;
-        margin-bottom: 2px;
+      .shard-emblem {
+        width: 52px;
+        height: 52px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: radial-gradient(circle, color-mix(in srgb, var(--sc) 24%, transparent), transparent 72%);
+        clip-path: polygon(50% 0%, 96% 25%, 96% 75%, 50% 100%, 4% 75%, 4% 25%);
+        border: 1px solid color-mix(in srgb, var(--sc) 45%, transparent);
       }
-      .shard-rarity.common    { color: rgba(168, 244, 255, 0.45); }
-      .shard-rarity.rare      { color: #7fd3ff; text-shadow: 0 0 6px rgba(127, 211, 255, 0.55); }
-      .shard-rarity.legendary { color: var(--gold); text-shadow: 0 0 8px rgba(255, 215, 64, 0.65); }
-      .shard-rarity.evolution { color: #ffb547; text-shadow: 0 0 12px rgba(255, 181, 71, 0.75); }
+      .shard-svg { width: 38px; height: 38px; filter: drop-shadow(0 0 8px currentColor); }
 
-      .shard-name {
-        font-size: 12px;
-        letter-spacing: 4px;
-        font-weight: 500;
-        color: var(--accent);
-      }
-      .shard-level {
-        font-size: 9px;
-        letter-spacing: 2px;
-        color: var(--dim);
-      }
-      .shard-desc {
-        font-size: 10px;
-        line-height: 1.65;
-        color: rgba(196, 242, 255, 0.72);
-        flex: 1;
-      }
-      .shard-synergy {
+      .shard-tag-col {
         display: flex;
         flex-direction: column;
+        align-items: flex-end;
         gap: 4px;
-        font-size: 9px;
-        color: #c9ffa3;
-        letter-spacing: 0.5px;
       }
-      .shard-synergy span {
-        padding-left: 8px;
-        border-left: 2px solid currentColor;
-        opacity: 0.85;
-      }
-      .shard-hotkey {
-        margin-top: auto;
-        font-size: 9px;
-        letter-spacing: 3px;
-        color: var(--faint);
-      }
-
-      .levelup-action {
-        margin-top: 4px;
-        padding: 9px 26px;
-        border: 1px solid var(--border);
-        border-radius: 2px;
-        background: rgba(8, 18, 36, 0.5);
-        color: var(--dim);
-        font-family: var(--font-mono);
-        font-size: 9px;
-        letter-spacing: 3px;
-        cursor: pointer;
-        transition: color 180ms ease, border-color 180ms ease, background 180ms ease;
-      }
-      .levelup-action:hover:not(:disabled) {
-        color: var(--accent);
-        border-color: rgba(168, 244, 255, 0.5);
-        background: rgba(168, 244, 255, 0.08);
-      }
-      .levelup-action:disabled {
-        opacity: 0.24;
-        cursor: default;
-      }
-
-      /* ── Death / Victory overlay ──────────────────── */
-      #death-screen {
-        gap: 14px;
-        padding: 28px 16px;
-        overflow-y: auto;
-        z-index: 40;
-      }
-      #death-title {
-        font-family: var(--font-display);
-        font-size: clamp(48px, 9vw, 84px);
-        font-weight: 300;
-        letter-spacing: 14px;
-        padding-left: 14px;
-        color: var(--red);
-        text-shadow: 0 0 36px rgba(255, 110, 110, 0.55), 0 0 80px rgba(255, 110, 110, 0.25);
-        line-height: 1;
-      }
-      .victory-title {
-        color: var(--green) !important;
-        text-shadow: 0 0 36px rgba(102, 255, 158, 0.55) !important, 0 0 80px rgba(102, 255, 158, 0.25) !important;
-      }
-      #death-score {
-        font-family: var(--font-display);
-        font-size: 38px;
-        font-weight: 300;
-        letter-spacing: 3px;
-        color: rgba(255, 255, 255, 0.82);
-        text-shadow: var(--glow-md);
-        line-height: 1;
-      }
-      #death-stats {
-        font-size: 10px;
-        letter-spacing: 2px;
-        color: var(--dim);
-        text-align: center;
-        line-height: 1.9;
-        width: min(680px, calc(100vw - 32px));
-        max-height: min(50vh, 440px);
-        overflow-y: auto;
-      }
-      .stat-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
-        gap: 8px;
-        margin: 10px 0 12px;
-      }
-      .stat-cell {
-        border: 1px solid rgba(168, 244, 255, 0.14);
-        background: rgba(8, 18, 36, 0.45);
-        padding: 8px 10px;
-        border-radius: 2px;
-      }
-      .stat-cell-label {
-        font-size: 7.5px;
-        letter-spacing: 2.5px;
-        color: rgba(168, 244, 255, 0.45);
-      }
-      .stat-cell-val {
-        font-size: 13px;
-        color: #eefcff;
-        margin-top: 2px;
-      }
-      .best-run-panel {
-        margin: 12px auto 0;
-        padding-top: 12px;
-        border-top: 1px solid var(--border);
-        color: rgba(168, 244, 255, 0.45);
-        line-height: 1.8;
-      }
-      .best-run-title {
-        color: var(--accent);
-        letter-spacing: 5px;
-        font-size: 9px;
-        margin-bottom: 6px;
-      }
-      .best-run-line { white-space: normal; }
-      .best-run-line.current-run {
-        color: var(--gold);
-        text-shadow: 0 0 8px rgba(255, 215, 64, 0.45);
-      }
-      #death-actions {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 12px;
-        margin-top: 6px;
-      }
-      #btn-continue-endless { display: none; }
-      #btn-continue-endless.shown { display: inline-block; }
-      #death-hint {
+      .shard-rarity {
         font-size: 8px;
+        font-weight: 700;
         letter-spacing: 3px;
-        color: var(--faint);
+        text-transform: uppercase;
+      }
+      .shard-rarity.common    { color: rgba(184, 240, 255, 0.56); }
+      .shard-rarity.rare      { color: #75d8ff; }
+      .shard-rarity.legendary { color: var(--gold); }
+      .shard-rarity.evolution { color: #ffba49; }
+
+      .shard-hotkey-badge {
+        font-size: 9px;
+        font-weight: 700;
+        padding: 2px 7px;
+        color: var(--sc);
+        border: 1px solid color-mix(in srgb, var(--sc) 45%, transparent);
+        background: color-mix(in srgb, var(--sc) 12%, transparent);
       }
 
-      /* ── Pause menu + Active Build Inspector ──────── */
+      .shard-name {
+        font-family: var(--font-display);
+        font-size: 19px;
+        font-weight: 700;
+        letter-spacing: 2.5px;
+        color: #ffffff;
+        line-height: 1.1;
+      }
+      .shard-diamonds {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 2px 0;
+      }
+      .shard-diamond {
+        width: 9px;
+        height: 9px;
+        transform: rotate(45deg);
+        border: 1px solid rgba(184, 240, 255, 0.25);
+        background: transparent;
+      }
+      .shard-diamond.owned {
+        background: var(--sc);
+        border-color: var(--sc);
+        box-shadow: 0 0 7px var(--sc);
+      }
+      .shard-diamond.next {
+        background: #ffffff;
+        border-color: #ffffff;
+        box-shadow: 0 0 10px #ffffff;
+      }
+      .shard-level-txt {
+        margin-left: auto;
+        font-size: 9px;
+        letter-spacing: 2px;
+        color: var(--sc);
+        font-weight: 700;
+      }
+      .shard-desc {
+        font-size: 11px;
+        line-height: 1.55;
+        color: rgba(214, 242, 255, 0.80);
+        flex: 1;
+      }
+      .shard-syn-callout {
+        padding: 6px 9px;
+        font-size: 8.5px;
+        letter-spacing: 1px;
+        line-height: 1.45;
+        border-left: 2.5px solid var(--sc);
+        background: rgba(255, 255, 255, 0.04);
+        color: rgba(214, 246, 255, 0.82);
+      }
+      .shard-syn-callout.ready {
+        border-left-color: var(--gold);
+        background: rgba(255, 217, 94, 0.14);
+        color: #fff2b2;
+        font-weight: 700;
+      }
+
+      /* ── BESPOKE PAUSE DECK ───────────────────────── */
       #pause-menu {
-        gap: 16px;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 18px;
         z-index: 50;
-        padding: 24px 18px;
+        padding: 26px 20px;
         overflow-y: auto;
+        background: radial-gradient(circle at 50% 42%, rgba(6, 14, 34, 0.78), rgba(2, 4, 12, 0.92));
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
       }
       #pause-title {
         font-family: var(--font-display);
-        font-size: 24px;
-        letter-spacing: 12px;
-        padding-left: 12px;
-        color: var(--accent);
-        text-shadow: var(--glow-md);
+        font-size: 36px;
+        font-weight: 700;
+        letter-spacing: 14px;
+        padding-left: 14px;
+        color: #ffffff;
+        text-shadow: 0 0 24px rgba(125, 244, 255, 0.45);
+      }
+      #pause-now-playing {
+        font-size: 9.5px;
+        letter-spacing: 3px;
+        color: var(--accent2);
       }
       #pause-buttons {
         display: flex;
         flex-wrap: wrap;
         justify-content: center;
         gap: 10px;
-        max-width: 520px;
-      }
-      .pause-btn {
-        padding: 11px 26px;
-        border: 1px solid var(--border);
-        border-radius: 2px;
-        background: var(--surface);
-        color: var(--accent);
-        font-family: var(--font-mono);
-        font-size: 10px;
-        letter-spacing: 3.5px;
-        cursor: pointer;
-        transition: all 150ms ease;
-        pointer-events: auto;
-      }
-      .pause-btn:hover {
-        border-color: rgba(168, 244, 255, 0.58);
-        background: rgba(168, 244, 255, 0.12);
-        box-shadow: var(--glow-sm);
+        max-width: 600px;
       }
       #pause-build {
-        width: min(560px, calc(100vw - 36px));
-        border: 1px solid rgba(168, 244, 255, 0.16);
-        background: rgba(6, 14, 30, 0.62);
-        border-radius: 3px;
-        padding: 14px 16px;
-        font-size: 9px;
-        letter-spacing: 2px;
+        width: min(620px, calc(100vw - 36px));
+        padding: 18px 20px;
+        background: linear-gradient(155deg, rgba(10, 20, 44, 0.88), rgba(4, 9, 22, 0.92));
+        clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px);
+        box-shadow: inset 0 0 0 1px rgba(125, 244, 255, 0.24);
+        font-size: 9.5px;
+        letter-spacing: 1.5px;
         color: var(--dim);
-        text-align: left;
-        line-height: 1.8;
       }
-      .build-chip-row {
+
+      /* ── BESPOKE VICTORY / SHATTERED RUN STORY SCREEN ─ */
+      #death-screen {
+        align-items: center;
+        justify-content: center;
+        padding: 24px 18px;
+        overflow-y: auto;
+        z-index: 40;
+        background: radial-gradient(circle at 50% 35%, rgba(8, 18, 42, 0.78), rgba(2, 4, 12, 0.94));
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+      }
+      #death-panel {
+        width: min(860px, calc(100vw - 32px));
+        padding: 28px 30px 24px;
+        background: linear-gradient(155deg, rgba(10, 20, 46, 0.90), rgba(4, 8, 22, 0.95));
+        clip-path: polygon(22px 0, 100% 0, 100% calc(100% - 22px), calc(100% - 22px) 100%, 0 100%, 0 22px);
+        box-shadow: inset 0 0 0 1px rgba(125, 244, 255, 0.25);
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      #death-hero {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid rgba(132, 236, 255, 0.16);
+      }
+      #death-title {
+        font-family: var(--font-display);
+        font-size: clamp(42px, 7vw, 68px);
+        font-weight: 700;
+        letter-spacing: 10px;
+        line-height: 0.95;
+        color: var(--rose);
+        text-shadow: 0 0 32px rgba(255, 107, 139, 0.5);
+      }
+      #death-title.victory-title {
+        color: var(--mint);
+        text-shadow: 0 0 36px rgba(102, 255, 170, 0.55);
+      }
+      #death-score-wrap { text-align: right; }
+      #death-score-label { font-size: 8.5px; letter-spacing: 3.5px; color: var(--dim); }
+      #death-score {
+        font-family: var(--font-display);
+        font-size: clamp(32px, 5vw, 48px);
+        font-weight: 700;
+        letter-spacing: 2px;
+        color: #ffffff;
+        line-height: 1;
+      }
+      #death-stats {
+        display: grid;
+        grid-template-columns: 1.15fr 1fr;
+        gap: 24px;
+        font-size: 10px;
+        letter-spacing: 1.5px;
+      }
+      @media (max-width: 720px) {
+        #death-stats { grid-template-columns: 1fr; }
+      }
+      .recap-section-title {
+        font-size: 8.5px;
+        font-weight: 700;
+        letter-spacing: 3.5px;
+        color: var(--accent);
+        margin-bottom: 8px;
+      }
+      .spectrum-bar-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 6px;
+        font-size: 9px;
+      }
+      .spectrum-bar-name { width: 102px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .spectrum-bar-track {
+        flex: 1;
+        height: 6px;
+        background: rgba(255, 255, 255, 0.06);
+        overflow: hidden;
+      }
+      .spectrum-bar-fill { height: 100%; }
+      .spectrum-bar-lvl { width: 24px; text-align: right; font-weight: 700; }
+
+      .dossier-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 5px 0;
+        border-bottom: 1px solid rgba(132, 236, 255, 0.09);
+      }
+      .dossier-label { color: var(--dim); font-size: 9px; }
+      .dossier-val { color: #ffffff; font-weight: 600; }
+
+      .sparkline-svg { width: 100%; height: 64px; display: block; margin-top: 8px; }
+
+      .best-run-panel { margin-top: 12px; font-size: 9px; line-height: 1.8; color: rgba(184, 240, 255, 0.56); }
+      .best-run-line.current-run { color: var(--gold); font-weight: 700; }
+
+      #death-actions {
         display: flex;
         flex-wrap: wrap;
-        gap: 6px;
-        margin-top: 8px;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 12px;
+        padding-top: 10px;
+        border-top: 1px solid rgba(132, 236, 255, 0.14);
       }
+      #death-hint {
+        margin-right: auto;
+        font-size: 8.5px;
+        letter-spacing: 2.5px;
+        color: var(--faint);
+      }
+      #btn-continue-endless { display: none; }
+      #btn-continue-endless.shown { display: inline-block; }
+
+      .build-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
       .build-chip {
         padding: 3px 8px;
-        border: 1px solid rgba(168, 244, 255, 0.22);
+        border: 1px solid rgba(168, 244, 255, 0.25);
         background: rgba(168, 244, 255, 0.06);
-        border-radius: 2px;
         font-size: 8.5px;
         letter-spacing: 1.5px;
       }
 
-      /* ── Scrollbar ────────────────────────────────── */
       ::-webkit-scrollbar { width: 4px; }
       ::-webkit-scrollbar-track { background: transparent; }
-      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+      ::-webkit-scrollbar-thumb { background: var(--line); }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
     <canvas id="overlay-canvas"></canvas>
 
-    <!-- Visual overlays -->
-    <div id="scanlines" aria-hidden="true"></div>
-    <div id="scanline-sweep" aria-hidden="true"></div>
     <div class="corner corner-tl" aria-hidden="true"></div>
     <div class="corner corner-tr" aria-hidden="true"></div>
     <div class="corner corner-bl" aria-hidden="true"></div>
     <div class="corner corner-br" aria-hidden="true"></div>
 
-    <!-- Top system bar -->
+    <!-- Top slim telemetry bar -->
     <div id="sys-bar">
-      <span id="sys-bar-left">PRISM-OS v1.0 · OPTICAL CORE</span>
-      <span id="sys-bar-mid">SPHERICAL ARENA · DUAL KAWASE HDR</span>
+      <span id="sys-bar-left">PRISM · OPTICAL SPECTRUM ENGINE</span>
+      <span id="sys-bar-mid">SPHERICAL ARENA · RESONANCE AUDIO</span>
       <span id="sys-bar-right">
+        <button id="sys-music-btn" class="sys-action" type="button">MUSIC: ON</button>
         <button id="sys-mute-btn" class="sys-action" type="button">SFX: ON</button>
         <button id="sys-pause-btn" class="sys-action" type="button">PAUSE</button>
-        <span id="sys-uplink">● UPLINK STABLE</span>
+        <span id="sys-uplink">● ONLINE</span>
       </span>
     </div>
 
     <div id="status">loading…</div>
 
-    <!-- Title / Boot overlay over live spinning WebGL2 crystal globe -->
+    <!-- BESPOKE TITLE SCREEN (Asymmetric editorial over live mouse-reactive prism!) -->
     <div id="title-screen" class="overlay shown">
-      <svg id="title-emblem" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <defs>
-          <linearGradient id="prismGrad" x1="15" y1="10" x2="85" y2="90" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stop-color="#88f4ff" />
-            <stop offset="50%" stop-color="#c99bff" />
-            <stop offset="100%" stop-color="#ffd76a" />
-          </linearGradient>
-        </defs>
-        <polygon points="50,6 88,28 88,72 50,94 12,72 12,28" stroke="url(#prismGrad)" stroke-width="2.5" fill="rgba(120,232,255,0.08)" />
-        <polygon points="50,18 76,68 24,68" stroke="#e8fbff" stroke-width="2" fill="rgba(168,244,255,0.14)" />
-        <line x1="50" y1="6" x2="50" y2="94" stroke="rgba(168,244,255,0.35)" stroke-width="1" />
-        <line x1="12" y1="28" x2="88" y2="72" stroke="rgba(201,163,255,0.35)" stroke-width="1" />
-        <line x1="88" y1="28" x2="12" y2="72" stroke="rgba(255,215,106,0.35)" stroke-width="1" />
-        <circle cx="50" cy="50" r="6" fill="#ffffff" />
-      </svg>
-      <div id="title-wordmark">PRISM</div>
-      <div id="title-sub">AUTO-FIRING LIGHT · REFRACTED THROUGH SHARDS</div>
-      <div id="title-pills">
-        <span class="title-pill">23 SHARDS</span>
-        <span class="title-pill">19 SYNERGIES</span>
-        <span class="title-pill">5 EVOLUTIONS</span>
-        <span class="title-pill">3 BOSSES + ENDLESS</span>
-      </div>
-      <div id="title-actions">
-        <button id="btn-play" class="cta-btn" type="button">PLAY RUN</button>
-        <button id="btn-daily" class="cta-btn secondary" type="button">DAILY SEED</button>
-      </div>
-      <div id="title-best"></div>
-      <div id="title-controls">
-        <b>WASD / ARROWS</b> MOVE &nbsp;·&nbsp; <b>SPACE / SHIFT</b> PHASE DASH &nbsp;·&nbsp; <b>1–3</b> SHARD PICK &nbsp;·&nbsp; <b>ESC</b> PAUSE<br />
-        <b>GAMEPAD</b> LEFT STICK + A/RB DASH &nbsp;·&nbsp; <b>TOUCH</b> DRAG STICK + DOUBLE-TAP DASH
+      <div id="title-column">
+        <div id="title-kicker">RUST + WASM + WEBGL2 · SPHERICAL ACTION ROGUELITE</div>
+        <h1 id="title-wordmark">PRISM</h1>
+        <div id="title-spectrum-rule"></div>
+        <div id="title-lead">
+          Glide across a luminous 3D sphere while your prism bends auto-firing light through 23 shards, 19 synergies, and 5 evolutions. Move your mouse to bend the spectrum — snap-click &amp; track golden Resonance Nodes for explosive Prism Overdrive clears.
+        </div>
+        <div id="title-guide">
+          <div class="guide-step"><span class="guide-num">01</span><span><strong>SURVIVE 15:00 OR SHATTER 3 BOSSES</strong> — Sentinel, Hydra &amp; Void Prism (+ Endless Overdrive).</span></div>
+          <div class="guide-step"><span class="guide-num">02</span><span><strong>COLLECT CRYSTAL GEMS → EVOLVE</strong> — Fuse shards to bend beams, arcs, frost fields &amp; gravity wells.</span></div>
+          <div class="guide-step"><span class="guide-num">03</span><span><strong>FPS AIM-TRAINER OVERDRIVE</strong> — Flick chains, smooth tracking orbs &amp; micro-clusters scale with your skill.</span></div>
+        </div>
+        <div id="title-actions">
+          <button id="btn-play" class="prism-btn" type="button">PLAY RUN</button>
+          <button id="btn-daily" class="prism-btn gold" type="button">DAILY CHALLENGE</button>
+        </div>
+        <div id="title-best"></div>
+        <div id="title-keys">
+          <span><span class="kbd">WASD</span>MOVE</span>
+          <span><span class="kbd">LMB</span>FLICK / HOLD TRACK</span>
+          <span><span class="kbd">SPACE</span><span class="kbd">RMB</span>DASH</span>
+          <span><span class="kbd">1–3</span>SHARDS</span>
+          <span><span class="kbd">GAMEPAD</span>TWIN-STICK READY</span>
+        </div>
       </div>
     </div>
 
-    <!-- HUD -->
+    <!-- IN-GAME HUD -->
     <div id="hud" class="hidden">
-      <!-- Top-left: HP + Dash -->
-      <div id="vitals" class="hud-panel">
+      <div id="vitals">
         <div class="vitals-row">
           <div class="vitals-label"><span>HULL</span><span id="hp-val">— / —</span></div>
           <div id="hp-bar"><div id="hp-fill"></div></div>
         </div>
         <div class="vitals-row">
-          <div class="vitals-label"><span>DASH</span><span id="dash-status">READY</span></div>
+          <div class="vitals-label"><span>PHASE DASH</span><span id="dash-status">READY</span></div>
           <div id="dash-bar"><div id="dash-fill"></div></div>
-          <div id="dash-hint">[SPACE · A/RB · 2× TAP]</div>
+          <div id="dash-hint">[SPACE · RMB · A/LT]</div>
+        </div>
+        <div id="aim-hud">
+          <div id="aim-hud-top">
+            <span id="aim-tier-val">AIM TIER 1</span>
+            <span id="aim-combo-val">×0</span>
+          </div>
+          <div id="aim-hud-sub">
+            <span id="aim-drill-val">RESONANCE READY</span>
+            <span id="aim-acc-val">—% ACC</span>
+          </div>
         </div>
       </div>
 
-      <!-- Top-center: Wave + Timer -->
-      <div id="timer-wrap" class="hud-panel">
+      <div id="timer-wrap">
         <div id="wave-label">WAVE 1</div>
         <div id="timer">0:00</div>
         <div id="endless-badge">∞ ENDLESS OVERDRIVE</div>
       </div>
 
-      <!-- Boss HP -->
       <div id="boss-hud">
         <div id="boss-name">PRISM SENTINEL</div>
         <div id="boss-bar"><div id="boss-fill"></div></div>
       </div>
 
-      <!-- Top-right: Rank + Kills + Combo + Synergies -->
-      <div id="stats" class="hud-panel">
+      <div id="stats">
         <div id="rank-label">RANK</div>
         <div id="rank">0</div>
-        <div id="kills">0 KILLS</div>
+        <div id="kills">0 KILLS · 0 PTS</div>
         <div id="combo-wrap">
           <div id="combo-val">×0 STREAK</div>
           <div id="combo-bar"><div id="combo-fill"></div></div>
@@ -1068,8 +1064,7 @@
         </div>
       </div>
 
-      <!-- Bottom-center: XP bar -->
-      <div id="xp-outer" class="hud-panel">
+      <div id="xp-outer">
         <div id="xp-label">
           <span id="xp-rank-label">RADIANCE</span>
           <span id="xp-val"></span>
@@ -1077,43 +1072,52 @@
         <div id="xp-wrap"><div id="xp-fill"></div></div>
       </div>
 
-      <!-- Bottom-left: Shard tray -->
-      <div id="shards-tray" class="hud-panel"></div>
+      <div id="shards-tray"></div>
     </div>
 
-    <!-- Wave clear -->
-    <div id="wave-clear">// WAVE CLEAR</div>
+    <div id="wave-clear">WAVE CLEAR</div>
 
-    <!-- Level-up overlay -->
+    <!-- HOLOGRAPHIC SHARD PICKER -->
     <div id="levelup" class="overlay">
-      <div id="levelup-title">// FREQUENCY UPGRADE</div>
-      <div id="levelup-rank">—</div>
+      <div id="levelup-header">
+        <div id="levelup-title">REFRACTION UPGRADE · SELECT A SHARD</div>
+        <div id="levelup-rank">RANK 1</div>
+      </div>
       <div id="levelup-cards"></div>
       <div id="levelup-footer"></div>
     </div>
 
-    <!-- Death / Victory overlay -->
+    <!-- BESPOKE VICTORY / RUN STORY SCREEN -->
     <div id="death-screen" class="overlay">
-      <div id="death-title">SHATTERED</div>
-      <div id="death-score">0</div>
-      <div id="death-stats"></div>
-      <div id="death-actions">
-        <button id="btn-continue-endless" class="cta-btn secondary" type="button">CONTINUE ENDLESS</button>
-        <button id="death-restart" class="cta-btn" type="button">PLAY AGAIN</button>
-        <button id="btn-copy-telemetry" class="pause-btn" type="button">COPY SEED</button>
+      <div id="death-panel">
+        <div id="death-hero">
+          <div id="death-title">SHATTERED</div>
+          <div id="death-score-wrap">
+            <div id="death-score-label">FINAL SCORE</div>
+            <div id="death-score">0</div>
+          </div>
+        </div>
+        <div id="death-stats"></div>
+        <div id="death-actions">
+          <div id="death-hint">SPACE / ENTER TO RESTART</div>
+          <button id="btn-copy-telemetry" class="prism-btn ghost" type="button">COPY TELEMETRY</button>
+          <button id="btn-continue-endless" class="prism-btn gold" type="button">CONTINUE ENDLESS</button>
+          <button id="death-restart" class="prism-btn" type="button">PLAY AGAIN</button>
+        </div>
       </div>
-      <div id="death-hint">SPACE / ENTER TO RESTART</div>
     </div>
 
-    <!-- Pause overlay -->
+    <!-- PAUSE DECK -->
     <div id="pause-menu" class="overlay">
       <div id="pause-title">PAUSED</div>
+      <div id="pause-now-playing">♪ CRYSTAL OVERTURE</div>
       <div id="pause-buttons">
-        <button id="btn-resume" class="pause-btn" type="button">RESUME</button>
-        <button id="btn-restart-pause" class="pause-btn" type="button">NEW RUN</button>
-        <button id="btn-toggle-sound" class="pause-btn" type="button">SOUND: ON</button>
-        <button id="btn-toggle-fx" class="pause-btn" type="button">FX: HIGH</button>
-        <button id="btn-toggle-numbers" class="pause-btn" type="button">NUMBERS: ON</button>
+        <button id="btn-resume" class="prism-btn" type="button">RESUME</button>
+        <button id="btn-restart-pause" class="prism-btn ghost" type="button">NEW RUN</button>
+        <button id="btn-toggle-music" class="prism-btn ghost" type="button">MUSIC: ON</button>
+        <button id="btn-toggle-sound" class="prism-btn ghost" type="button">SFX: ON</button>
+        <button id="btn-toggle-fx" class="prism-btn ghost" type="button">FX: HIGH</button>
+        <button id="btn-toggle-numbers" class="prism-btn ghost" type="button">NUMBERS: ON</button>
       </div>
       <div id="pause-build"></div>
     </div>

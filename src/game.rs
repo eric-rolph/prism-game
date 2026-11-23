@@ -18,7 +18,7 @@ use crate::shards::{
     compose_salvo, BeamRequest, EvolutionKind, Inventory, ShardKind, UpgradeOffer, SYNERGY_COUNT,
 };
 use crate::spatial::SpatialGrid;
-use crate::{BeamInstance, CircleInstance, DamagePopup};
+use crate::{AimTargetInstance, BeamInstance, CircleInstance, DamagePopup};
 use glam::{Vec2, Vec3};
 
 const DAMAGE_SOURCE_COUNT: usize = 4;
@@ -47,6 +47,29 @@ struct UpgradePick {
     time: f32,
     offer_type: u8,
     offer_index: i32,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum AimDrillKind {
+    Flick = 0,
+    Track = 1,
+    Micro = 2,
+}
+
+#[derive(Copy, Clone)]
+struct AimTarget {
+    pos: Vec2,
+    radius: f32,
+    kind: AimDrillKind,
+    life: f32,
+    max_life: f32,
+    progress: f32,
+    step: u32,
+    total: u32,
+    orbit_angle: f32,
+    orbit_radius: f32,
+    strafe_phase: f32,
+    strafe_sign: f32,
 }
 
 pub struct Game {
@@ -164,6 +187,28 @@ pub struct Game {
     // Per-frame floating combat popups (world pos, value, kind), projected into popup_buf.
     raw_popups: Vec<(Vec2, f32, f32)>,
     popup_buf: Vec<DamagePopup>,
+
+    // FPS Aim-Trainer ("Prism Focus") state & Resonance Nodes (only spawns once mouse/right-stick active).
+    aim_screen_offset: Vec2,
+    aim_active: bool,
+    aim_clicked: bool,
+    aim_held: bool,
+    aim_fire_cooldown: f32,
+    aim_drill_cooldown: f32,
+    aim_next_drill: u32,
+    aim_tier: u32,
+    aim_tier_progress: i32,
+    aim_combo: u32,
+    peak_aim_combo: u32,
+    aim_hits: u32,
+    aim_shots: u32,
+    aim_drills_completed: u32,
+    aim_tracking_active: bool,
+    aim_track_progress: f32,
+    aim_hovering_target: bool,
+    aim_last_hit_pos: Option<Vec2>,
+    aim_targets: Vec<AimTarget>,
+    aim_target_buf: Vec<AimTargetInstance>,
 
     // Draw buffers, rebuilt every frame.
     circle_buf: Vec<CircleInstance>,
@@ -296,6 +341,9 @@ pub const AUDIO_DASH_BLAST: u32 = 1 << 5;
 pub const AUDIO_MINE_BURST: u32 = 1 << 6;
 pub const AUDIO_STREAK_MILESTONE: u32 = 1 << 7;
 pub const AUDIO_EVOLUTION: u32 = 1 << 8;
+pub const AUDIO_AIM_HIT: u32 = 1 << 9;
+pub const AUDIO_AIM_COMPLETE: u32 = 1 << 10;
+pub const AUDIO_AIM_MISS: u32 = 1 << 11;
 
 // GPU SDF shape identifiers packed into CircleInstance::shape.
 const SHAPE_ORB: f32 = 0.0;
@@ -449,6 +497,17 @@ fn tangent_segment_on_globe(origin: Vec2, start: Vec2, end: Vec2) -> (Vec2, Vec2
     let globe_start = tangent_point_on_globe(origin, start);
     let globe_end = tangent_endpoint_on_globe(globe_start, end - start);
     (globe_start, globe_end)
+}
+
+/// Exact inverse of shader `projectGlobe(rel) = rel * sin(theta)/theta`.
+fn unproject_globe_offset(screen_offset: Vec2) -> Vec2 {
+    let r = screen_offset.length();
+    if r < 1e-4 {
+        return Vec2::ZERO;
+    }
+    let clamped = (r / GLOBE_RADIUS).min(0.985);
+    let theta = clamped.asin();
+    screen_offset * (theta * GLOBE_RADIUS / r)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -756,6 +815,26 @@ impl Game {
             hit_flash_positions: Vec::new(),
             raw_popups: Vec::with_capacity(MAX_POPUPS_PER_FRAME),
             popup_buf: Vec::with_capacity(MAX_POPUPS_PER_FRAME),
+            aim_screen_offset: Vec2::ZERO,
+            aim_active: false,
+            aim_clicked: false,
+            aim_held: false,
+            aim_fire_cooldown: 0.0,
+            aim_drill_cooldown: 1.4,
+            aim_next_drill: 0,
+            aim_tier: 1,
+            aim_tier_progress: 0,
+            aim_combo: 0,
+            peak_aim_combo: 0,
+            aim_hits: 0,
+            aim_shots: 0,
+            aim_drills_completed: 0,
+            aim_tracking_active: false,
+            aim_track_progress: 0.0,
+            aim_hovering_target: false,
+            aim_last_hit_pos: None,
+            aim_targets: Vec::with_capacity(6),
+            aim_target_buf: Vec::with_capacity(6),
             halo_trail_timer: 0.0,
             wave_event_fired: false,
             prism_cannon_timer: 0.0,
@@ -807,6 +886,24 @@ impl Game {
 
     pub fn set_dash_input(&mut self, pressed: bool) {
         self.dash_input = pressed;
+    }
+
+    pub fn set_aim_input(
+        &mut self,
+        offset_x: f32,
+        offset_y: f32,
+        active: bool,
+        clicked: bool,
+        held: bool,
+    ) {
+        self.aim_screen_offset = Vec2::new(offset_x, offset_y);
+        if active {
+            self.aim_active = true;
+        }
+        if clicked {
+            self.aim_clicked = true;
+        }
+        self.aim_held = held;
     }
 
     pub fn player_altitude(&self) -> f32 {
@@ -902,6 +999,48 @@ impl Game {
     }
     pub fn popups(&self) -> &[DamagePopup] {
         &self.popup_buf
+    }
+    pub fn aim_targets(&self) -> &[AimTargetInstance] {
+        &self.aim_target_buf
+    }
+    pub fn aim_tier(&self) -> u32 {
+        self.aim_tier
+    }
+    pub fn aim_combo(&self) -> u32 {
+        self.aim_combo
+    }
+    pub fn peak_aim_combo(&self) -> u32 {
+        self.peak_aim_combo
+    }
+    pub fn aim_hits(&self) -> u32 {
+        self.aim_hits
+    }
+    pub fn aim_shots(&self) -> u32 {
+        self.aim_shots
+    }
+    pub fn aim_drills_completed(&self) -> u32 {
+        self.aim_drills_completed
+    }
+    pub fn aim_tracking_active(&self) -> bool {
+        self.aim_tracking_active
+    }
+    pub fn aim_track_progress(&self) -> f32 {
+        self.aim_track_progress
+    }
+    pub fn aim_last_hit_camera_pos(&self) -> Vec2 {
+        self.aim_last_hit_pos
+            .map(|p| nearest_globe_pos(self.camera, p))
+            .unwrap_or(self.camera)
+    }
+    pub fn aim_has_prev_link(&self) -> bool {
+        self.aim_last_hit_pos.is_some()
+            && self
+                .aim_targets
+                .iter()
+                .any(|t| t.kind == AimDrillKind::Flick && t.step > 1)
+    }
+    pub fn aim_hovering_target(&self) -> bool {
+        self.aim_hovering_target
     }
     pub fn kill_streak(&self) -> u32 {
         self.kill_streak
@@ -1837,7 +1976,13 @@ impl Game {
         self.separate_enemies(dt);
         self.rebuild_spatial_grid();
 
-        self.void_shells.extend(new_void_shells);
+        // Cap simultaneous VoidShell mortar zones so late-game Pulsar swarms stay readable.
+        const MAX_VOID_SHELLS: usize = 12;
+        for shell in new_void_shells {
+            if self.void_shells.len() < MAX_VOID_SHELLS {
+                self.void_shells.push(shell);
+            }
+        }
 
         // --- VoidShell update ---
         for s in &mut self.void_shells {
@@ -2129,6 +2274,7 @@ impl Game {
         }
 
         self.update_extra_weapons(dt);
+        self.update_aim_trainer(dt);
 
         // Beam visual ageing.
         for b in &mut self.beams {
@@ -3662,6 +3808,542 @@ impl Game {
 
     // --- Firing ---------------------------------------------------------
 
+    fn update_aim_trainer(&mut self, dt: f32) {
+        let clicked = self.aim_clicked;
+        self.aim_clicked = false;
+        self.aim_tracking_active = false;
+        self.aim_track_progress = 0.0;
+        self.aim_hovering_target = false;
+
+        if !self.aim_active {
+            return;
+        }
+
+        if self.aim_fire_cooldown > 0.0 {
+            self.aim_fire_cooldown = (self.aim_fire_cooldown - dt).max(0.0);
+        }
+
+        let aim_tangent = unproject_globe_offset(self.aim_screen_offset);
+        let aim_world = tangent_endpoint_on_globe(self.player.pos, aim_tangent);
+        let tier = self.aim_tier.clamp(1, 10) as f32;
+
+        // 1. Spawn next rotating FPS drill when none active.
+        if self.aim_targets.is_empty() {
+            self.aim_drill_cooldown -= dt;
+            if self.aim_drill_cooldown <= 0.0 {
+                self.spawn_next_aim_drill();
+            }
+        }
+
+        // 2. Update active Resonance Targets (aging + smooth tracking strafe motion).
+        let mut expired = false;
+        for t in &mut self.aim_targets {
+            t.life += dt;
+            if t.kind == AimDrillKind::Track {
+                t.strafe_phase += dt * (1.25 + tier * 0.22);
+                // Smooth harmonic strafe with occasional velocity reversals (classic FPS smooth tracking).
+                let angular_speed = (0.78 + tier * 0.14)
+                    * (0.65 + 0.55 * t.strafe_phase.sin().abs())
+                    * t.strafe_sign;
+                if (t.strafe_phase * 0.72).sin() > 0.96 {
+                    t.strafe_sign = -t.strafe_sign;
+                }
+                t.orbit_angle += angular_speed * dt;
+                let r_mod = t.orbit_radius + (t.strafe_phase * 1.4).cos() * (22.0 + tier * 3.5);
+                let offset = Vec2::new(t.orbit_angle.cos(), t.orbit_angle.sin()) * r_mod;
+                t.pos = tangent_endpoint_on_globe(self.player.pos, offset);
+            }
+            if t.life >= t.max_life {
+                expired = true;
+            }
+        }
+
+        if expired {
+            self.aim_targets.clear();
+            self.aim_last_hit_pos = None;
+            self.aim_drill_cooldown = 1.6;
+            self.aim_combo = 0;
+            self.aim_tier_progress -= 1;
+            if self.aim_tier_progress <= -2 && self.aim_tier > 1 {
+                self.aim_tier -= 1;
+                self.aim_tier_progress = 0;
+            }
+        }
+
+        // Check hover state (reticle magnet visual feedback).
+        for t in &self.aim_targets {
+            if globe_distance(aim_world, t.pos) <= t.radius * 1.28 {
+                self.aim_hovering_target = true;
+                break;
+            }
+        }
+        if !self.aim_hovering_target {
+            let local_aim = nearest_globe_delta(self.player.pos, aim_world);
+            self.spatial.query_circle(local_aim, 28.0, |idx| {
+                if idx < self.enemies.len()
+                    && globe_distance(aim_world, self.enemies[idx].pos)
+                        <= self.enemies[idx].radius + 14.0
+                {
+                    self.aim_hovering_target = true;
+                }
+            });
+        }
+
+        // 3. Smooth Tracking drill (hold LMB / RT on the Kinetic Track Orb).
+        let mut track_completed_pos: Option<Vec2> = None;
+        for t in &mut self.aim_targets {
+            if t.kind != AimDrillKind::Track {
+                continue;
+            }
+            let dist = globe_distance(aim_world, t.pos);
+            let on_target = self.aim_held && dist <= t.radius * 1.35;
+            if on_target {
+                let charge_time = (1.38 - tier * 0.035).max(0.92);
+                t.progress = (t.progress + dt / charge_time).min(1.0);
+                // Gracefully extend life while smoothly tracking so a steady hand always finishes.
+                t.life = (t.life - dt * 0.65).max(0.0);
+                self.aim_tracking_active = true;
+                self.aim_track_progress = t.progress;
+
+                // Emit continuous glowing focusing beam from player to tracking orb.
+                self.beams.push(Beam {
+                    start: self.player.pos,
+                    end: t.pos,
+                    life: 0.0,
+                    max_life: 0.06,
+                    thickness: 2.6 + t.progress * 3.2,
+                    color: [0.55 + t.progress * 0.45, 0.92, 1.0],
+                    is_echo: false,
+                });
+
+                if t.progress >= 1.0 {
+                    track_completed_pos = Some(t.pos);
+                }
+            } else if t.progress > 0.0 {
+                t.progress = (t.progress - dt * 0.42).max(0.0);
+            }
+        }
+
+        // Continuous burn around Track Orb while locked.
+        if self.aim_tracking_active {
+            if let Some(orb_pos) = self.aim_targets.first().map(|t| t.pos) {
+                let burn_dps = (115.0 + self.rank as f32 * 16.0 + tier * 20.0) * dt;
+                self.damage_area(orb_pos, 84.0, burn_dps, 0.0, 0.0, 1.8);
+            }
+        }
+
+        if let Some(pos) = track_completed_pos {
+            self.aim_targets.clear();
+            self.aim_hits += 1;
+            self.aim_shots += 1;
+            self.on_aim_drill_completed(AimDrillKind::Track, pos);
+            return;
+        }
+
+        // 4. Precision Click / Flick Shot (LMB / RT rising edge).
+        if clicked && self.aim_fire_cooldown <= 0.0 {
+            // Check if clicking on a Flick or Micro Resonance Node first!
+            let mut hit_idx: Option<usize> = None;
+            let mut best_d = f32::MAX;
+            for (i, t) in self.aim_targets.iter().enumerate() {
+                if t.kind == AimDrillKind::Track {
+                    continue;
+                }
+                let d = globe_distance(aim_world, t.pos);
+                if d <= t.radius * 1.28 && d < best_d {
+                    best_d = d;
+                    hit_idx = Some(i);
+                }
+            }
+
+            if let Some(idx) = hit_idx {
+                self.aim_shots += 1;
+                self.aim_hits += 1;
+                self.aim_combo += 1;
+                self.peak_aim_combo = self.peak_aim_combo.max(self.aim_combo);
+                self.aim_fire_cooldown = 0.06;
+                self.audio_event_bits |= AUDIO_AIM_HIT;
+
+                let hit = self.aim_targets.remove(idx);
+                self.aim_last_hit_pos = Some(hit.pos);
+                self.fire_precision_lance(hit.pos, [1.0, 0.88, 0.36], 1.15);
+
+                match hit.kind {
+                    AimDrillKind::Flick => {
+                        if hit.step < hit.total {
+                            // Immediately spawn next flick target across a wide-angle jump!
+                            self.spawn_flick_step(hit.pos, hit.step + 1, hit.total);
+                        } else {
+                            self.on_aim_drill_completed(AimDrillKind::Flick, hit.pos);
+                        }
+                    }
+                    AimDrillKind::Micro => {
+                        if self.aim_targets.is_empty() {
+                            self.on_aim_drill_completed(AimDrillKind::Micro, hit.pos);
+                        }
+                    }
+                    AimDrillKind::Track => {}
+                }
+                return;
+            }
+
+            // If a Track Orb is active and cursor is on it, don't penalize initial click-hold!
+            let clicking_track = self.aim_targets.iter().any(|t| {
+                t.kind == AimDrillKind::Track && globe_distance(aim_world, t.pos) <= t.radius * 1.35
+            });
+            if clicking_track {
+                return;
+            }
+
+            // Otherwise, fire a Precision Focused Prism Lance at cursor — rewards direct enemy flicking!
+            self.aim_shots += 1;
+            let hit_enemy = self.fire_precision_lance(aim_world, [0.55, 0.96, 1.0], 1.0);
+            if hit_enemy {
+                self.aim_hits += 1;
+                self.aim_combo += 1;
+                self.peak_aim_combo = self.peak_aim_combo.max(self.aim_combo);
+                self.aim_fire_cooldown = 0.09;
+                self.audio_event_bits |= AUDIO_AIM_HIT;
+            } else {
+                // Slight focus lens cooldown on whiffed click rewards clean aim discipline.
+                self.aim_combo = 0;
+                self.aim_fire_cooldown = 0.22;
+                self.audio_event_bits |= AUDIO_AIM_MISS;
+            }
+        }
+    }
+
+    fn pick_aim_viewport_pos(&mut self, avoid: Option<Vec2>, min_jump: f32) -> Vec2 {
+        let max_x = (self.screen_size.x * 0.36).clamp(160.0, 380.0);
+        let max_y = (self.screen_size.y * 0.32).clamp(110.0, 230.0);
+        for _ in 0..14 {
+            let ox = self.rng.range(-max_x, max_x);
+            let oy = self.rng.range(-max_y, max_y);
+            let offset = Vec2::new(ox, oy);
+            if offset.length() < 92.0 {
+                continue;
+            }
+            let world = tangent_endpoint_on_globe(self.player.pos, offset);
+            if let Some(prev) = avoid {
+                if globe_distance(prev, world) < min_jump {
+                    continue;
+                }
+            }
+            return world;
+        }
+        let a = self.rng.angle();
+        tangent_endpoint_on_globe(self.player.pos, Vec2::new(a.cos(), a.sin()) * 175.0)
+    }
+
+    fn spawn_next_aim_drill(&mut self) {
+        let kind = match self.aim_next_drill % 3 {
+            0 => AimDrillKind::Flick,
+            1 => AimDrillKind::Track,
+            _ => AimDrillKind::Micro,
+        };
+        self.aim_next_drill += 1;
+        self.aim_last_hit_pos = None;
+        let tier = self.aim_tier.clamp(1, 10) as f32;
+
+        match kind {
+            AimDrillKind::Flick => {
+                let total = if self.aim_tier >= 8 {
+                    5
+                } else if self.aim_tier >= 4 {
+                    4
+                } else {
+                    3
+                };
+                self.spawn_flick_step(self.player.pos, 1, total);
+            }
+            AimDrillKind::Track => {
+                let angle = self.rng.angle();
+                let orbit_radius = (155.0 + tier * 6.0).min(self.screen_size.y * 0.30).max(115.0);
+                let pos = tangent_endpoint_on_globe(
+                    self.player.pos,
+                    Vec2::new(angle.cos(), angle.sin()) * orbit_radius,
+                );
+                self.aim_targets.push(AimTarget {
+                    pos,
+                    radius: (29.0 - tier * 1.05).max(17.5),
+                    kind: AimDrillKind::Track,
+                    life: 0.0,
+                    max_life: (6.2 - tier * 0.16).max(4.4),
+                    progress: 0.0,
+                    step: 1,
+                    total: 1,
+                    orbit_angle: angle,
+                    orbit_radius,
+                    strafe_phase: self.rng.angle(),
+                    strafe_sign: if self.rng.next_u32() % 2 == 0 { 1.0 } else { -1.0 },
+                });
+            }
+            AimDrillKind::Micro => {
+                let center = self.pick_aim_viewport_pos(None, 0.0);
+                let radius = (20.0 - tier * 0.72).max(12.5);
+                let spacing = (56.0 - tier * 1.8).max(36.0);
+                let base_ang = self.rng.angle();
+                let max_life = (5.0 - tier * 0.22).max(2.6);
+                for i in 0..3u32 {
+                    let a = base_ang + (i as f32) * std::f32::consts::TAU / 3.0;
+                    let pos =
+                        tangent_endpoint_on_globe(center, Vec2::new(a.cos(), a.sin()) * spacing);
+                    self.aim_targets.push(AimTarget {
+                        pos,
+                        radius,
+                        kind: AimDrillKind::Micro,
+                        life: 0.0,
+                        max_life,
+                        progress: 0.0,
+                        step: i + 1,
+                        total: 3,
+                        orbit_angle: 0.0,
+                        orbit_radius: 0.0,
+                        strafe_phase: 0.0,
+                        strafe_sign: 1.0,
+                    });
+                }
+            }
+        }
+    }
+
+    fn spawn_flick_step(&mut self, prev_pos: Vec2, step: u32, total: u32) {
+        let tier = self.aim_tier.clamp(1, 10) as f32;
+        let min_jump = (135.0 + tier * 14.0).min(265.0);
+        let pos = self.pick_aim_viewport_pos(Some(prev_pos), min_jump);
+        self.aim_targets.push(AimTarget {
+            pos,
+            radius: (25.5 - tier * 1.1).max(14.5),
+            kind: AimDrillKind::Flick,
+            life: 0.0,
+            max_life: (4.6 - tier * 0.22).max(2.2),
+            progress: (step.saturating_sub(1)) as f32 / total.max(1) as f32,
+            step,
+            total,
+            orbit_angle: 0.0,
+            orbit_radius: 0.0,
+            strafe_phase: 0.0,
+            strafe_sign: 1.0,
+        });
+    }
+
+    /// Fires a high-precision piercing Focused Prism Lance from the player through `target_world`.
+    /// Returns true if any enemy or boss took damage.
+    fn fire_precision_lance(
+        &mut self,
+        target_world: Vec2,
+        color: [f32; 3],
+        mult: f32,
+    ) -> bool {
+        let delta = nearest_globe_delta(self.player.pos, target_world);
+        let dist = delta.length();
+        let dir = if dist > 1.0 {
+            delta / dist
+        } else {
+            Vec2::X
+        };
+        let reach = dist.max(240.0) + 120.0;
+        let end = tangent_endpoint_on_globe(self.player.pos, dir * reach);
+        let tier = self.aim_tier.clamp(1, 10) as f32;
+        let combo_mult = 1.0 + (self.aim_combo.min(20) as f32) * 0.05;
+        let damage = (125.0 + self.rank as f32 * 18.0 + tier * 20.0) * mult * combo_mult;
+
+        self.beams.push(Beam {
+            start: self.player.pos,
+            end,
+            life: 0.0,
+            max_life: 0.16,
+            thickness: 4.2 + tier * 0.25,
+            color,
+            is_echo: false,
+        });
+
+        let mut hit_any = false;
+        let a_local = Vec2::ZERO;
+        let b_local = nearest_globe_delta(self.player.pos, end);
+        let mut candidates = Vec::new();
+        self.spatial.query_segment(a_local, b_local, 14.0, |idx| {
+            if idx < self.enemies.len() {
+                candidates.push(idx);
+            }
+        });
+        for idx in candidates {
+            let e = &mut self.enemies[idx];
+            if e.hp <= 0.0 {
+                continue;
+            }
+            let direct_click = globe_distance(target_world, e.pos) <= e.radius + 16.0;
+            let on_ray =
+                capsule_circle_intersect_globe(self.player.pos, end, 9.0, e.pos, e.radius);
+            if direct_click || on_ray {
+                let dealt = if direct_click { damage * 1.35 } else { damage };
+                e.hp -= dealt;
+                let epos = e.pos;
+                self.total_damage_dealt += dealt;
+                self.hit_flash_positions.push(epos);
+                self.push_popup(epos, dealt, POPUP_CRIT);
+                hit_any = true;
+            }
+        }
+        if let Some((impact, shield_broken)) =
+            self.damage_boss_with_beam(self.player.pos, end, 10.0, damage * 1.45)
+        {
+            self.total_damage_dealt += damage * 1.45;
+            self.push_popup(impact, damage * 1.45, POPUP_CRIT);
+            if shield_broken {
+                self.fire_shield_break_burst(impact);
+            }
+            hit_any = true;
+        }
+
+        // Crisp spark burst at impact point.
+        for _ in 0..10 {
+            let a = self.rng.angle();
+            self.particles.push(Particle {
+                pos: target_world,
+                vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(60.0, 195.0),
+                life: 0.0,
+                max_life: self.rng.range(0.16, 0.34),
+                color,
+                size: self.rng.range(2.0, 4.4),
+            });
+        }
+
+        // Small local refraction splash on direct hit.
+        if hit_any {
+            self.damage_area(target_world, 56.0, damage * 0.45, 70.0, 0.0, 0.6);
+            self.shake_amount = (self.shake_amount + 2.5).min(12.0);
+        }
+        hit_any
+    }
+
+    fn on_aim_drill_completed(&mut self, kind: AimDrillKind, pos: Vec2) {
+        self.aim_drills_completed += 1;
+        self.aim_drill_cooldown = 1.65;
+        self.aim_last_hit_pos = None;
+        self.aim_tier_progress += 1;
+        if self.aim_tier_progress >= 2 && self.aim_tier < 10 {
+            self.aim_tier += 1;
+            self.aim_tier_progress = 0;
+        }
+
+        let tier = self.aim_tier as f32;
+        let blast_dmg = 240.0 + self.rank as f32 * 32.0 + tier * 55.0;
+        let blast_r = 185.0 + tier * 16.0;
+
+        self.audio_event_bits |= AUDIO_AIM_COMPLETE;
+        self.screen_flash = self.screen_flash.max(0.52);
+        self.hit_stop_pulse = self.hit_stop_pulse.max(0.45);
+        self.shake_amount = (self.shake_amount + 6.5).min(16.0);
+        self.push_popup(pos, blast_dmg, POPUP_BREAK);
+
+        // Reward XP gems proportional to Aim Tier!
+        self.drop_xp_burst(pos, 3 + (self.aim_tier / 2), 2 + (self.aim_tier / 3), 26.0);
+
+        match kind {
+            AimDrillKind::Flick => {
+                // PRISMATIC SUPERNOVA: expanding optical ring + 8-spoke rainbow starburst!
+                self.pulses.push(InterferencePulse {
+                    pos,
+                    life: 0.0,
+                    max_life: 0.52,
+                    max_radius: blast_r,
+                    kind: PulseKind::DashBlast,
+                    damage_multiplier: 1.35,
+                });
+                self.damage_area(pos, blast_r, blast_dmg, 210.0, 0.0, 2.2);
+                for i in 0..8 {
+                    let a = (i as f32) * std::f32::consts::TAU / 8.0;
+                    let end =
+                        tangent_endpoint_on_globe(pos, Vec2::new(a.cos(), a.sin()) * blast_r);
+                    let hue = i as f32 / 8.0;
+                    let col = [
+                        0.5 + 0.5 * (hue * std::f32::consts::TAU).cos(),
+                        0.5 + 0.5 * (hue * std::f32::consts::TAU + 2.094).cos(),
+                        0.5 + 0.5 * (hue * std::f32::consts::TAU + 4.189).cos(),
+                    ];
+                    self.beams.push(Beam {
+                        start: pos,
+                        end,
+                        life: 0.0,
+                        max_life: 0.24,
+                        thickness: 3.4,
+                        color: col,
+                        is_echo: false,
+                    });
+                }
+            }
+            AimDrillKind::Track => {
+                // ARC OVERLOAD: chain lightning sweeps across nearby enemies!
+                self.damage_area(pos, blast_r * 0.9, blast_dmg * 0.85, 140.0, 1.4, 2.2);
+                let mut cur = pos;
+                let max_hops = (6 + self.aim_tier as usize).min(14);
+                let mut visited: Vec<usize> = Vec::with_capacity(max_hops);
+                for _ in 0..max_hops {
+                    let mut best: Option<(usize, f32)> = None;
+                    for (idx, e) in self.enemies.iter().enumerate() {
+                        if e.hp <= 0.0 || visited.contains(&idx) {
+                            continue;
+                        }
+                        let d = globe_distance(cur, e.pos);
+                        if d < 260.0 && best.map_or(true, |(_, bd)| d < bd) {
+                            best = Some((idx, d));
+                        }
+                    }
+                    let Some((idx, _)) = best else { break };
+                    visited.push(idx);
+                    let epos = self.enemies[idx].pos;
+                    self.enemies[idx].hp -= blast_dmg * 0.95;
+                    self.total_damage_dealt += blast_dmg * 0.95;
+                    self.hit_flash_positions.push(epos);
+                    self.push_popup(epos, blast_dmg * 0.95, POPUP_CRIT);
+                    self.beams.push(Beam {
+                        start: cur,
+                        end: epos,
+                        life: 0.0,
+                        max_life: 0.22,
+                        thickness: 3.2,
+                        color: [0.68, 0.48, 1.0],
+                        is_echo: false,
+                    });
+                    cur = epos;
+                }
+            }
+            AimDrillKind::Micro => {
+                // TRIPLE PRISM CONVERGENCE: 3 heavy cross-slicing chromatic rail beams!
+                self.damage_area(pos, blast_r * 0.95, blast_dmg, 180.0, 0.0, 2.4);
+                let cols = [[1.0, 0.32, 0.52], [0.35, 1.0, 0.72], [0.42, 0.72, 1.0]];
+                for (i, col) in cols.into_iter().enumerate() {
+                    let a = self.time + (i as f32) * std::f32::consts::PI / 3.0;
+                    let v = Vec2::new(a.cos(), a.sin()) * (blast_r * 1.25);
+                    let p0 = tangent_endpoint_on_globe(pos, -v);
+                    let p1 = tangent_endpoint_on_globe(pos, v);
+                    self.beams.push(Beam {
+                        start: p0,
+                        end: p1,
+                        life: 0.0,
+                        max_life: 0.25,
+                        thickness: 4.5,
+                        color: col,
+                        is_echo: false,
+                    });
+                }
+            }
+        }
+
+        for _ in 0..24 {
+            let a = self.rng.angle();
+            self.particles.push(Particle {
+                pos,
+                vel: Vec2::new(a.cos(), a.sin()) * self.rng.range(90.0, 280.0),
+                life: 0.0,
+                max_life: self.rng.range(0.32, 0.68),
+                color: [1.0, 0.88, 0.42],
+                size: self.rng.range(2.5, 5.8),
+            });
+        }
+    }
+
     fn update_extra_weapons(&mut self, dt: f32) {
         let arc = self.inventory.level(ShardKind::Arc);
         if arc > 0 {
@@ -5120,7 +5802,53 @@ impl Game {
         self.circle_buf.clear();
         self.beam_buf.clear();
         self.popup_buf.clear();
+        self.aim_target_buf.clear();
         let camera = self.camera;
+
+        // Pack FPS Aim-Trainer Resonance Nodes for both WebGL2 bloom & 2D crisp gauges.
+        for t in &self.aim_targets {
+            let pos = nearest_globe_pos(camera, t.pos);
+            let life_frac = (1.0 - t.life / t.max_life).clamp(0.0, 1.0);
+            self.aim_target_buf.push(AimTargetInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: t.radius,
+                kind: t.kind as u32 as f32,
+                progress: t.progress,
+                life_frac,
+                step: t.step as f32,
+                total: t.total as f32,
+            });
+            let (r, g, b, core_shape) = match t.kind {
+                AimDrillKind::Flick => (1.0, 0.84, 0.28, SHAPE_DIAMOND),
+                AimDrillKind::Track => (0.55, 0.78, 1.0, SHAPE_STAR),
+                AimDrillKind::Micro => (1.0, 0.45, 0.72, SHAPE_HEX),
+            };
+            // Outer glowing optical ring (shrinks smoothly with remaining time!).
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: t.radius * (1.0 + life_frac * 0.45),
+                r,
+                g,
+                b,
+                a: 0.72,
+                glow: 2.2,
+                shape: SHAPE_RING,
+            });
+            // Luminous crystalline bullseye core.
+            self.circle_buf.push(CircleInstance {
+                x: pos.x,
+                y: pos.y,
+                radius: t.radius * 0.56,
+                r,
+                g,
+                b,
+                a: 0.94,
+                glow: 2.6 + t.progress * 2.0,
+                shape: core_shape,
+            });
+        }
 
         for &(world_pos, value, kind) in &self.raw_popups {
             let pos = nearest_globe_pos(camera, world_pos);
@@ -5949,16 +6677,16 @@ impl Game {
                     _ => (e.color[0], e.color[1], e.color[2], 1.0_f32, 1.0_f32),
                 };
 
-                // Layer 1: Atmospheric glow.
+                // Layer 1: Subtle tight atmospheric halo (pure soft glow, never a flat disc!).
                 self.circle_buf.push(CircleInstance {
                     x: pos.x,
                     y: pos.y,
-                    radius: e.radius * 2.0,
+                    radius: e.radius * 1.55,
                     r: er,
                     g: eg,
                     b: eb,
-                    a: base_alpha * 0.08,
-                    glow: glow_mult * 0.75,
+                    a: base_alpha * 0.14,
+                    glow: glow_mult * 0.45,
                     shape: SHAPE_ORB,
                 });
 
@@ -5970,23 +6698,23 @@ impl Game {
                     r: er,
                     g: eg,
                     b: eb,
-                    a: base_alpha * 0.96,
-                    glow: 0.25 * glow_mult,
+                    a: base_alpha * 0.94,
+                    glow: 0.14 * glow_mult,
                     shape: body_shape,
                 });
 
-                // Layer 3: White-hot crystalline inner core.
+                // Layer 3: Crisp luminous inner core (tinted instead of pure white blowout).
                 if e.kind != EnemyKind::Umbra {
-                    let core_alpha = if e.mini_boss.is_some() { 0.88 } else { 0.68 };
+                    let core_alpha = if e.mini_boss.is_some() { 0.80 } else { 0.52 };
                     self.circle_buf.push(CircleInstance {
                         x: pos.x,
                         y: pos.y,
-                        radius: e.radius * 0.42,
-                        r: 1.0,
-                        g: 1.0,
-                        b: 0.96,
+                        radius: e.radius * 0.36,
+                        r: 0.65 + er * 0.35,
+                        g: 0.65 + eg * 0.35,
+                        b: 0.68 + eb * 0.32,
                         a: core_alpha * base_alpha,
-                        glow: 0.4 * glow_mult,
+                        glow: 0.25 * glow_mult,
                         shape: SHAPE_DIAMOND,
                     });
                 }
@@ -6176,18 +6904,18 @@ impl Game {
                 });
             }
 
-            // Inner core beam (thin white, high glow) on every beam.
+            // Inner luminous filament — carries shard hue instead of flat pure white blowout.
             self.beam_buf.push(BeamInstance {
                 x0: start.x,
                 y0: start.y,
                 x1: end.x,
                 y1: end.y,
                 thickness: 1.0,
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: t * 0.8 * alpha_scale,
-                glow: 0.8 * t,
+                r: 0.45 + beam_r * 0.55,
+                g: 0.45 + beam_g * 0.55,
+                b: 0.45 + beam_b * 0.55,
+                a: t * 0.62 * alpha_scale,
+                glow: 0.55 * t,
             });
         }
 

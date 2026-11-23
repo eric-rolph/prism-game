@@ -1085,3 +1085,97 @@ fn soft_separation_keeps_overlapping_enemies_from_stacking() {
     let sep = globe_distance(g.enemies[0].pos, g.enemies[1].pos);
     assert!(sep > 1.0, "overlapping enemies should separate, got dist {sep}");
 }
+
+#[test]
+fn aim_trainer_flick_chain_completes_and_escalates_tier() {
+    let mut g = Game::new(1280.0, 720.0, 55);
+    // Activate mouse aiming so first drill (Flick Chain) spawns.
+    g.set_aim_input(0.0, 0.0, true, false, false);
+    for _ in 0..100 {
+        g.update(DT);
+        if !g.aim_targets().is_empty() {
+            break;
+        }
+    }
+    assert_eq!(g.aim_targets().len(), 1, "flick drill should spawn a single node");
+
+    // Snap-click all 3 targets in the Tier 1 flick chain!
+    for _ in 0..3 {
+        let t = g.aim_targets()[0];
+        let rel = Vec2::new(t.x - g.camera().x, t.y - g.camera().y);
+        let d = rel.length();
+        let theta = d / GLOBE_RADIUS;
+        let screen_off = if theta > 1e-4 { rel * (theta.sin() / theta) } else { rel };
+        g.set_aim_input(screen_off.x, screen_off.y, true, true, false);
+        g.update(DT);
+        // Step past brief 0.06s fire cooldown.
+        g.set_aim_input(screen_off.x, screen_off.y, true, false, false);
+        for _ in 0..5 {
+            g.update(DT);
+        }
+    }
+    assert_eq!(g.aim_drills_completed(), 1);
+    assert_eq!(g.aim_hits(), 3);
+    assert_eq!(g.aim_shots(), 3);
+    assert!(g.aim_combo() >= 3);
+}
+
+#[test]
+fn aim_trainer_smooth_tracking_charges_and_triggers_overload() {
+    let mut g = Game::new(1280.0, 720.0, 77);
+    g.aim_next_drill = 1; // Force Track drill next.
+    g.set_aim_input(0.0, 0.0, true, false, false);
+    for _ in 0..100 {
+        g.update(DT);
+        if !g.aim_targets().is_empty() {
+            break;
+        }
+    }
+    assert_eq!(g.aim_targets().len(), 1);
+    assert_eq!(g.aim_targets()[0].kind as u32, 1);
+
+    // Smoothly track the moving orb while holding LMB until completion.
+    for _ in 0..160 {
+        if g.aim_drills_completed() > 0 {
+            break;
+        }
+        let t = g.aim_targets()[0];
+        let rel = Vec2::new(t.x - g.camera().x, t.y - g.camera().y);
+        let d = rel.length();
+        let theta = d / GLOBE_RADIUS;
+        let screen_off = if theta > 1e-4 { rel * (theta.sin() / theta) } else { rel };
+        g.set_aim_input(screen_off.x, screen_off.y, true, false, true);
+        g.update(DT);
+    }
+    assert_eq!(g.aim_drills_completed(), 1, "holding reticle on moving orb should finish Track drill");
+}
+
+#[test]
+fn aim_precision_lance_direct_clicks_damage_enemies() {
+    let mut g = Game::new(1280.0, 720.0, 88);
+    let mut epos = g.player.pos;
+    move_on_globe(&mut epos, Vec2::new(180.0, 0.0));
+    g.enemies.push(Enemy {
+        pos: epos,
+        radius: 14.0,
+        hp: 500.0,
+        speed: 0.0,
+        kind: EnemyKind::Brute,
+        state: EnemyState::Drifting,
+        state_timer: 0.0,
+        charge_dir: Vec2::ZERO,
+        color: [1.0, 0.67, 0.33],
+        contact_damage: 20.0,
+        slow_timer: 0.0,
+        no_xp: false,
+        spawn_grace: 0.0,
+        mini_boss: None,
+    });
+    g.aim_drill_cooldown = 99.0; // keep arena clear of drills for direct-click test
+    let theta = 180.0 / GLOBE_RADIUS;
+    let screen_x = 180.0 * (theta.sin() / theta);
+    g.set_aim_input(screen_x, 0.0, true, true, false);
+    g.update(DT);
+    assert_eq!(g.aim_hits(), 1);
+    assert!(g.enemies[0].hp < 500.0, "direct click should precision-crit enemy");
+}

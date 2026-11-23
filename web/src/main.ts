@@ -1,109 +1,89 @@
-// Bootstrap for Prism — wires WASM ↔ WebGL2 Renderer ↔ 2D Overlay ↔ Input (KB/Touch/Gamepad) ↔ Audio DSP.
-// Zero-copy Float32Array views read CircleInstance (9 floats), BeamInstance (10 floats),
-// and DamagePopup (4 floats) directly out of WebAssembly linear memory.
+// Bootstrap for Prism — wires WASM ↔ WebGL2 Spectral Renderer ↔ 2D Tactical/Aim Overlay
+// ↔ Input (KB/Mouse/Touch/Twin-Stick Gamepad) ↔ Multi-Section Adaptive Music & Harmonic SFX.
 
 import init, { Game } from '../wasm/prism.js';
 import { Renderer, VisualQuality } from './renderer.js';
 import { Input } from './input.js';
 import { AudioManager } from './audio.js';
 import { OverlayRenderer } from './overlay.js';
+import { getEvolutionSvg, getShardSvg } from './shardIcons.js';
 
 const CIRCLE_STRIDE_FLOATS = 9;
 const BEAM_STRIDE_FLOATS = 10;       // layout from WASM (read only)
 const BEAM_AUGMENTED_STRIDE = 11;    // +1 form_progress float injected before upload
 const POPUP_STRIDE_FLOATS = 4;
+const AIM_TARGET_STRIDE_FLOATS = 8;
 
 const AUDIO_BOSS_SPAWN = 1 << 2;
 const AUDIO_SHIELD_BREAK = 1 << 4;
 const AUDIO_STREAK_MILESTONE = 1 << 7;
 const AUDIO_EVOLUTION = 1 << 8;
+const AUDIO_AIM_HIT = 1 << 9;
+const AUDIO_AIM_COMPLETE = 1 << 10;
+const AUDIO_AIM_MISS = 1 << 11;
 
 // Must stay in index-lock with Rust's SYNERGIES const (src/shards.rs).
-// Order determines bit positions in active_synergy_bits() / near_synergy_bits().
 const SYNERGY_NAMES: string[] = [
   'CHAIN REACTION', 'BLIZZARD', 'SUPERNOVA', 'PRISM CANNON', 'TRACKING ECHO',
   'FROZEN ORBIT', 'EVENT HORIZON', 'BLOOD PACT', 'MARTYRDOM', 'RESONANCE', 'GRAVITY WELL',
   'STATIC FREEZE', 'STORM FRONT', 'GRAVITY MINES', 'SEISMIC FIELD', 'TRIPWIRE GRID', 'PHASE WAKE',
   'RAIL FOCUS', 'SURGICAL DRAIN',
 ];
+
+// Index-locked synergy partner map [shardA, shardB, synergyName] matching src/shards.rs::SYNERGIES.
+const SYNERGY_PAIRS: [number, number, string][] = [
+  [0, 8, 'CHAIN REACTION'], [0, 11, 'BLIZZARD'], [2, 5, 'SUPERNOVA'], [3, 4, 'PRISM CANNON'],
+  [1, 6, 'TRACKING ECHO'], [7, 11, 'FROZEN ORBIT'], [7, 15, 'EVENT HORIZON'], [10, 13, 'BLOOD PACT'],
+  [13, 8, 'MARTYRDOM'], [12, 9, 'RESONANCE'], [14, 9, 'GRAVITY WELL'], [20, 11, 'STATIC FREEZE'],
+  [20, 8, 'STORM FRONT'], [21, 14, 'GRAVITY MINES'], [21, 9, 'SEISMIC FIELD'], [21, 20, 'TRIPWIRE GRID'],
+  [21, 19, 'PHASE WAKE'], [22, 4, 'RAIL FOCUS'], [22, 10, 'SURGICAL DRAIN'],
+];
+
 const BOSS_NAMES: string[] = ['PRISM SENTINEL', 'HYDRA', 'VOID PRISM — FINAL BOSS'];
 const DAMAGE_SOURCE_NAMES: string[] = ['ENEMY CONTACT', 'PROJECTILE', 'BOSS CONTACT', 'VOID SHOCKWAVE'];
 const RANK_TIMELINE_BUCKETS = 16;
-const UPGRADE_PICK_SHARD = 0;
-const UPGRADE_PICK_EVOLUTION = 1;
-const UPGRADE_PICK_SKIP = 2;
 
 // Must stay in index-lock with Rust's ShardKind enum (src/shards.rs).
 type Rarity = 'common' | 'rare' | 'legendary' | 'evolution';
 interface ShardMeta { name: string; color: string; desc: string; synergies: string[]; rarity: Rarity }
 interface EvolutionMeta { name: string; color: string; desc: string; recipe: string }
 const SHARDS: ShardMeta[] = [
-  { name: 'SPLIT',        color: '#8effa3', rarity: 'common',    desc: 'fan out more beams per volley',        synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
-  { name: 'REFRACT',      color: '#7fd3ff', rarity: 'rare',      desc: 'beams curve toward nearest enemy',     synergies: ['ECHO → TRACKING ECHO'] },
-  { name: 'MIRROR',       color: '#c9a3ff', rarity: 'common',    desc: 'fire in every direction',              synergies: ['DIFFRACT → SUPERNOVA'] },
-  { name: 'CHROMATIC',    color: '#ffa3c9', rarity: 'common',    desc: 'split into red / green / blue',        synergies: ['LENS → PRISM CANNON'] },
-  { name: 'LENS',         color: '#ffe58e', rarity: 'common',    desc: 'thicker, heavier beams',               synergies: ['CHROMATIC → PRISM CANNON'] },
-  { name: 'DIFFRACT',     color: '#8efff4', rarity: 'rare',      desc: 'hits scatter into radial bursts',      synergies: ['MIRROR → SUPERNOVA'] },
-  { name: 'ECHO',         color: '#ff9d6c', rarity: 'rare',      desc: 'second salvo after a short delay',     synergies: ['REFRACT → TRACKING ECHO'] },
-  { name: 'HALO',         color: '#f5f5bc', rarity: 'rare',      desc: 'orbital beads strike on contact',      synergies: ['FROST → FROZEN ORBIT', 'MOMENTUM → EVENT HORIZON'] },
-  { name: 'CASCADE',      color: '#ff6f91', rarity: 'legendary', desc: 'kills fork into secondary beams',      synergies: ['SPLIT → CHAIN REACTION', 'THORNS → MARTYRDOM'] },
-  { name: 'INTERFERENCE', color: '#9a9dff', rarity: 'legendary', desc: 'standing-wave pulses ripple outward',  synergies: ['BARRIER → RESONANCE', 'MAGNET → GRAVITY WELL', 'MINEFIELD → SEISMIC FIELD'] },
-  { name: 'SIPHON',       color: '#a3ffdb', rarity: 'common',    desc: 'beams heal you on every hit',          synergies: ['THORNS → BLOOD PACT (close-range only)'] },
-  { name: 'FROST',        color: '#b3e5fc', rarity: 'common',    desc: 'beams slow enemies on hit',            synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
-  { name: 'BARRIER',      color: '#64b5f6', rarity: 'common',    desc: 'energy shield absorbs + deals damage', synergies: ['INTERFERENCE → RESONANCE'] },
-  { name: 'THORNS',       color: '#ef5350', rarity: 'rare',      desc: 'taking damage fires retaliatory beams',synergies: ['SIPHON → BLOOD PACT (close-range heal)', 'CASCADE → MARTYRDOM'] },
-  { name: 'MAGNET',       color: '#7cffd4', rarity: 'common',    desc: 'pull radiance gems from farther away', synergies: ['INTERFERENCE → GRAVITY WELL', 'MINEFIELD → GRAVITY MINES'] },
-  { name: 'MOMENTUM',     color: '#d7ff6f', rarity: 'common',    desc: 'move faster and shorten dash cooldown', synergies: ['HALO → EVENT HORIZON'] },
-  { name: 'ARMOR',        color: '#9ab8d0', rarity: 'common',    desc: 'reduce all incoming damage by 8% per level', synergies: [] },
-  { name: 'LUCK',         color: '#ffd740', rarity: 'rare',      desc: 'rare and legendary shards appear more often', synergies: [] },
-  { name: 'PRISM HEART',  color: '#ff7eb3', rarity: 'common',    desc: '+15 max HP per level; level-up heals more',   synergies: [] },
-  { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: 'dash grants longer i-frames; L3: afterimage', synergies: ['MINEFIELD → PHASE WAKE'] },
-  { name: 'ARC',          color: '#b58cff', rarity: 'rare',      desc: 'chain lightning leaps between nearby enemies', synergies: ['FROST → STATIC FREEZE', 'CASCADE → STORM FRONT', 'MINEFIELD → TRIPWIRE GRID'] },
-  { name: 'MINEFIELD',    color: '#7dff98', rarity: 'legendary', desc: 'seed faceted charges that burst, pull, and lance threats', synergies: ['MAGNET → GRAVITY MINES', 'INTERFERENCE → SEISMIC FIELD', 'ARC → TRIPWIRE GRID', 'PHASE STEP → PHASE WAKE'] },
-  { name: 'LANCE',        color: '#fff06a', rarity: 'rare',      desc: 'periodic heavy piercing rail shot',            synergies: ['LENS → RAIL FOCUS', 'SIPHON → SURGICAL DRAIN'] },
+  { name: 'SPLIT',        color: '#8effa3', rarity: 'common',    desc: 'Fan out more beams per volley',          synergies: ['CASCADE → CHAIN REACTION', 'FROST → BLIZZARD'] },
+  { name: 'REFRACT',      color: '#7fd3ff', rarity: 'rare',      desc: 'Beams curve toward nearest enemy',       synergies: ['ECHO → TRACKING ECHO'] },
+  { name: 'MIRROR',       color: '#c9a3ff', rarity: 'common',    desc: 'Fire symmetrically in every direction',  synergies: ['DIFFRACT → SUPERNOVA'] },
+  { name: 'CHROMATIC',    color: '#ffa3c9', rarity: 'common',    desc: 'Split into red / green / blue sub-rays', synergies: ['LENS → PRISM CANNON'] },
+  { name: 'LENS',         color: '#ffe58e', rarity: 'common',    desc: 'Focus thicker, heavier optical beams',   synergies: ['CHROMATIC → PRISM CANNON'] },
+  { name: 'DIFFRACT',     color: '#8efff4', rarity: 'rare',      desc: 'Impacts scatter into radial starbursts', synergies: ['MIRROR → SUPERNOVA'] },
+  { name: 'ECHO',         color: '#ff9d6c', rarity: 'rare',      desc: 'Delayed reverberating second salvo',     synergies: ['REFRACT → TRACKING ECHO'] },
+  { name: 'HALO',         color: '#f5f5bc', rarity: 'rare',      desc: 'Orbital crystal beads slice on contact', synergies: ['FROST → FROZEN ORBIT', 'MOMENTUM → EVENT HORIZON'] },
+  { name: 'CASCADE',      color: '#ff6f91', rarity: 'legendary', desc: 'Kills fork into chain-reaction rays',    synergies: ['SPLIT → CHAIN REACTION', 'THORNS → MARTYRDOM'] },
+  { name: 'INTERFERENCE', color: '#9a9dff', rarity: 'legendary', desc: 'Standing-wave rings ripple outward',     synergies: ['BARRIER → RESONANCE', 'MAGNET → GRAVITY WELL', 'MINEFIELD → SEISMIC FIELD'] },
+  { name: 'SIPHON',       color: '#a3ffdb', rarity: 'common',    desc: 'Beams siphon hull health on hit',        synergies: ['THORNS → BLOOD PACT'] },
+  { name: 'FROST',        color: '#b3e5fc', rarity: 'common',    desc: 'Cryo-chill enemies slowed by beams',     synergies: ['HALO → FROZEN ORBIT', 'SPLIT → BLIZZARD'] },
+  { name: 'BARRIER',      color: '#64b5f6', rarity: 'common',    desc: 'Regenerating shield absorbs + burns',    synergies: ['INTERFERENCE → RESONANCE'] },
+  { name: 'THORNS',       color: '#ef5350', rarity: 'rare',      desc: 'Hull damage triggers retaliatory rays',  synergies: ['SIPHON → BLOOD PACT', 'CASCADE → MARTYRDOM'] },
+  { name: 'MAGNET',       color: '#7cffd4', rarity: 'common',    desc: 'Vacuum radiance crystals from afar',     synergies: ['INTERFERENCE → GRAVITY WELL', 'MINEFIELD → GRAVITY MINES'] },
+  { name: 'MOMENTUM',     color: '#d7ff6f', rarity: 'common',    desc: 'Faster glide & quicker phase dash',      synergies: ['HALO → EVENT HORIZON'] },
+  { name: 'ARMOR',        color: '#9ab8d0', rarity: 'common',    desc: 'Reduce all incoming damage 8% / level',  synergies: [] },
+  { name: 'LUCK',         color: '#ffd740', rarity: 'rare',      desc: 'Boost rare & legendary shard rolls',     synergies: [] },
+  { name: 'PRISM HEART',  color: '#ff7eb3', rarity: 'common',    desc: '+15 max hull & stronger rank-up heal',   synergies: [] },
+  { name: 'PHASE STEP',   color: '#5fffff', rarity: 'rare',      desc: 'Longer dash i-frames; L3 afterimage',    synergies: ['MINEFIELD → PHASE WAKE'] },
+  { name: 'ARC',          color: '#b58cff', rarity: 'rare',      desc: 'Chain lightning arcs across crowds',     synergies: ['FROST → STATIC FREEZE', 'CASCADE → STORM FRONT', 'MINEFIELD → TRIPWIRE GRID'] },
+  { name: 'MINEFIELD',    color: '#7dff98', rarity: 'legendary', desc: 'Seed faceted charges that pull & burst', synergies: ['MAGNET → GRAVITY MINES', 'INTERFERENCE → SEISMIC FIELD', 'ARC → TRIPWIRE GRID', 'PHASE STEP → PHASE WAKE'] },
+  { name: 'LANCE',        color: '#fff06a', rarity: 'rare',      desc: 'Periodic heavy piercing rail shot',      synergies: ['LENS → RAIL FOCUS', 'SIPHON → SURGICAL DRAIN'] },
 ];
 
 // Must stay in index-lock with Rust's EvolutionKind enum (src/shards.rs).
 const EVOLUTIONS: EvolutionMeta[] = [
-  {
-    name: 'AFTERIMAGE ENGINE',
-    color: '#ffb547',
-    desc: 'dashing leaves firing echoes at your old position',
-    recipe: 'ECHO 6 + MOMENTUM 6',
-  },
-  {
-    name: 'WHITEOUT',
-    color: '#b9f4ff',
-    desc: 'frozen kills burst into freezing rays and longer frost fields',
-    recipe: 'FROST 6 + DIFFRACT 6',
-  },
-  {
-    name: 'KALEIDOSCOPE',
-    color: '#cc88ff',
-    desc: 'every salvo also fires a prismatic great-circle ring of 12 rays',
-    recipe: 'SPLIT 6 + MIRROR 6',
-  },
-  {
-    name: 'SINGULARITY',
-    color: '#5544ff',
-    desc: 'interference rings become gravity wells — enemies spiral inward, ring damage +75%',
-    recipe: 'MAGNET 6 + INTERFERENCE 6',
-  },
-  {
-    name: 'SOLAR CROWN',
-    color: '#ffec66',
-    desc: 'halo contacts recharge your barrier; barrier hits flare all orbitals',
-    recipe: 'HALO 6 + BARRIER 6',
-  },
+  { name: 'AFTERIMAGE ENGINE', color: '#ffb547', desc: 'Dashing leaves firing echoes at your old position', recipe: 'ECHO 6 + MOMENTUM 6' },
+  { name: 'WHITEOUT',          color: '#b9f4ff', desc: 'Frozen kills erupt into freezing rays & deep frost fields', recipe: 'FROST 6 + DIFFRACT 6' },
+  { name: 'KALEIDOSCOPE',      color: '#cc88ff', desc: 'Every salvo unleashes a 12-ray great-circle prism ring', recipe: 'SPLIT 6 + MIRROR 6' },
+  { name: 'SINGULARITY',       color: '#7a6bff', desc: 'Interference rings become spiraling gravity wells (+75% DMG)', recipe: 'MAGNET 6 + INTERFERENCE 6' },
+  { name: 'SOLAR CROWN',       color: '#ffec66', desc: 'Halo hits recharge barrier; barrier blocks flare all orbitals', recipe: 'HALO 6 + BARRIER 6' },
 ];
 
 type RunOutcome = 'VICTORY' | 'DEATH';
-
-interface StoredShard {
-  name: string;
-  level: number;
-}
-
+interface StoredShard { name: string; level: number }
 interface StoredRunSummary {
   version: 1;
   savedAt: string;
@@ -123,11 +103,9 @@ interface StoredRunSummary {
   gems: number;
   skips?: number;
   rerolls?: number;
-  maxObserved?: {
-    enemies: number;
-    circles: number;
-    beams: number;
-  };
+  aimTier?: number;
+  aimDrills?: number;
+  maxObserved?: { enemies: number; circles: number; beams: number };
   synergies: string[];
   evolutions?: string[];
   topShards: StoredShard[];
@@ -139,10 +117,10 @@ const NUMBERS_STORAGE_KEY = 'prism.damageNumbers.v1';
 const MAX_STORED_RUNS = 5;
 
 const formatTime = (secondsRaw: number): string => {
-  const secondsTotal = Math.max(0, Math.floor(secondsRaw));
-  const mins = Math.floor(secondsTotal / 60);
-  const secs = secondsTotal % 60;
-  return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  const s = Math.max(0, Math.floor(secondsRaw));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r < 10 ? '0' : ''}${r}`;
 };
 
 const formatCompact = (n: number): string => {
@@ -162,7 +140,6 @@ const escapeHtml = (text: string): string =>
     }
   });
 
-/** Deterministic daily UTC challenge seed via FNV-1a 32-bit hash. */
 const getDailySeedInfo = (): { dateLabel: string; seed: number } => {
   const now = new Date();
   const y = now.getUTCFullYear();
@@ -178,31 +155,31 @@ const getDailySeedInfo = (): { dateLabel: string; seed: number } => {
   return { dateLabel, seed: (h || 1) >>> 0 };
 };
 
-const isStoredShard = (value: unknown): value is StoredShard => {
-  if (typeof value !== 'object' || value === null) return false;
-  const shard = value as Partial<StoredShard>;
-  return typeof shard.name === 'string' && typeof shard.level === 'number';
+const isStoredShard = (v: unknown): v is StoredShard => {
+  if (typeof v !== 'object' || v === null) return false;
+  const s = v as Partial<StoredShard>;
+  return typeof s.name === 'string' && typeof s.level === 'number';
 };
 
-const isStoredRunSummary = (value: unknown): value is StoredRunSummary => {
-  if (typeof value !== 'object' || value === null) return false;
-  const run = value as Partial<StoredRunSummary>;
-  return run.version === 1 &&
-    (run.outcome === 'VICTORY' || run.outcome === 'DEATH') &&
-    typeof run.savedAt === 'string' &&
-    typeof run.score === 'number' &&
-    typeof run.timeSeconds === 'number' &&
-    typeof run.rank === 'number' &&
-    typeof run.peakRank === 'number' &&
-    typeof run.kills === 'number' &&
-    typeof run.bossKills === 'number' &&
-    typeof run.damageTaken === 'number' &&
-    typeof run.barrierAbsorbed === 'number' &&
-    typeof run.gems === 'number' &&
-    Array.isArray(run.synergies) &&
-    run.synergies.every((s) => typeof s === 'string') &&
-    Array.isArray(run.topShards) &&
-    run.topShards.every(isStoredShard);
+const isStoredRunSummary = (v: unknown): v is StoredRunSummary => {
+  if (typeof v !== 'object' || v === null) return false;
+  const r = v as Partial<StoredRunSummary>;
+  return r.version === 1 &&
+    (r.outcome === 'VICTORY' || r.outcome === 'DEATH') &&
+    typeof r.savedAt === 'string' &&
+    typeof r.score === 'number' &&
+    typeof r.timeSeconds === 'number' &&
+    typeof r.rank === 'number' &&
+    typeof r.peakRank === 'number' &&
+    typeof r.kills === 'number' &&
+    typeof r.bossKills === 'number' &&
+    typeof r.damageTaken === 'number' &&
+    typeof r.barrierAbsorbed === 'number' &&
+    typeof r.gems === 'number' &&
+    Array.isArray(r.synergies) &&
+    r.synergies.every((s) => typeof s === 'string') &&
+    Array.isArray(r.topShards) &&
+    r.topShards.every(isStoredShard);
 };
 
 const compareRuns = (a: StoredRunSummary, b: StoredRunSummary): number => {
@@ -225,87 +202,49 @@ const readStoredRuns = (): StoredRunSummary[] => {
   }
 };
 
-const writeStoredRuns = (runs: StoredRunSummary[]): boolean => {
-  try {
-    window.localStorage.setItem(BEST_RUNS_STORAGE_KEY, JSON.stringify(runs));
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 const saveRunSummary = (summary: StoredRunSummary): {
   runs: StoredRunSummary[];
   isNewBest: boolean;
   storageOk: boolean;
 } => {
-  const previousRuns = readStoredRuns();
-  const previousBest = previousRuns[0];
-  const isNewBest = !previousBest || compareRuns(summary, previousBest) < 0;
-  const runs = [...previousRuns, summary].sort(compareRuns).slice(0, MAX_STORED_RUNS);
-  const storageOk = writeStoredRuns(runs);
+  const prev = readStoredRuns();
+  const prevBest = prev[0];
+  const isNewBest = !prevBest || compareRuns(summary, prevBest) < 0;
+  const runs = [...prev, summary].sort(compareRuns).slice(0, MAX_STORED_RUNS);
+  let storageOk = true;
+  try {
+    window.localStorage.setItem(BEST_RUNS_STORAGE_KEY, JSON.stringify(runs));
+  } catch {
+    storageOk = false;
+  }
   return { runs, isNewBest, storageOk };
 };
 
-const renderBestRuns = (
-  runs: StoredRunSummary[],
-  currentSavedAt: string,
-  isNewBest: boolean,
-  storageOk: boolean,
-): string => {
-  if (runs.length === 0) return '';
-  const lines = runs.map((run, idx) => {
-    const currentClass = run.savedAt === currentSavedAt ? ' current-run' : '';
-    const shardText = run.topShards.length > 0
-      ? ` · ${run.topShards.slice(0, 2).map((s) => `${escapeHtml(s.name)} ${s.level}`).join(', ')}`
-      : '';
-    return `<div class="best-run-line${currentClass}">` +
-      `${idx + 1}. ${run.score} PTS · ${formatTime(run.timeSeconds)} · ${run.outcome}${shardText}` +
-      `</div>`;
-  }).join('');
-  return `<div class="best-run-panel">` +
-    `<div class="best-run-title">${isNewBest ? '★ NEW PERSONAL BEST' : 'LOCAL LEADERBOARD'}</div>` +
-    lines +
-    (storageOk ? '' : `<div class="best-run-line">storage unavailable this session</div>`) +
-    `</div>`;
+const buildRankSparklineSvg = (game: Game, minutesActive: number): string => {
+  const count = Math.max(2, Math.min(RANK_TIMELINE_BUCKETS, Math.ceil(minutesActive) + 1));
+  const vals: number[] = [];
+  for (let i = 0; i < count; i++) vals.push(game.rank_at_minute(i));
+  const maxVal = Math.max(1, ...vals);
+  const w = 320;
+  const h = 58;
+  const pts = vals.map((v, i) => {
+    const x = (i / (count - 1)) * (w - 8) + 4;
+    const y = h - 6 - (v / maxVal) * (h - 14);
+    return [x, y] as const;
+  });
+  const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+  const area = `4,${h - 4} ${line} ${(w - 4).toFixed(1)},${h - 4}`;
+  return (
+    `<svg class="sparkline-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">` +
+    `<defs><linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0%" stop-color="#7df4ff" stop-opacity="0.35"/>` +
+    `<stop offset="100%" stop-color="#7df4ff" stop-opacity="0.02"/>` +
+    `</linearGradient></defs>` +
+    `<polygon points="${area}" fill="url(#sparkFill)"/>` +
+    `<polyline points="${line}" fill="none" stroke="#7df4ff" stroke-width="2" stroke-linejoin="round"/>` +
+    `</svg>`
+  );
 };
-
-const describeDamageSource = (sourceIdx: number): string =>
-  DAMAGE_SOURCE_NAMES[sourceIdx] ?? 'UNKNOWN';
-
-const collectDamageBreakdown = (game: Game): string[] =>
-  DAMAGE_SOURCE_NAMES
-    .map((name, i) => ({ name, amount: Math.round(game.damage_by_source(i)) }))
-    .filter((entry) => entry.amount > 0)
-    .map((entry) => `${entry.name}: ${entry.amount}`);
-
-const collectRankTimeline = (game: Game): string =>
-  Array.from({ length: RANK_TIMELINE_BUCKETS }, (_, i) => `m${i}:${game.rank_at_minute(i)}`)
-    .join(', ');
-
-const collectUpgradePickOrder = (game: Game): string[] => {
-  const picks: string[] = [];
-  const count = game.upgrade_pick_count();
-  for (let i = 0; i < count; i++) {
-    const offerType = game.upgrade_pick_type(i);
-    const offerIdx = game.upgrade_pick_index(i);
-    const time = formatTime(game.upgrade_pick_time(i));
-    if (offerType === UPGRADE_PICK_SHARD) {
-      picks.push(`${time} ${SHARDS[offerIdx]?.name ?? `SHARD ${offerIdx}`}`);
-    } else if (offerType === UPGRADE_PICK_EVOLUTION) {
-      picks.push(`${time} ${EVOLUTIONS[offerIdx]?.name ?? `EVOLUTION ${offerIdx}`}`);
-    } else if (offerType === UPGRADE_PICK_SKIP) {
-      picks.push(`${time} SKIP`);
-    }
-  }
-  return picks;
-};
-
-const collectSynergyTimes = (game: Game): string[] =>
-  SYNERGY_NAMES
-    .map((name, i) => ({ name, time: game.synergy_time(i) }))
-    .filter((entry) => entry.time >= 0)
-    .map((entry) => `${formatTime(entry.time)} ${entry.name}`);
 
 async function main(): Promise<void> {
   const canvasEl = document.getElementById('canvas');
@@ -350,8 +289,15 @@ async function main(): Promise<void> {
   const bossFillEl = getEl('boss-fill');
   const sysBarMidEl = getEl('sys-bar-mid');
   const sysUplinkEl = getEl('sys-uplink');
+  const sysMusicBtn = getEl('sys-music-btn') as HTMLButtonElement;
   const sysMuteBtn = getEl('sys-mute-btn') as HTMLButtonElement;
   const sysPauseBtn = getEl('sys-pause-btn') as HTMLButtonElement;
+
+  const aimHudEl = getEl('aim-hud');
+  const aimTierValEl = getEl('aim-tier-val');
+  const aimComboValEl = getEl('aim-combo-val');
+  const aimDrillValEl = getEl('aim-drill-val');
+  const aimAccValEl = getEl('aim-acc-val');
 
   const titleScreenEl = getEl('title-screen');
   const btnPlay = getEl('btn-play') as HTMLButtonElement;
@@ -367,9 +313,11 @@ async function main(): Promise<void> {
   const btnCopyTelemetry = getEl('btn-copy-telemetry') as HTMLButtonElement;
 
   const pauseMenuEl = getEl('pause-menu');
+  const pauseNowPlayingEl = getEl('pause-now-playing');
   const pauseBuildEl = getEl('pause-build');
   const btnResume = getEl('btn-resume') as HTMLButtonElement;
   const btnRestartPause = getEl('btn-restart-pause') as HTMLButtonElement;
+  const btnToggleMusic = getEl('btn-toggle-music') as HTMLButtonElement;
   const btnToggleSound = getEl('btn-toggle-sound') as HTMLButtonElement;
   const btnToggleFx = getEl('btn-toggle-fx') as HTMLButtonElement;
   const btnToggleNumbers = getEl('btn-toggle-numbers') as HTMLButtonElement;
@@ -378,7 +326,7 @@ async function main(): Promise<void> {
   const wasm = await init();
   const memory: WebAssembly.Memory = wasm.memory;
 
-  // Build synergy tags.
+  // Build synergy tags & shard tray.
   synergiesHudEl.innerHTML = '';
   const synergyTags: HTMLElement[] = [];
   for (const name of SYNERGY_NAMES) {
@@ -390,7 +338,6 @@ async function main(): Promise<void> {
     synergyTags.push(tag);
   }
 
-  // Build shard tray.
   trayEl.innerHTML = '';
   const pips: HTMLElement[] = [];
   for (let i = 0; i < SHARDS.length; i++) {
@@ -398,16 +345,13 @@ async function main(): Promise<void> {
     wrap.className = 'shard-pip-wrap';
     wrap.style.display = 'none';
     wrap.title = SHARDS[i]!.name;
-
     const hex = document.createElement('div');
     hex.className = 'shard-pip';
     wrap.appendChild(hex);
-
     const lvlLabel = document.createElement('div');
     lvlLabel.className = 'shard-pip-label';
     lvlLabel.textContent = 'L0';
     wrap.appendChild(lvlLabel);
-
     trayEl.appendChild(wrap);
     pips.push(wrap);
   }
@@ -417,34 +361,27 @@ async function main(): Promise<void> {
   const input = new Input(canvas);
   const audio = new AudioManager();
 
-  // Restore saved visual quality & damage-numbers preferences.
-  try {
-    const savedQ = window.localStorage.getItem(QUALITY_STORAGE_KEY);
-    if (savedQ === 'high' || savedQ === 'balanced' || savedQ === 'reduced') {
-      renderer.setQuality(savedQ);
-    }
-    const savedNums = window.localStorage.getItem(NUMBERS_STORAGE_KEY);
-    if (savedNums === '0') {
-      overlay.setEnabled(false);
-    }
-  } catch { /* ignore storage errors */ }
-
+  // Restore saved preferences.
   let numbersEnabled = true;
   try {
+    const savedQ = window.localStorage.getItem(QUALITY_STORAGE_KEY);
+    if (savedQ === 'high' || savedQ === 'balanced' || savedQ === 'reduced') renderer.setQuality(savedQ);
     numbersEnabled = window.localStorage.getItem(NUMBERS_STORAGE_KEY) !== '0';
+    overlay.setEnabled(numbersEnabled);
   } catch { /* ignore */ }
 
   const syncSettingsButtons = (): void => {
-    const muted = audio.isMuted();
-    btnToggleSound.textContent = muted ? 'SOUND: OFF' : 'SOUND: ON';
-    sysMuteBtn.textContent = muted ? 'SFX: OFF' : 'SFX: ON';
-    const q = renderer.getQuality().toUpperCase();
-    btnToggleFx.textContent = `FX: ${q}`;
+    const sfxMuted = audio.isSfxMuted();
+    const musicMuted = audio.isMusicMuted();
+    btnToggleSound.textContent = sfxMuted ? 'SFX: OFF' : 'SFX: ON';
+    sysMuteBtn.textContent = sfxMuted ? 'SFX: OFF' : 'SFX: ON';
+    btnToggleMusic.textContent = musicMuted ? 'MUSIC: OFF' : 'MUSIC: ON';
+    sysMusicBtn.textContent = musicMuted ? 'MUSIC: OFF' : 'MUSIC: ON';
+    btnToggleFx.textContent = `FX: ${renderer.getQuality().toUpperCase()}`;
     btnToggleNumbers.textContent = numbersEnabled ? 'NUMBERS: ON' : 'NUMBERS: OFF';
   };
   syncSettingsButtons();
 
-  // Initialize AudioContext on first user gesture.
   const ensureAudio = (): void => {
     if (!audio.isInitialized()) audio.init();
     audio.resume();
@@ -452,7 +389,6 @@ async function main(): Promise<void> {
   window.addEventListener('keydown', ensureAudio, { once: true });
   window.addEventListener('pointerdown', ensureAudio, { once: true });
 
-  // DPR-aware sizing.
   const DPR_CAP = 2;
   let viewW = 0;
   let viewH = 0;
@@ -473,7 +409,6 @@ async function main(): Promise<void> {
   };
   applySize();
 
-  // Daily seed & URL ?seed= support.
   const daily = getDailySeedInfo();
   btnDaily.textContent = `DAILY · ${daily.dateLabel}`;
   const urlParams = new URLSearchParams(window.location.search);
@@ -483,12 +418,9 @@ async function main(): Promise<void> {
 
   const updateTitleBestBadge = (): void => {
     const best = readStoredRuns()[0];
-    if (best) {
-      titleBestEl.textContent =
-        `PERSONAL BEST · ${best.score} PTS · ${formatTime(best.timeSeconds)} · RANK ${best.peakRank} (${best.outcome})`;
-    } else {
-      titleBestEl.textContent = '';
-    }
+    titleBestEl.textContent = best
+      ? `★ PERSONAL BEST · ${best.score} PTS · ${formatTime(best.timeSeconds)} · RANK ${best.peakRank} (${best.outcome})`
+      : '';
   };
   updateTitleBestBadge();
 
@@ -503,11 +435,10 @@ async function main(): Promise<void> {
   let hitStopTimer = 0;
   let lastRunTelemetryText = '';
 
-  // Attract-mode preview geometry for the Title Screen (spinning prism over live crystal globe).
   const attractCircles = new Float32Array(CIRCLE_STRIDE_FLOATS * 16);
   const attractBeams = new Float32Array(BEAM_AUGMENTED_STRIDE * 6);
 
-  // Zero-copy views into WASM linear memory.
+  // Zero-copy WASM views.
   let circlesPtr = -1;
   let circlesLen = 0;
   let circlesView: Float32Array = new Float32Array(0);
@@ -517,18 +448,19 @@ async function main(): Promise<void> {
   let popupsPtr = -1;
   let popupsLen = 0;
   let popupsView: Float32Array = new Float32Array(0);
+  let aimTargetsPtr = -1;
+  let aimTargetsLen = 0;
+  let aimTargetsView: Float32Array = new Float32Array(0);
 
   interface BeamEntry { birth: number; duration: number }
   const beamBirthTimes = new Map<string, BeamEntry>();
   let augBeamBuf = new Float32Array(0);
 
   const resetWasmViews = (): void => {
-    circlesPtr = -1;
-    circlesLen = 0;
-    beamsPtr = -1;
-    beamsLen = 0;
-    popupsPtr = -1;
-    popupsLen = 0;
+    circlesPtr = -1; circlesLen = 0;
+    beamsPtr = -1; beamsLen = 0;
+    popupsPtr = -1; popupsLen = 0;
+    aimTargetsPtr = -1; aimTargetsLen = 0;
     beamBirthTimes.clear();
   };
 
@@ -536,35 +468,33 @@ async function main(): Promise<void> {
     const cPtr = game.circles_ptr();
     const cLen = game.circles_len();
     if (cPtr !== circlesPtr || cLen !== circlesLen || circlesView.buffer !== memory.buffer) {
-      circlesPtr = cPtr;
-      circlesLen = cLen;
-      circlesView = cLen > 0
-        ? new Float32Array(memory.buffer, cPtr, cLen * CIRCLE_STRIDE_FLOATS)
-        : new Float32Array(0);
+      circlesPtr = cPtr; circlesLen = cLen;
+      circlesView = cLen > 0 ? new Float32Array(memory.buffer, cPtr, cLen * CIRCLE_STRIDE_FLOATS) : new Float32Array(0);
     }
 
     const bPtr = game.beams_ptr();
     const bLen = game.beams_len();
     if (bPtr !== beamsPtr || bLen !== beamsLen || beamsView.buffer !== memory.buffer) {
-      beamsPtr = bPtr;
-      beamsLen = bLen;
-      beamsView = bLen > 0
-        ? new Float32Array(memory.buffer, bPtr, bLen * BEAM_STRIDE_FLOATS)
-        : new Float32Array(0);
+      beamsPtr = bPtr; beamsLen = bLen;
+      beamsView = bLen > 0 ? new Float32Array(memory.buffer, bPtr, bLen * BEAM_STRIDE_FLOATS) : new Float32Array(0);
     }
 
     const pPtr = game.popups_ptr();
     const pLen = game.popups_len();
     if (pPtr !== popupsPtr || pLen !== popupsLen || popupsView.buffer !== memory.buffer) {
-      popupsPtr = pPtr;
-      popupsLen = pLen;
-      popupsView = pLen > 0
-        ? new Float32Array(memory.buffer, pPtr, pLen * POPUP_STRIDE_FLOATS)
-        : new Float32Array(0);
+      popupsPtr = pPtr; popupsLen = pLen;
+      popupsView = pLen > 0 ? new Float32Array(memory.buffer, pPtr, pLen * POPUP_STRIDE_FLOATS) : new Float32Array(0);
+    }
+
+    const aPtr = game.aim_targets_ptr();
+    const aLen = game.aim_targets_len();
+    if (aPtr !== aimTargetsPtr || aLen !== aimTargetsLen || aimTargetsView.buffer !== memory.buffer) {
+      aimTargetsPtr = aPtr; aimTargetsLen = aLen;
+      aimTargetsView = aLen > 0 ? new Float32Array(memory.buffer, aPtr, aLen * AIM_TARGET_STRIDE_FLOATS) : new Float32Array(0);
     }
   };
 
-  // HUD change-detection state.
+  // HUD change-detection cache.
   let lastRank = -1;
   let lastKills = -1;
   let lastScore = -1;
@@ -589,28 +519,20 @@ async function main(): Promise<void> {
   let announcedEvoBits = 0;
 
   const resetHudCache = (): void => {
-    lastRank = -1;
-    lastKills = -1;
-    lastScore = -1;
-    lastXpPct = -1;
-    lastXp = -1;
-    lastXpNeeded = -1;
-    lastHp = -1;
-    lastMaxHp = -1;
-    lastHpPct = -1;
-    lastDashReady = false;
-    lastTimerStr = '';
-    lastWave = -1;
-    lastBossActive = false;
-    lastBossKind = -2;
-    lastBossPct = -1;
-    lastStreak = -1;
-    lastEndless = false;
+    lastRank = -1; lastKills = -1; lastScore = -1;
+    lastXpPct = -1; lastXp = -1; lastXpNeeded = -1;
+    lastHp = -1; lastMaxHp = -1; lastHpPct = -1;
+    lastDashReady = false; lastTimerStr = ''; lastWave = -1;
+    lastBossActive = false; lastBossKind = -2; lastBossPct = -1;
+    lastStreak = -1; lastEndless = false;
     lastPipLevels.fill(-1);
-    lastActiveBits = -1;
-    lastNearBits = -1;
-    announcedSynergyBits = 0;
-    announcedEvoBits = 0;
+    lastActiveBits = -1; lastNearBits = -1;
+    announcedSynergyBits = 0; announcedEvoBits = 0;
+  };
+
+  const syncCursorVisibility = (): void => {
+    const hide = isStarted && !isPaused && !modalShown && !deathShown && input.isMouseAiming();
+    document.body.classList.toggle('aim-cursor-hidden', hide);
   };
 
   const startNewRun = (seed: number, dailyMode: boolean): void => {
@@ -634,11 +556,16 @@ async function main(): Promise<void> {
     levelupEl.classList.remove('shown');
     deathScreenEl.classList.remove('shown');
     hudEl.classList.remove('hidden');
+    aimHudEl.classList.remove('shown');
     audio.duck(false);
     sysBarMidEl.textContent = dailyMode
       ? `DAILY ${daily.dateLabel} · SEED #${currentSeed}`
       : `SPHERICAL ARENA · SEED #${currentSeed}`;
-    overlay.announce(dailyMode ? `DAILY ${daily.dateLabel}` : 'REFRACTION ONLINE', '#a8f4ff', 'SURVIVE 15:00 OR SHATTER THE VOID PRISM');
+    overlay.announce(
+      dailyMode ? `DAILY ${daily.dateLabel}` : 'PRISM ENGAGED',
+      '#7df4ff',
+      'COLLECT GEMS TO EVOLVE · CLICK & TRACK GOLDEN NODES FOR OVERDRIVE',
+    );
     last = performance.now();
   };
 
@@ -648,47 +575,48 @@ async function main(): Promise<void> {
     sysBarMidEl.textContent = `SPHERICAL ARENA · SEED #${currentSeed}`;
   }
 
-  btnPlay.addEventListener('click', () => {
-    const freshSeed = (Math.random() * 0xffffffff) >>> 0;
-    startNewRun(freshSeed, false);
-  });
-  btnDaily.addEventListener('click', () => {
-    startNewRun(daily.seed, true);
-  });
+  btnPlay.addEventListener('click', () => startNewRun((Math.random() * 0xffffffff) >>> 0, false));
+  btnDaily.addEventListener('click', () => startNewRun(daily.seed, true));
 
-  // --- Pause Menu + Active Build Inspector -------------------------------
+  // --- Pause Deck + Build Inspector --------------------------------------
 
   const renderPauseBuild = (): void => {
+    pauseNowPlayingEl.textContent = `♪ ${audio.getNowPlaying()}`;
     const owned = SHARDS.map((s, i) => ({
-      name: s.name,
-      color: s.color,
-      lvl: game.inventory_level(i),
-    })).filter((s) => s.lvl > 0);
+      name: s.name, color: s.color, lvl: game.inventory_level(i),
+    })).filter((s) => s.lvl > 0).sort((a, b) => b.lvl - a.lvl);
     const activeSyn = SYNERGY_NAMES.filter((_, i) => ((game.active_synergy_bits() >>> i) & 1) === 1);
-    const activeEvo = EVOLUTIONS
-      .filter((_, i) => ((game.active_evolution_bits() >>> i) & 1) === 1)
-      .map((e) => e.name);
-    const elapsed = Math.max(1, game.timer());
-    const dps = game.total_damage_dealt() / elapsed;
+    const activeEvo = EVOLUTIONS.filter((_, i) => ((game.active_evolution_bits() >>> i) & 1) === 1).map((e) => e.name);
+    const dps = game.total_damage_dealt() / Math.max(1, game.timer());
+    const shots = game.aim_shots();
+    const acc = shots > 0 ? Math.round((game.aim_hits() / shots) * 100) : 0;
 
-    const shardChips = owned.length > 0
-      ? owned.map((s) => `<span class="build-chip" style="border-color:${s.color}66;color:${s.color}">${s.name} L${s.lvl}</span>`).join('')
-      : '<span style="opacity:0.5">No shards collected yet</span>';
+    const shardBars = owned.length > 0
+      ? owned.slice(0, 8).map((s) =>
+        `<div class="spectrum-bar-row">` +
+          `<span class="spectrum-bar-name" style="color:${s.color}">${s.name}</span>` +
+          `<div class="spectrum-bar-track"><div class="spectrum-bar-fill" style="width:${(s.lvl / 6) * 100}%;background:${s.color}"></div></div>` +
+          `<span class="spectrum-bar-lvl" style="color:${s.color}">L${s.lvl}</span>` +
+        `</div>`,
+      ).join('')
+      : '<div style="opacity:0.5;padding:6px 0">Collect diamond crystal gems to forge your shard spectrum.</div>';
+
     const synLine = activeSyn.length > 0
-      ? `<div style="margin-top:8px;color:#ffd740">SYNERGIES: ${activeSyn.map(escapeHtml).join(' · ')}</div>`
+      ? `<div style="margin-top:8px;color:#ffd95e">⚡ SYNERGIES · ${activeSyn.map(escapeHtml).join(' / ')}</div>`
       : '';
     const evoLine = activeEvo.length > 0
-      ? `<div style="margin-top:4px;color:#ffb547">EVOLUTIONS: ${activeEvo.map(escapeHtml).join(' · ')}</div>`
+      ? `<div style="margin-top:4px;color:#ffba49">★ EVOLUTIONS · ${activeEvo.map(escapeHtml).join(' / ')}</div>`
+      : '';
+    const aimLine = shots > 0 || game.aim_drills_completed() > 0
+      ? `<div style="margin-top:6px;color:#7df4ff">AIM MASTERY · TIER ${game.aim_tier()} · ${acc}% ACC · ${game.aim_drills_completed()} DRILLS</div>`
       : '';
 
     pauseBuildEl.innerHTML =
-      `<div style="display:flex;justify-content:space-between;color:#dcf8ff">` +
-        `<span>BUILD INSPECTOR · SEED #${game.seed()}${isDailyRun ? ' (DAILY)' : ''}</span>` +
+      `<div style="display:flex;justify-content:space-between;color:#eefaff;margin-bottom:10px">` +
+        `<span>BUILD SPECTRUM · SEED #${game.seed()}${isDailyRun ? ' (DAILY)' : ''}</span>` +
         `<span>${formatCompact(dps)} DPS · PEAK ×${game.peak_kill_streak()}</span>` +
       `</div>` +
-      `<div class="build-chip-row">${shardChips}</div>` +
-      synLine +
-      evoLine;
+      shardBars + synLine + evoLine + aimLine;
   };
 
   const togglePause = (): void => {
@@ -704,26 +632,31 @@ async function main(): Promise<void> {
       input.clearKeys();
       last = performance.now();
     }
+    syncCursorVisibility();
   };
 
   btnResume.addEventListener('click', togglePause);
   sysPauseBtn.addEventListener('click', togglePause);
-  btnRestartPause.addEventListener('click', () => {
-    startNewRun((Math.random() * 0xffffffff) >>> 0, false);
-  });
+  btnRestartPause.addEventListener('click', () => startNewRun((Math.random() * 0xffffffff) >>> 0, false));
 
-  const handleToggleMute = (): void => {
+  const handleToggleSfx = (): void => {
     ensureAudio();
-    audio.toggleMute();
+    audio.toggleSfx();
     syncSettingsButtons();
   };
-  btnToggleSound.addEventListener('click', handleToggleMute);
-  sysMuteBtn.addEventListener('click', handleToggleMute);
+  const handleToggleMusic = (): void => {
+    ensureAudio();
+    audio.toggleMusic();
+    syncSettingsButtons();
+  };
+  btnToggleSound.addEventListener('click', handleToggleSfx);
+  sysMuteBtn.addEventListener('click', handleToggleSfx);
+  btnToggleMusic.addEventListener('click', handleToggleMusic);
+  sysMusicBtn.addEventListener('click', handleToggleMusic);
 
   btnToggleFx.addEventListener('click', () => {
     const order: VisualQuality[] = ['high', 'balanced', 'reduced'];
-    const cur = renderer.getQuality();
-    const next = order[(order.indexOf(cur) + 1) % order.length]!;
+    const next = order[(order.indexOf(renderer.getQuality()) + 1) % order.length]!;
     renderer.setQuality(next);
     try { window.localStorage.setItem(QUALITY_STORAGE_KEY, next); } catch { /* ignore */ }
     syncSettingsButtons();
@@ -743,12 +676,46 @@ async function main(): Promise<void> {
 
   statusEl.textContent = 'prism';
 
-  // --- Level-up modal ----------------------------------------------------
+  // --- Holographic Collectible Shard Picker ------------------------------
 
   const updateModalFocusVisual = (): void => {
     const cards = levelupCardsEl.querySelectorAll<HTMLButtonElement>('.shard-card');
-    cards.forEach((c, idx) => {
-      c.classList.toggle('gamepad-focus', idx === modalFocusIdx);
+    cards.forEach((c, idx) => c.classList.toggle('gamepad-focus', idx === modalFocusIdx));
+  };
+
+  const getSmartSynergyCallout = (shardIdx: number, nextLevel: number): { text: string; ready: boolean } | null => {
+    let bestNear: string | null = null;
+    for (const [a, b, synName] of SYNERGY_PAIRS) {
+      if (a !== shardIdx && b !== shardIdx) continue;
+      const partner = a === shardIdx ? b : a;
+      const partnerLvl = game.inventory_level(partner);
+      if (partnerLvl >= 3 && nextLevel === 3) {
+        return { text: `⚡ UNLOCKS ${synName} NOW!`, ready: true };
+      }
+      if (partnerLvl > 0 && partnerLvl < 3) {
+        bestNear = `◈ PAIRS WITH ${SHARDS[partner]!.name} (L${partnerLvl}) → ${synName}`;
+      } else if (partnerLvl >= 3 && nextLevel < 3) {
+        bestNear = `◈ ${3 - nextLevel} LVL TO UNLOCK ${synName}!`;
+      }
+    }
+    if (bestNear) return { text: bestNear, ready: false };
+    const first = SHARDS[shardIdx]?.synergies[0];
+    return first ? { text: `SYN · ${first}`, ready: false } : null;
+  };
+
+  const attachHoloTilt = (card: HTMLButtonElement): void => {
+    card.addEventListener('mousemove', (e) => {
+      const rect = card.getBoundingClientRect();
+      const px = (e.clientX - rect.left) / rect.width;
+      const py = (e.clientY - rect.top) / rect.height;
+      const rx = (0.5 - py) * 11;
+      const ry = (px - 0.5) * 11;
+      card.style.setProperty('--mx', `${(px * 100).toFixed(1)}%`);
+      card.style.setProperty('--my', `${(py * 100).toFixed(1)}%`);
+      card.style.transform = `translateY(-6px) rotateX(${rx.toFixed(1)}deg) rotateY(${ry.toFixed(1)}deg)`;
+    });
+    card.addEventListener('mouseleave', () => {
+      card.style.transform = '';
     });
   };
 
@@ -765,58 +732,55 @@ async function main(): Promise<void> {
       const card = document.createElement('button');
       card.className = 'shard-card';
       card.type = 'button';
-      card.dataset.slot = String(slot);
 
       if (offerType === 1) {
         if (offerIdx >= EVOLUTIONS.length) continue;
         const meta = EVOLUTIONS[offerIdx]!;
-        card.style.borderColor = 'rgba(255,181,71,0.58)';
-        card.style.boxShadow = '0 0 28px rgba(255,181,71,0.16)';
+        card.style.setProperty('--sc', meta.color);
         card.innerHTML =
-          `<div class="shard-rarity evolution">★ evolution</div>` +
-          `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
+          `<div class="shard-top-row">` +
+            `<div class="shard-emblem">${getEvolutionSvg(offerIdx, meta.color)}</div>` +
+            `<div class="shard-tag-col">` +
+              `<span class="shard-rarity evolution">★ EVOLUTION</span>` +
+              `<span class="shard-hotkey-badge">[${slot + 1}]</span>` +
+            `</div>` +
+          `</div>` +
           `<div class="shard-name">${meta.name}</div>` +
-          `<div class="shard-level">${meta.recipe}</div>` +
-          `<div class="shard-desc">${meta.desc}</div>` +
-          `<div class="shard-hotkey">[${slot + 1}]</div>`;
+          `<div class="shard-syn-callout ready">${meta.recipe}</div>` +
+          `<div class="shard-desc">${meta.desc}</div>`;
       } else {
         if (offerIdx >= SHARDS.length) continue;
         const meta = SHARDS[offerIdx]!;
         const currentLevel = game.inventory_level(offerIdx);
         const nextLevel = currentLevel + 1;
-        if (meta.rarity === 'rare') card.style.borderColor = 'rgba(127,211,255,0.34)';
-        if (meta.rarity === 'legendary') card.style.borderColor = 'rgba(255,215,64,0.45)';
+        card.style.setProperty('--sc', meta.color);
 
-        const pipLadder = Array.from({ length: 6 }, (_, n) => {
+        const diamonds = Array.from({ length: 6 }, (_, n) => {
           const lvl = n + 1;
-          let bg: string, shadow = 'none', border = '1px solid transparent', opacity = '1';
-          if (lvl <= currentLevel) {
-            bg = meta.color;
-          } else if (lvl === nextLevel) {
-            bg = 'rgba(255,255,255,0.92)';
-            shadow = '0 0 6px rgba(255,255,255,0.85)';
-            border = '1px solid rgba(255,255,255,0.65)';
-          } else {
-            bg = 'transparent';
-            opacity = '0.22';
-          }
-          return `<div style="flex:1;height:4px;background:${bg};box-shadow:${shadow};border:${border};opacity:${opacity}"></div>`;
+          const cls = lvl <= currentLevel ? 'owned' : lvl === nextLevel ? 'next' : '';
+          return `<span class="shard-diamond ${cls}"></span>`;
         }).join('');
 
-        const synergyHtml = meta.synergies.length > 0
-          ? `<div class="shard-synergy">${meta.synergies.map((s) => `<span>${s}</span>`).join('')}</div>`
+        const syn = getSmartSynergyCallout(offerIdx, nextLevel);
+        const synHtml = syn
+          ? `<div class="shard-syn-callout${syn.ready ? ' ready' : ''}">${escapeHtml(syn.text)}</div>`
           : '';
 
         card.innerHTML =
-          `<div class="shard-rarity ${meta.rarity}">${meta.rarity}</div>` +
-          `<div class="shard-icon" style="background:${meta.color};color:${meta.color}"></div>` +
+          `<div class="shard-top-row">` +
+            `<div class="shard-emblem">${getShardSvg(offerIdx, meta.color)}</div>` +
+            `<div class="shard-tag-col">` +
+              `<span class="shard-rarity ${meta.rarity}">${meta.rarity}</span>` +
+              `<span class="shard-hotkey-badge">[${slot + 1}]</span>` +
+            `</div>` +
+          `</div>` +
           `<div class="shard-name">${meta.name}</div>` +
-          `<div style="display:flex;gap:3px;margin:6px 0 2px">${pipLadder}</div>` +
-          `<div class="shard-level">LV ${currentLevel} → ${nextLevel}</div>` +
+          `<div class="shard-diamonds">${diamonds}<span class="shard-level-txt">L${currentLevel}→${nextLevel}</span></div>` +
           `<div class="shard-desc">${meta.desc}</div>` +
-          synergyHtml +
-          `<div class="shard-hotkey">[${slot + 1}]</div>`;
+          synHtml;
       }
+
+      attachHoloTilt(card);
       card.addEventListener('mouseenter', () => {
         audio.playUiHover();
         modalFocusIdx = slot;
@@ -831,7 +795,7 @@ async function main(): Promise<void> {
 
     const charges = game.reroll_charges();
     const rerollBtn = document.createElement('button');
-    rerollBtn.className = 'levelup-action';
+    rerollBtn.className = 'prism-btn ghost';
     rerollBtn.type = 'button';
     rerollBtn.disabled = charges === 0;
     rerollBtn.textContent = `REROLL [R / Y]  ×${charges}`;
@@ -843,9 +807,9 @@ async function main(): Promise<void> {
     levelupFooterEl.appendChild(rerollBtn);
 
     const skipBtn = document.createElement('button');
-    skipBtn.className = 'levelup-action';
+    skipBtn.className = 'prism-btn ghost';
     skipBtn.type = 'button';
-    skipBtn.textContent = 'SKIP [X / B]  +6 HP';
+    skipBtn.textContent = 'SKIP [X / B]  +6 HULL';
     skipBtn.addEventListener('click', () => {
       audio.playUiSelect();
       game.skip_level_up();
@@ -862,6 +826,7 @@ async function main(): Promise<void> {
     levelupEl.classList.add('shown');
     audio.duck(true);
     modalShown = true;
+    syncCursorVisibility();
   };
 
   const hideLevelUpModal = (): void => {
@@ -870,11 +835,10 @@ async function main(): Promise<void> {
     levelupFooterEl.innerHTML = '';
     audio.duck(false);
     modalShown = false;
+    syncCursorVisibility();
   };
 
-  // --- Death / Victory screen --------------------------------------------
-
-  const ENEMY_KIND_NAMES = ['DRONE', 'BRUTE', 'DASHER', 'SPLITTER', 'ORBITER', 'EMITTER', 'PULSAR', 'UMBRA'];
+  // --- Bespoke Victory / Shattered Run Story Screen ----------------------
 
   const showDeathScreen = (victory: boolean): void => {
     if (victory) {
@@ -882,7 +846,7 @@ async function main(): Promise<void> {
       deathTitleEl.classList.add('victory-title');
       btnContinueEndless.classList.add('shown');
     } else {
-      deathTitleEl.textContent = game.is_endless() ? 'ENDLESS SHATTERED' : 'SHATTERED';
+      deathTitleEl.textContent = game.is_endless() ? 'ENDLESS FALL' : 'SHATTERED';
       deathTitleEl.classList.remove('victory-title');
       btnContinueEndless.classList.remove('shown');
     }
@@ -892,34 +856,22 @@ async function main(): Promise<void> {
     const timeStr = formatTime(t);
     const dmgTaken = Math.round(game.damage_taken());
     const barrierAbs = Math.round(game.barrier_absorbed());
-    const gems = game.gems_collected();
     const bossKills = game.boss_kills_count();
     const peakStreak = game.peak_kill_streak();
     const avgDps = game.total_damage_dealt() / Math.max(1, t);
+    const aimShots = game.aim_shots();
+    const aimHits = game.aim_hits();
+    const aimAcc = aimShots > 0 ? Math.round((aimHits / aimShots) * 100) : 0;
     const deathCauseIdx = game.death_cause();
     const deathCause = !victory && deathCauseIdx >= 0
-      ? describeDamageSource(deathCauseIdx)
+      ? (DAMAGE_SOURCE_NAMES[deathCauseIdx] ?? 'UNKNOWN')
       : undefined;
-    const damageBreakdown = collectDamageBreakdown(game);
-    const rankTimeline = collectRankTimeline(game);
-    const upgradePickOrder = collectUpgradePickOrder(game);
-    const synergyTimes = collectSynergyTimes(game);
-    const maxObserved = {
-      enemies: game.max_enemies_observed(),
-      circles: game.max_circles_observed(),
-      beams: game.max_beams_observed(),
-    };
+
     const activeSynergies = SYNERGY_NAMES.filter((_, i) => ((game.active_synergy_bits() >>> i) & 1) === 1);
-    const activeEvolutions = EVOLUTIONS
-      .filter((_, i) => ((game.active_evolution_bits() >>> i) & 1) === 1)
-      .map((e) => e.name);
-    const topShards: StoredShard[] = SHARDS.map((s, i) => ({
-      name: s.name,
-      level: game.inventory_level(i),
-    }))
+    const activeEvolutions = EVOLUTIONS.filter((_, i) => ((game.active_evolution_bits() >>> i) & 1) === 1).map((e) => e.name);
+    const ownedShards = SHARDS.map((s, i) => ({ name: s.name, color: s.color, level: game.inventory_level(i) }))
       .filter((s) => s.level > 0)
-      .sort((a, b) => b.level - a.level || a.name.localeCompare(b.name))
-      .slice(0, 5);
+      .sort((a, b) => b.level - a.level || a.name.localeCompare(b.name));
 
     const summary: StoredRunSummary = {
       version: 1,
@@ -937,91 +889,89 @@ async function main(): Promise<void> {
       bossKills,
       damageTaken: dmgTaken,
       barrierAbsorbed: barrierAbs,
-      gems,
+      gems: game.gems_collected(),
       skips: game.skip_count(),
       rerolls: game.reroll_count(),
-      maxObserved,
+      aimTier: game.aim_tier(),
+      aimDrills: game.aim_drills_completed(),
+      maxObserved: {
+        enemies: game.max_enemies_observed(),
+        circles: game.max_circles_observed(),
+        beams: game.max_beams_observed(),
+      },
       synergies: activeSynergies,
       evolutions: activeEvolutions,
-      topShards,
+      topShards: ownedShards.slice(0, 5).map(({ name, level }) => ({ name, level })),
     };
-    const { runs, isNewBest, storageOk } = saveRunSummary(summary);
+    const { runs, isNewBest } = saveRunSummary(summary);
     updateTitleBestBadge();
 
-    const shardSummary = SHARDS.map((s, i) => {
-      const lvl = game.inventory_level(i);
-      return lvl > 0 ? `<span class="build-chip" style="border-color:${s.color}55;color:${s.color}">${s.name} L${lvl}</span>` : null;
-    }).filter(Boolean).join('');
+    const spectrumBarsHtml = ownedShards.length > 0
+      ? ownedShards.slice(0, 8).map((s) =>
+        `<div class="spectrum-bar-row">` +
+          `<span class="spectrum-bar-name" style="color:${s.color}">${s.name}</span>` +
+          `<div class="spectrum-bar-track"><div class="spectrum-bar-fill" style="width:${(s.level / 6) * 100}%;background:${s.color};box-shadow:0 0 8px ${s.color}88"></div></div>` +
+          `<span class="spectrum-bar-lvl" style="color:${s.color}">L${s.level}</span>` +
+        `</div>`,
+      ).join('')
+      : '<div style="opacity:0.5">No shards acquired</div>';
 
-    const synergySummary = activeSynergies.length > 0
-      ? `<div style="margin-top:6px;color:#ffd740">SYNERGIES · ${activeSynergies.map(escapeHtml).join(' / ')}</div>`
+    const synRibbon = activeSynergies.length > 0
+      ? `<div style="margin-top:10px;color:#ffd95e;font-size:9px">⚡ ${activeSynergies.map(escapeHtml).join(' · ')}</div>`
       : '';
-    const evolutionSummary = activeEvolutions.length > 0
-      ? `<div style="margin-top:4px;color:#ffb547">EVOLUTIONS · ${activeEvolutions.map(escapeHtml).join(' / ')}</div>`
-      : '';
-    const deathCauseSummary = deathCause
-      ? `<div style="color:#ff8f8f;margin-bottom:4px">CAUSE · ${escapeHtml(deathCause)}${damageBreakdown.length > 0 ? ` (${escapeHtml(damageBreakdown.join(' · '))})` : ''}</div>`
+    const evoRibbon = activeEvolutions.length > 0
+      ? `<div style="margin-top:4px;color:#ffba49;font-size:9px">★ ${activeEvolutions.map(escapeHtml).join(' · ')}</div>`
       : '';
 
-    deathStatsEl.innerHTML =
-      deathCauseSummary +
-      `<div class="stat-grid">` +
-        `<div class="stat-cell"><div class="stat-cell-label">SURVIVED</div><div class="stat-cell-val">${timeStr}</div></div>` +
-        `<div class="stat-cell"><div class="stat-cell-label">RANK</div><div class="stat-cell-val">${game.rank()}</div></div>` +
-        `<div class="stat-cell"><div class="stat-cell-label">KILLS</div><div class="stat-cell-val">${game.kills_total()}</div></div>` +
-        `<div class="stat-cell"><div class="stat-cell-label">PEAK STREAK</div><div class="stat-cell-val">×${peakStreak}</div></div>` +
-        `<div class="stat-cell"><div class="stat-cell-label">AVG DPS</div><div class="stat-cell-val">${formatCompact(avgDps)}</div></div>` +
-        `<div class="stat-cell"><div class="stat-cell-label">BOSSES</div><div class="stat-cell-val">${bossKills}</div></div>` +
-        `<div class="stat-cell"><div class="stat-cell-label">DMG / SHIELD</div><div class="stat-cell-val">${dmgTaken} / ${barrierAbs}</div></div>` +
-        `<div class="stat-cell"><div class="stat-cell-label">SEED</div><div class="stat-cell-val">#${game.seed()}</div></div>` +
-      `</div>` +
-      synergySummary +
-      evolutionSummary +
-      (shardSummary ? `<div class="build-chip-row" style="justify-content:center;margin-top:8px">${shardSummary}</div>` : '') +
-      renderBestRuns(runs, summary.savedAt, isNewBest, storageOk);
+    const lbHtml = runs.map((r, idx) => {
+      const cur = r.savedAt === summary.savedAt ? ' current-run' : '';
+      return `<div class="best-run-line${cur}">${idx + 1}. ${r.score} PTS · ${formatTime(r.timeSeconds)} · ${r.outcome}</div>`;
+    }).join('');
 
+    const leftCol =
+      `<div>` +
+        `<div class="recap-section-title">OPTICAL BUILD SPECTRUM</div>` +
+        spectrumBarsHtml + synRibbon + evoRibbon +
+        `<div class="recap-section-title" style="margin-top:14px">RANK VELOCITY (0:00 → ${timeStr})</div>` +
+        buildRankSparklineSvg(game, t / 60) +
+      `</div>`;
+
+    const rightCol =
+      `<div>` +
+        `<div class="recap-section-title">RUN DOSSIER · SEED #${game.seed()}</div>` +
+        `<div class="dossier-row"><span class="dossier-label">SURVIVAL TIME</span><span class="dossier-val">${timeStr} (RANK ${game.rank()})</span></div>` +
+        `<div class="dossier-row"><span class="dossier-label">HOSTILES SHATTERED</span><span class="dossier-val">${game.kills_total()} (PEAK ×${peakStreak})</span></div>` +
+        `<div class="dossier-row"><span class="dossier-label">AVERAGE DPS</span><span class="dossier-val">${formatCompact(avgDps)} / s</span></div>` +
+        `<div class="dossier-row"><span class="dossier-label">BOSSES DEFEATED</span><span class="dossier-val">${bossKills}</span></div>` +
+        `<div class="dossier-row"><span class="dossier-label">HULL DMG / SHIELD</span><span class="dossier-val">${dmgTaken} / ${barrierAbs}</span></div>` +
+        (aimShots > 0 || game.aim_drills_completed() > 0
+          ? `<div class="dossier-row"><span class="dossier-label">AIM MASTERY</span><span class="dossier-val" style="color:#ffd95e">TIER ${game.aim_tier()} · ${aimAcc}% ACC · ${game.aim_drills_completed()} DRILLS</span></div>`
+          : '') +
+        (deathCause ? `<div class="dossier-row"><span class="dossier-label">FINAL BLOW</span><span class="dossier-val" style="color:#ff6b8b">${escapeHtml(deathCause)}</span></div>` : '') +
+        `<div class="best-run-panel"><div class="recap-section-title" style="margin-bottom:4px">${isNewBest ? '★ NEW PERSONAL BEST' : 'LEADERBOARD'}</div>${lbHtml}</div>` +
+      `</div>`;
+
+    deathStatsEl.innerHTML = leftCol + rightCol;
     deathScreenEl.classList.add('shown');
     deathShown = true;
-    btnCopyTelemetry.textContent = 'COPY SEED';
+    btnCopyTelemetry.textContent = 'COPY TELEMETRY';
+    syncCursorVisibility();
     if (victory) audio.playVictory();
     else audio.playDeath();
 
-    const killsByKind = ENEMY_KIND_NAMES.map((n, i) => `${n}: ${game.kills_by_kind(i)}`).join(', ');
-    const shardSummaryText = SHARDS.map((s, i) => {
-      const lvl = game.inventory_level(i);
-      return lvl > 0 ? `${s.name} ${lvl}` : null;
-    }).filter(Boolean).join(', ');
-
+    const shardText = ownedShards.map((s) => `${s.name} L${s.level}`).join(', ');
     lastRunTelemetryText =
       `PRISM ${victory ? 'VICTORY' : 'RUN'} | Seed #${game.seed()}${isDailyRun ? ` (Daily ${daily.dateLabel})` : ''}\n` +
       `Score: ${game.score()} | Time: ${timeStr} | Rank: ${game.rank()} | Kills: ${game.kills_total()} (Peak ×${peakStreak})\n` +
-      `Avg DPS: ${Math.round(avgDps)} | Bosses: ${bossKills} | Shards: ${shardSummaryText || 'none'}\n` +
-      `Synergies: ${activeSynergies.join(', ') || 'none'} | Evolutions: ${activeEvolutions.join(', ') || 'none'}`;
-
-    console.log(
-      `[PRISM RUN SUMMARY]\n` +
-      `  seed: ${game.seed()}\n` +
-      `  outcome: ${victory ? 'VICTORY' : 'DEATH'}  |  time: ${timeStr}  |  score: ${game.score()}\n` +
-      `  death cause: ${deathCause ?? 'none'}\n` +
-      `  rank: ${game.rank()} (peak ${game.peak_rank()})  |  kills: ${game.kills_total()} (peak streak ${peakStreak})  |  bosses: ${bossKills}\n` +
-      `  avg dps: ${Math.round(avgDps)}  |  dmg taken: ${dmgTaken}  |  barrier absorbed: ${barrierAbs}  |  gems: ${gems}\n` +
-      `  damage by source: ${damageBreakdown.join(', ') || 'none'}\n` +
-      `  kills by kind: ${killsByKind}\n` +
-      `  rank timeline: ${rankTimeline}\n` +
-      `  shard picks: ${upgradePickOrder.join(' -> ') || 'none'}\n` +
-      `  skips/rerolls: ${game.skip_count()} / ${game.reroll_count()}\n` +
-      `  synergies: ${activeSynergies.join(', ') || 'none'}\n` +
-      `  synergy times: ${synergyTimes.join(', ') || 'none'}\n` +
-      `  evolutions: ${activeEvolutions.join(', ') || 'none'}\n` +
-      `  max observed: enemies ${maxObserved.enemies}, circles ${maxObserved.circles}, beams ${maxObserved.beams}\n` +
-      `  shards: ${shardSummaryText || 'none'}`,
-    );
+      `Avg DPS: ${Math.round(avgDps)} | Aim Tier: ${game.aim_tier()} (${aimAcc}% acc, ${game.aim_drills_completed()} drills)\n` +
+      `Shards: ${shardText || 'none'} | Synergies: ${activeSynergies.join(', ') || 'none'}`;
   };
 
   const hideDeathScreen = (): void => {
     deathScreenEl.classList.remove('shown');
     deathShown = false;
     resetHudCache();
+    syncCursorVisibility();
   };
 
   const doRestart = (): void => {
@@ -1036,22 +986,19 @@ async function main(): Promise<void> {
     game.continue_endless();
     hideDeathScreen();
     input.clearKeys();
-    overlay.announce('ENDLESS OVERDRIVE', '#ffd740', 'ESCALATING WAVES & OVERDRIVE BOSSES');
+    overlay.announce('ENDLESS OVERDRIVE', '#ffd95e', 'ESCALATING WAVES & OVERDRIVE BOSSES');
     last = performance.now();
   });
 
   btnCopyTelemetry.addEventListener('click', () => {
-    if (!lastRunTelemetryText) return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      void navigator.clipboard.writeText(lastRunTelemetryText).then(() => {
-        btnCopyTelemetry.textContent = 'COPIED!';
-      });
-    }
+    if (!lastRunTelemetryText || !navigator.clipboard?.writeText) return;
+    void navigator.clipboard.writeText(lastRunTelemetryText).then(() => {
+      btnCopyTelemetry.textContent = 'COPIED!';
+    });
   });
 
   deathRestartEl.addEventListener('click', doRestart);
 
-  // Global keyboard shortcuts.
   window.addEventListener('keydown', (e) => {
     if (!isStarted) {
       if (e.key === 'Enter' || e.key === ' ') {
@@ -1091,7 +1038,7 @@ async function main(): Promise<void> {
     }
   });
 
-  // --- Main RAF loop -----------------------------------------------------
+  // --- Main RAF Loop -----------------------------------------------------
 
   let last = performance.now();
   let fpsLast = last;
@@ -1102,69 +1049,61 @@ async function main(): Promise<void> {
     const rawDt = Math.min((now - last) / 1000, 1 / 30);
     last = now;
 
-    // Poll Gamepad API every frame (works on title, active run, level-up modal, and pause!).
-    input.pollGamepad(modalShown);
+    input.pollGamepad(modalShown, rawDt);
     const padNow = input.hasGamepad();
     if (padNow !== lastGamepadShown) {
-      sysUplinkEl.textContent = padNow ? '● GAMEPAD READY' : '● UPLINK STABLE';
+      sysUplinkEl.textContent = padNow ? '● TWIN-STICK PAD' : '● ONLINE';
       lastGamepadShown = padNow;
     }
     if (input.consumePause()) {
-      if (!isStarted) {
-        startNewRun((Math.random() * 0xffffffff) >>> 0, false);
-      } else {
-        togglePause();
-      }
+      if (!isStarted) startNewRun((Math.random() * 0xffffffff) >>> 0, false);
+      else togglePause();
     }
 
-    // Attract-mode spinning crystal globe on Title Screen!
+    // Interactive mouse-reactive spinning crystal globe on Title Screen!
     if (!isStarted) {
+      audio.updateMusicState(true, 0.1, false);
       const t = now / 1000;
-      const camX = t * 52;
-      const camY = Math.sin(t * 0.24) * 190;
-      // Central prism + orbiting spectral crystal ring + refracting preview beams.
+      const camX = t * 44;
+      const camY = Math.sin(t * 0.22) * 170;
+      // Place hero crystal right-of-center so it balances the left editorial title column!
+      const anchorX = camX + Math.min(230, viewW * 0.20);
+      const anchorY = camY;
+      const [mx, my] = input.peekAimOffset();
+      const mouseAngle = Math.atan2(my, mx - Math.min(230, viewW * 0.20));
+
       let cIdx = 0;
       const putCircle = (
         x: number, y: number, r: number,
         cr: number, cg: number, cb: number, ca: number, glow: number, shape: number,
       ): void => {
         const o = cIdx * CIRCLE_STRIDE_FLOATS;
-        attractCircles[o] = x;
-        attractCircles[o + 1] = y;
-        attractCircles[o + 2] = r;
-        attractCircles[o + 3] = cr;
-        attractCircles[o + 4] = cg;
-        attractCircles[o + 5] = cb;
-        attractCircles[o + 6] = ca;
-        attractCircles[o + 7] = glow;
-        attractCircles[o + 8] = shape;
+        attractCircles[o] = x; attractCircles[o + 1] = y; attractCircles[o + 2] = r;
+        attractCircles[o + 3] = cr; attractCircles[o + 4] = cg; attractCircles[o + 5] = cb;
+        attractCircles[o + 6] = ca; attractCircles[o + 7] = glow; attractCircles[o + 8] = shape;
         cIdx++;
       };
 
-      putCircle(camX, camY, 64, 0.35, 0.85, 1.0, 0.34, 1.6, 4.0);
-      putCircle(camX, camY, 26, 0.74, 0.96, 1.0, 0.96, 1.5, 5.0);
+      putCircle(anchorX, anchorY, 82, 0.35, 0.85, 1.0, 0.38, 1.6, 4.0);
+      putCircle(anchorX, anchorY, 34, 0.72, 0.96, 1.0, 0.98, 1.6, 5.0);
       for (let i = 0; i < 6; i++) {
-        const a = t * 0.55 + (i * Math.PI * 2) / 6;
-        const ox = camX + Math.cos(a) * 140;
-        const oy = camY + Math.sin(a) * 140;
+        // Subtle mouse-reactive refraction fan!
+        const a = t * 0.42 + mouseAngle * 0.35 + (i * Math.PI * 2) / 6;
+        const ox = anchorX + Math.cos(a) * 145;
+        const oy = anchorY + Math.sin(a) * 145;
         const hue = i / 6;
         const cr = 0.5 + 0.5 * Math.cos(hue * Math.PI * 2);
         const cg = 0.5 + 0.5 * Math.cos(hue * Math.PI * 2 + 2.094);
         const cb = 0.5 + 0.5 * Math.cos(hue * Math.PI * 2 + 4.189);
-        putCircle(ox, oy, 12, cr, cg, cb, 0.90, 2.0, 1.0);
+        putCircle(ox, oy, 12, cr, cg, cb, 0.92, 2.0, 1.0);
 
         const bo = i * BEAM_AUGMENTED_STRIDE;
-        attractBeams[bo] = camX;
-        attractBeams[bo + 1] = camY;
-        attractBeams[bo + 2] = camX + Math.cos(a) * 420;
-        attractBeams[bo + 3] = camY + Math.sin(a) * 420;
-        attractBeams[bo + 4] = 2.0;
-        attractBeams[bo + 5] = cr;
-        attractBeams[bo + 6] = cg;
-        attractBeams[bo + 7] = cb;
-        attractBeams[bo + 8] = 0.55;
-        attractBeams[bo + 9] = 2.1;
-        attractBeams[bo + 10] = 1.0;
+        attractBeams[bo] = anchorX; attractBeams[bo + 1] = anchorY;
+        attractBeams[bo + 2] = anchorX + Math.cos(a) * 440;
+        attractBeams[bo + 3] = anchorY + Math.sin(a) * 440;
+        attractBeams[bo + 4] = 2.2;
+        attractBeams[bo + 5] = cr; attractBeams[bo + 6] = cg; attractBeams[bo + 7] = cb;
+        attractBeams[bo + 8] = 0.62; attractBeams[bo + 9] = 2.0; attractBeams[bo + 10] = 1.0;
       }
 
       renderer.render(
@@ -1172,9 +1111,7 @@ async function main(): Promise<void> {
         [camX, camY],
         attractCircles, cIdx,
         attractBeams, 6,
-        [0, 0],
-        t,
-        game.arena_radius(),
+        [0, 0], t, game.arena_radius(),
         { intensity: 0.45, screenFlash: 0, damageFlash: 0, lowHp: 0, bossMood: 0 },
       );
       requestAnimationFrame(frame);
@@ -1186,7 +1123,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Handle Gamepad navigation inside Level-Up modal.
+    // Gamepad navigation inside Level-Up modal.
     if (modalShown) {
       const act = input.consumeModalAction();
       if (act === 'prev') {
@@ -1210,7 +1147,9 @@ async function main(): Promise<void> {
       }
     }
 
-    // Visceral micro hit-stop time dilation (purely presentation-side; deterministic Rust unaffected).
+    syncCursorVisibility();
+
+    // Presentation-side hit-stop micro slow-mo.
     let simDt = rawDt;
     if (hitStopTimer > 0) {
       hitStopTimer = Math.max(0, hitStopTimer - rawDt);
@@ -1218,28 +1157,27 @@ async function main(): Promise<void> {
     }
 
     const [ix, iy] = input.direction();
+    const aim = input.consumeAim();
     game.set_input(ix, iy);
     game.set_dash_input(input.consumeDash());
+    game.set_aim_input(aim.offsetX, aim.offsetY, aim.active, aim.clicked && !modalShown && !deathShown, aim.held && !modalShown && !deathShown);
     game.update(simDt);
 
     const pulseHitStop = game.hit_stop_pulse();
-    if (pulseHitStop > 0.1) {
-      hitStopTimer = Math.max(hitStopTimer, 0.025 + pulseHitStop * 0.03);
-    }
+    if (pulseHitStop > 0.1) hitStopTimer = Math.max(hitStopTimer, 0.024 + pulseHitStop * 0.028);
 
-    // Compute build intensity (0..1).
     let totalShardLevels = 0;
-    for (let i = 0; i < SHARDS.length; i++) {
-      totalShardLevels += game.inventory_level(i);
-    }
+    for (let i = 0; i < SHARDS.length; i++) totalShardLevels += game.inventory_level(i);
     const intensity = Math.min(1.0, totalShardLevels / 40.0);
     const bossActive = game.boss_active();
     const eventBits = game.audio_event_bits();
     const activeBits = game.active_synergy_bits();
     const activeEvoBits = game.active_evolution_bits();
     const streak = game.kill_streak();
+    const aimTracking = game.aim_tracking_active();
+    const aimTrackProgress = game.aim_track_progress();
+    const aimCombo = game.aim_combo();
 
-    // Audio DSP tick.
     if (!deathShown && !modalShown) {
       audio.tick(
         rawDt,
@@ -1251,71 +1189,73 @@ async function main(): Promise<void> {
         intensity,
         bossActive,
         streak,
+        aimTracking,
+        aimTrackProgress,
+        aimCombo,
       );
     }
 
-    // Floating milestone announcements on Overlay Canvas.
+    // Visual hit-marker & callout banners.
+    if (eventBits & AUDIO_AIM_HIT) overlay.pulseHitMarker();
+    if (eventBits & AUDIO_AIM_MISS) overlay.pulseMissMarker();
+    if (eventBits & AUDIO_AIM_COMPLETE) {
+      overlay.pulseHitMarker();
+      overlay.announce(`PRISM OVERDRIVE · TIER ${game.aim_tier()}`, '#ffe066', `AIM CHAIN ×${aimCombo}`);
+    }
     if (eventBits & AUDIO_BOSS_SPAWN) {
-      const bName = BOSS_NAMES[game.boss_kind_index()] ?? 'ANCIENT PRISM';
-      overlay.announce(`WARNING · ${bName}`, '#ffad5c', 'ARENA CROWD CLEARED FOR ENGAGEMENT');
+      overlay.announce(`WARNING · ${BOSS_NAMES[game.boss_kind_index()] ?? 'ANCIENT PRISM'}`, '#ffad5c', 'ARENA CROWD CLEARED');
     }
-    if (eventBits & AUDIO_SHIELD_BREAK) {
-      overlay.announce('SHIELD SHATTERED', '#ffe26a', 'SENTINEL CORE EXPOSED');
-    }
-    if (eventBits & AUDIO_STREAK_MILESTONE) {
-      overlay.announce(`×${streak} KILL STREAK`, streak >= 100 ? '#ff8df2' : '#ffd740');
-    }
+    if (eventBits & AUDIO_SHIELD_BREAK) overlay.announce('SHIELD SHATTERED', '#ffe26a', 'SENTINEL CORE EXPOSED');
+    if (eventBits & AUDIO_STREAK_MILESTONE) overlay.announce(`×${streak} KILL STREAK`, streak >= 100 ? '#ff8df2' : '#ffd95e');
+
     const newSynergies = activeBits & ~announcedSynergyBits;
     if (newSynergies !== 0) {
       for (let i = 0; i < SYNERGY_NAMES.length; i++) {
-        if ((newSynergies >>> i) & 1) {
-          overlay.announce(`⚡ SYNERGY · ${SYNERGY_NAMES[i]}`, '#ffd740');
-        }
+        if ((newSynergies >>> i) & 1) overlay.announce(`⚡ SYNERGY · ${SYNERGY_NAMES[i]}`, '#ffd95e');
       }
       announcedSynergyBits = activeBits;
     }
     const newEvos = activeEvoBits & ~announcedEvoBits;
     if ((eventBits & AUDIO_EVOLUTION) || newEvos !== 0) {
       for (let i = 0; i < EVOLUTIONS.length; i++) {
-        if ((newEvos >>> i) & 1) {
-          overlay.announce(`★ EVOLUTION · ${EVOLUTIONS[i]!.name}`, EVOLUTIONS[i]!.color, EVOLUTIONS[i]!.desc.toUpperCase());
-        }
+        if ((newEvos >>> i) & 1) overlay.announce(`★ EVOLUTION · ${EVOLUTIONS[i]!.name}`, EVOLUTIONS[i]!.color, EVOLUTIONS[i]!.desc.toUpperCase());
       }
       announcedEvoBits = activeEvoBits;
     }
 
-    // Death / victory screen edges.
-    const isDead = game.is_dead();
-    const isVictory = game.is_victory();
-    if (isDead && !deathShown) showDeathScreen(isVictory);
+    if (game.is_dead() && !deathShown) showDeathScreen(game.is_victory());
 
-    // Dash cooldown indicator.
     const dashPct = game.dash_cooldown_pct();
     dashFillEl.style.width = ((1 - dashPct) * 100) + '%';
+    waveClearEl.classList.toggle('shown', game.wave_clear_timer() > 0);
 
-    // Wave clear banner.
-    if (game.wave_clear_timer() > 0) waveClearEl.classList.add('shown');
-    else waveClearEl.classList.remove('shown');
-
-    // Modal open/close by state edges.
     const isLeveling = game.is_leveling_up();
     if (isLeveling && !modalShown) showLevelUpModal();
     if (!isLeveling && modalShown) hideLevelUpModal();
 
-    // HUD updates (change-detected).
-    const rank = game.rank();
-    if (rank !== lastRank) {
-      rankEl.textContent = String(rank);
-      lastRank = rank;
+    // Update live Aim-Trainer HUD badge.
+    if (aim.active) {
+      aimHudEl.classList.add('shown');
+      aimTierValEl.textContent = `AIM TIER ${game.aim_tier()}`;
+      aimComboValEl.textContent = `CHAIN ×${aimCombo}`;
+      const shots = game.aim_shots();
+      aimAccValEl.textContent = shots > 0 ? `${Math.round((game.aim_hits() / shots) * 100)}% ACC` : 'READY';
+      if (aimTargetsLen > 0) {
+        const k = Math.round(aimTargetsView[3]!);
+        aimDrillValEl.textContent = k === 0 ? 'FLICK CHAIN' : k === 1 ? 'SMOOTH TRACK' : 'MICRO CLUSTER';
+      } else {
+        aimDrillValEl.textContent = 'PRECISION LANCE';
+      }
     }
+
+    const rank = game.rank();
+    if (rank !== lastRank) { rankEl.textContent = String(rank); lastRank = rank; }
     const kills = game.kills_total();
     const score = game.score();
     if (kills !== lastKills || score !== lastScore) {
       killsEl.textContent = `${kills} KILLS · ${score} PTS`;
-      lastKills = kills;
-      lastScore = score;
+      lastKills = kills; lastScore = score;
     }
-    // Kill-streak combo badge.
     if (streak !== lastStreak) {
       comboWrapEl.classList.toggle('shown', streak >= 3);
       if (streak >= 3) {
@@ -1325,24 +1265,20 @@ async function main(): Promise<void> {
       }
       lastStreak = streak;
     }
-    if (streak >= 3) {
-      comboFillEl.style.width = (game.kill_streak_timer_pct() * 100) + '%';
-    }
+    if (streak >= 3) comboFillEl.style.width = (game.kill_streak_timer_pct() * 100) + '%';
 
     const xp = game.xp();
     const xpNeeded = game.xp_needed();
     const xpPct = xpNeeded > 0 ? Math.round(Math.min(100, (xp / xpNeeded) * 100)) : 0;
     if (xpPct !== lastXpPct) {
-      if (xpPct < lastXpPct) xpFillEl.style.transition = 'none';
-      else xpFillEl.style.transition = '';
+      xpFillEl.style.transition = xpPct < lastXpPct ? 'none' : '';
       xpFillEl.style.width = xpPct + '%';
       lastXpPct = xpPct;
     }
     if (xp !== lastXp || xpNeeded !== lastXpNeeded) {
       xpRankLabelEl.textContent = `RADIANCE TO RANK ${rank + 1}`;
       xpValEl.textContent = `${xp} / ${xpNeeded}`;
-      lastXp = xp;
-      lastXpNeeded = xpNeeded;
+      lastXp = xp; lastXpNeeded = xpNeeded;
     }
 
     const hp = game.hp();
@@ -1350,8 +1286,7 @@ async function main(): Promise<void> {
     const hpPct = maxHp > 0 ? Math.round((hp / maxHp) * 100) : 100;
     if (hp !== lastHp || maxHp !== lastMaxHp) {
       hpValEl.textContent = `${Math.ceil(hp)} / ${Math.round(maxHp)}`;
-      lastHp = hp;
-      lastMaxHp = maxHp;
+      lastHp = hp; lastMaxHp = maxHp;
     }
     if (hpPct !== lastHpPct) {
       hpFillEl.style.width = hpPct + '%';
@@ -1366,44 +1301,24 @@ async function main(): Promise<void> {
       lastDashReady = dashReady;
     }
 
-    const t = game.timer();
-    const timerStr = formatTime(t);
-    if (timerStr !== lastTimerStr) {
-      timerEl.textContent = timerStr;
-      lastTimerStr = timerStr;
-    }
-
+    const timerStr = formatTime(game.timer());
+    if (timerStr !== lastTimerStr) { timerEl.textContent = timerStr; lastTimerStr = timerStr; }
     const wave = game.wave();
-    if (wave !== lastWave) {
-      waveLabelEl.textContent = `WAVE ${wave + 1}`;
-      lastWave = wave;
-    }
-
+    if (wave !== lastWave) { waveLabelEl.textContent = `WAVE ${wave + 1}`; lastWave = wave; }
     const endlessNow = game.is_endless();
-    if (endlessNow !== lastEndless) {
-      endlessBadgeEl.classList.toggle('shown', endlessNow);
-      lastEndless = endlessNow;
-    }
+    if (endlessNow !== lastEndless) { endlessBadgeEl.classList.toggle('shown', endlessNow); lastEndless = endlessNow; }
 
     if (bossActive !== lastBossActive) {
       bossHudEl.classList.toggle('shown', bossActive);
-      lastBossActive = bossActive;
-      lastBossPct = -1;
-      lastBossKind = -2;
+      lastBossActive = bossActive; lastBossPct = -1; lastBossKind = -2;
     }
     let bossLabel = 'PRISM BOSS';
     if (bossActive) {
       const bossKind = game.boss_kind_index();
       bossLabel = BOSS_NAMES[bossKind] ?? 'UNKNOWN PRISM';
-      if (bossKind !== lastBossKind) {
-        bossNameEl.textContent = bossLabel;
-        lastBossKind = bossKind;
-      }
+      if (bossKind !== lastBossKind) { bossNameEl.textContent = bossLabel; lastBossKind = bossKind; }
       const bossPct = Math.max(0, Math.min(100, Math.round(game.boss_hp_pct() * 100)));
-      if (bossPct !== lastBossPct) {
-        bossFillEl.style.width = bossPct + '%';
-        lastBossPct = bossPct;
-      }
+      if (bossPct !== lastBossPct) { bossFillEl.style.width = bossPct + '%'; lastBossPct = bossPct; }
     }
 
     for (let i = 0; i < SHARDS.length; i++) {
@@ -1433,25 +1348,15 @@ async function main(): Promise<void> {
         const tag = synergyTags[i]!;
         const isActive = ((activeBits >>> i) & 1) === 1;
         const isNear = ((nearBits >>> i) & 1) === 1;
-        if (isActive) {
-          tag.style.display = '';
-          tag.className = 'synergy-tag active';
-        } else if (isNear) {
-          tag.style.display = '';
-          tag.className = 'synergy-tag near';
-        } else {
-          tag.style.display = 'none';
-          tag.className = 'synergy-tag';
-        }
+        if (isActive) { tag.style.display = ''; tag.className = 'synergy-tag active'; }
+        else if (isNear) { tag.style.display = ''; tag.className = 'synergy-tag near'; }
+        else { tag.style.display = 'none'; tag.className = 'synergy-tag'; }
       }
-      lastActiveBits = activeBits;
-      lastNearBits = nearBits;
+      lastActiveBits = activeBits; lastNearBits = nearBits;
     }
 
-    // Refresh zero-copy WASM views after update().
     refreshBuffers();
 
-    // Build augmented beam buffer with smooth growth formation animation.
     const beamCount = beamsLen;
     let renderBeams: Float32Array;
     if (beamCount > 0) {
@@ -1463,21 +1368,15 @@ async function main(): Promise<void> {
         const src = i * BEAM_STRIDE_FLOATS;
         const dst = i * BEAM_AUGMENTED_STRIDE;
         for (let j = 0; j < BEAM_STRIDE_FLOATS; j++) augBeamBuf[dst + j] = beamsView[src + j]!;
-
-        const p1x = beamsView[src + 2]!;
-        const p1y = beamsView[src + 3]!;
-        const cr = beamsView[src + 5]!;
-        const key = `${Math.round(p1x * 0.25)},${Math.round(p1y * 0.25)},${Math.round(cr * 8)}`;
+        const key = `${Math.round(beamsView[src + 2]! * 0.25)},${Math.round(beamsView[src + 3]! * 0.25)},${Math.round(beamsView[src + 5]! * 8)}`;
         keysThisFrame.add(key);
-
         let entry = beamBirthTimes.get(key);
         if (!entry) {
-          entry = { birth: now, duration: 28 + Math.random() * 52 };
+          entry = { birth: now, duration: 24 + Math.random() * 44 };
           beamBirthTimes.set(key, entry);
         }
         augBeamBuf[dst + 10] = Math.min(1.0, (now - entry.birth) / entry.duration);
       }
-
       for (const key of beamBirthTimes.keys()) {
         if (!keysThisFrame.has(key)) beamBirthTimes.delete(key);
       }
@@ -1494,8 +1393,7 @@ async function main(): Promise<void> {
     const lowHpFactor = maxHp > 0 ? Math.max(0, (0.30 - hp / maxHp) / 0.30) : 0;
 
     renderer.render(
-      pixelW, pixelH,
-      viewW, viewH,
+      pixelW, pixelH, viewW, viewH,
       [camX, camY],
       circlesView, circlesLen,
       renderBeams, beamCount,
@@ -1511,20 +1409,26 @@ async function main(): Promise<void> {
       },
     );
 
-    // 2D Overlay pass: floating damage numbers, banners, and off-screen boss chevron.
     overlay.ingestPopups(popupsView, popupsLen);
     overlay.render(
       rawDt,
-      camX, camY,
-      shakeX, shakeY,
-      arenaR,
-      bossActive,
-      game.boss_world_x(),
-      game.boss_world_y(),
-      bossLabel,
+      camX, camY, shakeX, shakeY, arenaR,
+      bossActive, game.boss_world_x(), game.boss_world_y(), bossLabel,
+      {
+        active: aim.active && !modalShown && !deathShown,
+        offsetX: aim.offsetX,
+        offsetY: aim.offsetY,
+        hovering: game.aim_hovering_target(),
+        tracking: aimTracking,
+        trackProgress: aimTrackProgress,
+        hasPrevLink: game.aim_has_prev_link(),
+        lastHitX: game.aim_last_hit_x(),
+        lastHitY: game.aim_last_hit_y(),
+        targetsView: aimTargetsView,
+        targetsLen: aimTargetsLen,
+      },
     );
 
-    // FPS telemetry readout.
     fpsFrames++;
     if (now - fpsLast > 500) {
       const fps = (fpsFrames * 1000) / (now - fpsLast);

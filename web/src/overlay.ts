@@ -1,9 +1,12 @@
-// Lightweight 2D Canvas Floating Overlay layered over WebGL2:
-//   - Crisp spherical-projected floating damage & heal numbers (with spatial coalescing)
-//   - Floating combat milestone / synergy / evolution banners
+// Lightweight 2D Canvas Tactical & Aim-Trainer Overlay layered over WebGL2:
+//   - FPS Aim-Trainer Optical Crosshair (tightens & turns gold on hover, pulses on hit/miss)
+//   - Resonance Drill visual cues (Flick Chain tether vector + step number, Smooth Track charge arc, Micro triangle links)
+//   - Coalesced floating damage / crit / heal / shatter numbers
+//   - Milestone / synergy / evolution / drill completion callouts
 //   - Off-screen directional boss chevron tracker
 
 const POPUP_STRIDE_FLOATS = 4;
+const AIM_TARGET_STRIDE_FLOATS = 8;
 const MAX_ACTIVE_POPUPS = 68;
 
 interface FloatingNumber {
@@ -24,6 +27,20 @@ interface FloatingBanner {
   maxAge: number;
 }
 
+export interface AimOverlayState {
+  active: boolean;
+  offsetX: number;
+  offsetY: number;
+  hovering: boolean;
+  tracking: boolean;
+  trackProgress: number;
+  hasPrevLink: boolean;
+  lastHitX: number;
+  lastHitY: number;
+  targetsView: Float32Array;
+  targetsLen: number;
+}
+
 export class OverlayRenderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
@@ -33,6 +50,8 @@ export class OverlayRenderer {
   private viewH = 1;
   private dpr = 1;
   private enabled = true;
+  private hitMarkerTimer = 0;
+  private missMarkerTimer = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -53,14 +72,22 @@ export class OverlayRenderer {
 
   public setEnabled(enabled: boolean): void {
     this.enabled = enabled;
-    if (!enabled) {
-      this.clear();
-    }
+    if (!enabled) this.popups.length = 0;
+  }
+
+  public pulseHitMarker(): void {
+    this.hitMarkerTimer = 0.16;
+  }
+
+  public pulseMissMarker(): void {
+    this.missMarkerTimer = 0.14;
   }
 
   public clear(): void {
     this.popups.length = 0;
     this.banners.length = 0;
+    this.hitMarkerTimer = 0;
+    this.missMarkerTimer = 0;
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.ctx.clearRect(0, 0, this.viewW, this.viewH);
   }
@@ -73,9 +100,7 @@ export class OverlayRenderer {
       age: 0,
       maxAge: 2.1,
     });
-    if (this.banners.length > 3) {
-      this.banners.shift();
-    }
+    if (this.banners.length > 3) this.banners.shift();
   }
 
   public ingestPopups(view: Float32Array, count: number): void {
@@ -88,7 +113,6 @@ export class OverlayRenderer {
       const val = view[base + 2]!;
       const kind = Math.round(view[base + 3]!);
 
-      // Coalesce fresh nearby same-kind hits so dense salvos read as crisp big totals.
       let merged = false;
       if (kind !== 3) {
         for (let j = this.popups.length - 1; j >= Math.max(0, this.popups.length - 18); j--) {
@@ -107,9 +131,7 @@ export class OverlayRenderer {
       }
 
       if (!merged) {
-        if (this.popups.length >= MAX_ACTIVE_POPUPS) {
-          this.popups.shift();
-        }
+        if (this.popups.length >= MAX_ACTIVE_POPUPS) this.popups.shift();
         this.popups.push({
           wx,
           wy,
@@ -139,9 +161,10 @@ export class OverlayRenderer {
     if (dist > horizon) return null;
     const theta = dist / Math.max(arenaRadius, 1);
     const scale = theta < 0.0001 ? 1 : Math.sin(theta) / theta;
-    const px = rx * scale + shakeX + this.viewW * 0.5;
-    const py = ry * scale + shakeY + this.viewH * 0.5;
-    return [px, py];
+    return [
+      rx * scale + shakeX + this.viewW * 0.5,
+      ry * scale + shakeY + this.viewH * 0.5,
+    ];
   }
 
   public render(
@@ -155,12 +178,132 @@ export class OverlayRenderer {
     bossX: number,
     bossY: number,
     bossLabel: string,
+    aim: AimOverlayState,
   ): void {
     const ctx = this.ctx;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.viewW, this.viewH);
 
-    // 1. Floating damage / heal / shatter numbers.
+    this.hitMarkerTimer = Math.max(0, this.hitMarkerTimer - dt);
+    this.missMarkerTimer = Math.max(0, this.missMarkerTimer - dt);
+
+    // 1. FPS Aim-Trainer Resonance Node gauges, flick tethers, and micro-cluster links.
+    if (aim.targetsLen > 0) {
+      const microPts: [number, number][] = [];
+
+      for (let i = 0; i < aim.targetsLen; i++) {
+        const base = i * AIM_TARGET_STRIDE_FLOATS;
+        const wx = aim.targetsView[base]!;
+        const wy = aim.targetsView[base + 1]!;
+        const radius = aim.targetsView[base + 2]!;
+        const kind = Math.round(aim.targetsView[base + 3]!);
+        const progress = aim.targetsView[base + 4]!;
+        const lifeFrac = aim.targetsView[base + 5]!;
+        const step = Math.round(aim.targetsView[base + 6]!);
+        const total = Math.round(aim.targetsView[base + 7]!);
+
+        const screen = this.projectToScreen(wx, wy, camX, camY, shakeX, shakeY, arenaRadius);
+        if (!screen) continue;
+        const [sx, sy] = screen;
+
+        if (kind === 0) {
+          // FLICK CHAIN: faint dashed guiding tether from previous flick hit!
+          if (aim.hasPrevLink) {
+            const prev = this.projectToScreen(
+              aim.lastHitX, aim.lastHitY, camX, camY, shakeX, shakeY, arenaRadius,
+            );
+            if (prev) {
+              ctx.save();
+              ctx.strokeStyle = 'rgba(255, 224, 102, 0.35)';
+              ctx.lineWidth = 1.5;
+              ctx.setLineDash([5, 6]);
+              ctx.beginPath();
+              ctx.moveTo(prev[0], prev[1]);
+              ctx.lineTo(sx, sy);
+              ctx.stroke();
+              ctx.restore();
+            }
+          }
+
+          // Crisp outer countdown arc + step label.
+          ctx.save();
+          ctx.strokeStyle = '#ffe066';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(sx, sy, radius + 7, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * lifeFrac);
+          ctx.stroke();
+
+          ctx.font = '700 10px "Cascadia Mono", Consolas, ui-monospace, monospace';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#fff5cc';
+          ctx.shadowColor = 'rgba(0,0,0,0.95)';
+          ctx.shadowBlur = 4;
+          ctx.fillText(`FLICK ${step}/${total}`, sx, sy - radius - 13);
+          ctx.restore();
+        } else if (kind === 1) {
+          // SMOOTH TRACKING: circular charge progress gauge + HOLD cue!
+          ctx.save();
+          // Remaining time faint outer ring.
+          ctx.strokeStyle = 'rgba(130, 210, 255, 0.32)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, radius + 10, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * lifeFrac);
+          ctx.stroke();
+
+          // Live tracking lock charge arc (0 → 100%).
+          ctx.strokeStyle = aim.tracking ? '#7effd4' : '#70c8ff';
+          ctx.shadowColor = aim.tracking ? '#7effd4' : '#70c8ff';
+          ctx.shadowBlur = aim.tracking ? 14 : 6;
+          ctx.lineWidth = 3.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, radius + 4, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * progress);
+          ctx.stroke();
+
+          ctx.font = '700 10px "Cascadia Mono", Consolas, ui-monospace, monospace';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = aim.tracking ? '#a8ffdf' : '#bceeff';
+          ctx.shadowColor = 'rgba(0,0,0,0.95)';
+          ctx.shadowBlur = 4;
+          const label = aim.tracking ? `LOCK ${Math.round(progress * 100)}%` : 'HOLD TO TRACK';
+          ctx.fillText(label, sx, sy - radius - 16);
+          ctx.restore();
+        } else {
+          // MICRO-CLUSTER: tight precision ruby-gold nodes.
+          microPts.push([sx, sy]);
+          ctx.save();
+          ctx.strokeStyle = '#ff7eb6';
+          ctx.lineWidth = 1.8;
+          ctx.beginPath();
+          ctx.arc(sx, sy, radius + 5, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * lifeFrac);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // Draw faint triangular constellation web connecting active Micro-Cluster nodes.
+      if (microPts.length >= 2) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 126, 182, 0.35)';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([3, 5]);
+        ctx.beginPath();
+        for (let i = 0; i < microPts.length; i++) {
+          const a = microPts[i]!;
+          const b = microPts[(i + 1) % microPts.length]!;
+          ctx.moveTo(a[0], a[1]);
+          ctx.lineTo(b[0], b[1]);
+        }
+        ctx.stroke();
+        const anchor = microPts[0]!;
+        ctx.font = '700 9px "Cascadia Mono", Consolas, ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#ffc2dd';
+        ctx.fillText(`MICRO ×${microPts.length}`, anchor[0], anchor[1] - 24);
+        ctx.restore();
+      }
+    }
+
+    // 2. Floating damage / heal / shatter numbers.
     if (this.enabled && this.popups.length > 0) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -187,10 +330,10 @@ export class OverlayRenderer {
         let glow: string;
 
         if (p.kind === 3) {
-          text = 'SHATTER!';
+          text = 'OVERDRIVE!';
           font = '700 15px "Cascadia Mono", Consolas, ui-monospace, monospace';
-          fill = '#ffe8ff';
-          glow = 'rgba(218, 120, 255, 0.9)';
+          fill = '#fff2c2';
+          glow = 'rgba(255, 200, 72, 0.92)';
         } else if (p.kind === 2) {
           text = `+${Math.round(p.value)}`;
           font = '600 12px "Cascadia Mono", Consolas, ui-monospace, monospace';
@@ -225,7 +368,7 @@ export class OverlayRenderer {
       this.popups.length = writeIdx;
     }
 
-    // 2. Off-screen directional boss chevron indicator.
+    // 3. Off-screen directional boss chevron indicator.
     if (bossActive) {
       const rx = bossX - camX;
       const ry = bossY - camY;
@@ -282,7 +425,78 @@ export class OverlayRenderer {
       }
     }
 
-    // 3. Milestone / Synergy / Evolution floating callouts.
+    // 4. Razor-sharp FPS Aim-Trainer Optical Crosshair (drawn over world when mouse/right-stick active).
+    if (aim.active) {
+      const cx = this.viewW * 0.5 + aim.offsetX;
+      const cy = this.viewH * 0.5 + aim.offsetY;
+      const gap = aim.hovering ? 5 : 9;
+      const arm = aim.hovering ? 9 : 7;
+      const color =
+        this.missMarkerTimer > 0
+          ? '#ff6b7f'
+          : aim.tracking
+            ? '#7effd4'
+            : aim.hovering
+              ? '#ffe26a'
+              : '#b8f6ff';
+
+      ctx.save();
+      // Faint optical sightline from prism center to reticle.
+      ctx.strokeStyle = aim.tracking
+        ? 'rgba(126, 255, 212, 0.28)'
+        : 'rgba(168, 244, 255, 0.08)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(this.viewW * 0.5 + shakeX, this.viewH * 0.5 + shakeY);
+      ctx.lineTo(cx, cy);
+      ctx.stroke();
+
+      // Dynamic 4-tick FPS precision reticle.
+      ctx.strokeStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = aim.hovering || aim.tracking ? 12 : 6;
+      ctx.lineWidth = aim.hovering ? 2 : 1.5;
+
+      ctx.beginPath();
+      ctx.moveTo(cx - gap - arm, cy);
+      ctx.lineTo(cx - gap, cy);
+      ctx.moveTo(cx + gap, cy);
+      ctx.lineTo(cx + gap + arm, cy);
+      ctx.moveTo(cx, cy - gap - arm);
+      ctx.lineTo(cx, cy - gap);
+      ctx.moveTo(cx, cy + gap);
+      ctx.lineTo(cx, cy + gap + arm);
+      ctx.stroke();
+
+      // Crisp 2px center dot.
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(cx, cy, aim.hovering ? 2.2 : 1.6, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Crisp X hit-marker flash on precision snap!
+      if (this.hitMarkerTimer > 0) {
+        const hm = this.hitMarkerTimer / 0.16;
+        const d1 = 6 + (1 - hm) * 4;
+        const d2 = d1 + 7;
+        ctx.strokeStyle = '#ffe878';
+        ctx.lineWidth = 2.2;
+        ctx.globalAlpha = hm;
+        ctx.beginPath();
+        ctx.moveTo(cx - d2, cy - d2);
+        ctx.lineTo(cx - d1, cy - d1);
+        ctx.moveTo(cx + d2, cy - d2);
+        ctx.lineTo(cx + d1, cy - d1);
+        ctx.moveTo(cx - d2, cy + d2);
+        ctx.lineTo(cx - d1, cy + d1);
+        ctx.moveTo(cx + d2, cy + d2);
+        ctx.lineTo(cx + d1, cy + d1);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // 5. Milestone / Synergy / Evolution / Drill Completion callout banners.
     if (this.banners.length > 0) {
       let writeIdx = 0;
       for (let i = 0; i < this.banners.length; i++) {
@@ -295,23 +509,23 @@ export class OverlayRenderer {
         const fadeIn = Math.min(1, t / 0.12);
         const fadeOut = t > 0.72 ? 1 - (t - 0.72) / 0.28 : 1;
         const alpha = fadeIn * fadeOut;
-        const y = this.viewH * 0.24 + i * 40 - (1 - fadeIn) * 10;
+        const y = this.viewH * 0.22 + i * 42 - (1 - fadeIn) * 10;
 
         ctx.save();
         ctx.globalAlpha = Math.max(0, alpha);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.font = '600 15px "Cascadia Mono", Consolas, ui-monospace, monospace';
+        ctx.font = '700 15px "Cascadia Mono", Consolas, ui-monospace, monospace';
         ctx.fillStyle = b.color;
         ctx.shadowColor = b.color;
         ctx.shadowBlur = 18;
         ctx.fillText(b.text, this.viewW * 0.5, y);
 
         if (b.subtext) {
-          ctx.font = '400 10px "Cascadia Mono", Consolas, ui-monospace, monospace';
-          ctx.fillStyle = 'rgba(220, 248, 255, 0.82)';
+          ctx.font = '500 10px "Cascadia Mono", Consolas, ui-monospace, monospace';
+          ctx.fillStyle = 'rgba(226, 250, 255, 0.88)';
           ctx.shadowBlur = 6;
-          ctx.fillText(b.subtext, this.viewW * 0.5, y + 17);
+          ctx.fillText(b.subtext, this.viewW * 0.5, y + 18);
         }
         ctx.restore();
       }

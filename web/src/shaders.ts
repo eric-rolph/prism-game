@@ -129,12 +129,13 @@ void main() {
   float glowBoost = 1.0 + v_glow * 0.65;
 
   if (shape == 0) {
-    // Soft luminous orb / ambient aura / particle.
-    float core = 1.0 - smoothstep(1.0 - aa * 2.0, 1.0 + aa, d);
-    float halo = exp(-d * d * 1.95) * v_glow * 0.38;
-    alpha = (core + halo) * v_color.a;
-    col = mix(v_color.rgb, vec3(1.0), core * 0.25 * clamp(v_glow * 0.3, 0.0, 1.0));
-    col *= (core * (1.0 + v_glow * 0.55) + halo * 1.4) / max(core + halo, 0.001);
+    // Pure silky radial glow for ambient auras (zero hard circular disc edge!),
+    // with a crisp hot center only for high-alpha particles.
+    float softAura = exp(-d * d * 2.65);
+    float crispDot = (1.0 - smoothstep(0.65 - aa, 0.72 + aa, d)) * smoothstep(0.45, 0.85, v_color.a);
+    float halo = softAura * (0.55 + v_glow * 0.26);
+    alpha = (crispDot + halo) * v_color.a;
+    col = mix(v_color.rgb, v_color.rgb * 1.25 + vec3(0.18), crispDot * 0.5);
   } else if (shape == 1) {
     // Rotating faceted crystal diamond (XP radiance gems, halos, shard nodes).
     float spin = u_time * 1.85 + v_seed * 6.2831;
@@ -324,6 +325,7 @@ in vec2  v_p0_proj;
 in float v_pad;
 
 uniform float u_time;
+uniform float u_beam_density; // auto-attenuates per-beam energy when 100s of beams overlap
 
 out vec4 fragColor;
 
@@ -338,40 +340,41 @@ void main() {
   float edgeFeather = 1.0 - smoothstep(v_pad * 0.52, v_pad * 0.96, dist);
   if (edgeFeather <= 0.001) discard;
 
-  // Normalized along-beam coordinate.
   float t = clamp(v_uv.x / max(effectiveLen, 1.0), 0.0, 1.0);
 
-  // White-hot optical plasma core + exponential refraction halo.
-  float core = exp(-pow(dist / (r * 0.85), 2.0) * 1.9);
-  float midGlow = exp(-dist / (r * 1.75 + 2.0));
-  float wideGlow = exp(-dist / (r * 3.4 + 4.5)) * 0.34;
+  // Tight vibrant optical core + controlled halo (tinted instead of flat white washout!).
+  float core = exp(-pow(dist / (r * 0.72), 2.0) * 2.2);
+  float midGlow = exp(-dist / (r * 1.55 + 1.8));
+  float wideGlow = exp(-dist / (r * 3.0 + 3.6)) * 0.24;
 
   // Travelling photon interference pulse along the light ray.
   float phase = dot(v_p0_proj, vec2(0.017, 0.023));
-  float ripple = 0.86 + 0.14 * sin(v_uv.x * 0.14 - u_time * 34.0 + phase);
+  float ripple = 0.84 + 0.16 * sin(v_uv.x * 0.14 - u_time * 34.0 + phase);
   float shimmer = 0.90 + 0.10 * cos(v_uv.x * 0.06 + u_time * 18.0);
 
-  // Subtle lateral spectral dispersion fringe (R/G/B split across beam edge).
-  float sideNorm = v_uv.y / max(r * 2.4, 1.0);
+  // Rich lateral spectral dispersion fringe (vivid RGB chromatic prism separation).
+  float sideNorm = v_uv.y / max(r * 2.2, 1.0);
   vec3 fringe = vec3(
-    smoothstep(-0.2, 1.4, sideNorm),
-    1.0 - abs(sideNorm) * 0.55,
-    smoothstep(-0.2, 1.4, -sideNorm)
+    smoothstep(-0.1, 1.3, sideNorm),
+    1.0 - abs(sideNorm) * 0.6,
+    smoothstep(-0.1, 1.3, -sideNorm)
   );
-  vec3 dispersed = mix(v_color.rgb, v_color.rgb * 0.65 + fringe * 0.55, 0.42 * midGlow * (1.0 - core));
+  vec3 dispersed = mix(v_color.rgb, v_color.rgb * 0.52 + fringe * 0.72, 0.58 * midGlow);
 
-  // Emitter origin flare & scorching impact tip flare.
-  float originFlare = exp(-length(v_uv) / (r * 2.4 + 3.5)) * 0.65;
-  float tipFlare    = exp(-length(v_uv - vec2(effectiveLen, 0.0)) / (r * 2.8 + 4.2)) * 0.82;
-  float endFade     = smoothstep(0.0, 0.03, t) * (0.72 + 0.28 * (1.0 - t));
+  // Emitter origin flare & impact tip flare.
+  float originFlare = exp(-length(v_uv) / (r * 2.1 + 3.0)) * 0.48;
+  float tipFlare    = exp(-length(v_uv - vec2(effectiveLen, 0.0)) / (r * 2.4 + 3.5)) * 0.65;
+  float endFade     = smoothstep(0.0, 0.03, t) * (0.74 + 0.26 * (1.0 - t));
 
-  float energy = ((core * 1.55 + midGlow * 0.72 + wideGlow) * ripple * shimmer * (0.82 + 0.18 * endFade)
+  // Keep beam cores richly tinted with their shard hue instead of blowing out to pure white!
+  vec3 coreTint = mix(v_color.rgb, vec3(1.0), 0.36 * u_beam_density);
+  float energy = ((core * 1.25 + midGlow * 0.62 + wideGlow) * ripple * shimmer * (0.82 + 0.18 * endFade)
                + originFlare + tipFlare) * edgeFeather;
 
-  vec3 col = (dispersed * (0.92 + v_glow * 0.42) * (midGlow * 0.9 + wideGlow + originFlare * 0.7 + tipFlare * 0.9)
-           + vec3(1.0, 0.99, 1.0) * (core * (1.15 + v_glow * 0.38) + tipFlare * 0.55)) * edgeFeather;
+  vec3 col = (dispersed * (0.85 + min(v_glow, 3.0) * 0.28) * (midGlow * 0.85 + wideGlow + originFlare * 0.6 + tipFlare * 0.75)
+           + coreTint * (core * (0.95 + min(v_glow, 2.5) * 0.24) + tipFlare * 0.35)) * edgeFeather * u_beam_density;
 
-  float alpha = clamp(energy, 0.0, 1.8) * v_color.a;
+  float alpha = clamp(energy * u_beam_density, 0.0, 1.2) * v_color.a;
   if (alpha < 0.002) discard;
 
   fragColor = vec4(col * v_color.a, alpha);
@@ -655,14 +658,44 @@ uniform float u_low_hp;
 
 out vec4 fragColor;
 
-// Narkowicz ACES Filmic tone mapping curve (vibrant HDR chroma + clean white roll-off).
-vec3 acesFilmic(vec3 x) {
-  const float a = 2.51;
-  const float b = 0.03;
-  const float c = 2.43;
-  const float d = 0.59;
-  const float e = 0.14;
-  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+// Spectral thin-film interference color curve (oil-on-water / laser interferometry palette).
+vec3 thinFilmSpectrum(float phase) {
+  return 0.52 + 0.48 * cos(6.2831853 * (phase + vec3(0.00, 0.31, 0.64)));
+}
+
+// Chroma-Preserving Optical Tone Mapping + Thin-Film Interference at Extreme Photon Overlap!
+// Prevents late-game 1,000+ overlapping beam storms from collapsing into a blinding flat white blob:
+// instead, dense photon intersections refract into iridescent jewel filaments & stained-glass interference!
+vec3 opticalPrismTonemap(vec3 hdr, vec2 uv, float t) {
+  float peak = max(hdr.r, max(hdr.g, hdr.b));
+  if (peak < 0.0001) return vec3(0.0);
+
+  // Extract normalized chromaticity (hue + saturation) BEFORE compressing luminance.
+  vec3 chroma = hdr / peak;
+  // Slightly deepen saturation so overlapping pastels stay jewel-rich.
+  float luma = dot(chroma, vec3(0.2126, 0.7152, 0.0722));
+  vec3 richChroma = clamp(mix(vec3(luma), chroma, 1.28), 0.0, 1.0);
+
+  // Logarithmic optical compression keeps late-game peak energy readable instead of clipping to 1.0 white.
+  float compressed = peak / (1.0 + peak * 0.62);
+  float softKnee = 1.0 - exp(-peak * 1.15);
+  float finalLuma = mix(compressed, softKnee, 0.45);
+
+  vec3 baseMapped = richChroma * finalLuma;
+
+  // Optical Thin-Film Spectral Interference when intense beams pile up (peak > 1.35):
+  // Channels excess photon density into animated iridescent diffraction fringes instead of whiteout!
+  float excess = max(0.0, peak - 1.35);
+  if (excess > 0.001) {
+    float density = log(1.0 + excess);
+    float ripple = sin(uv.x * 16.0 - uv.y * 12.0 + t * 2.4 + density * 2.8) * 0.14;
+    vec3 film = thinFilmSpectrum(density * 0.58 + ripple + dot(chroma, vec3(0.3, 0.5, 0.7)));
+    float blend = clamp(density * 0.36, 0.0, 0.68);
+    // Keep narrow incandescent core filaments while infusing surrounding overlap with prismatic color!
+    vec3 interferometric = mix(baseMapped, film * (0.76 + 0.24 * clamp(density * 0.3, 0.0, 1.0)), blend);
+    return mix(interferometric, vec3(1.0, 0.99, 1.0), smoothstep(4.5, 22.0, excess) * 0.22);
+  }
+  return baseMapped;
 }
 
 void main() {
@@ -670,7 +703,7 @@ void main() {
   float r2 = dot(centered, centered);
 
   // Radial spectral chromatic aberration — subtle during calm, kicks on intense builds / hits.
-  float caAmt = (0.0008 + u_intensity * 0.0022 + u_damage_flash * 0.0055) * u_bloom_scale;
+  float caAmt = (0.0008 + u_intensity * 0.0024 + u_damage_flash * 0.0055) * u_bloom_scale;
   vec2 caDir = centered * caAmt * (0.4 + r2 * 2.4);
 
   vec3 scene = vec3(
@@ -679,20 +712,25 @@ void main() {
     texture(u_scene, v_uv - caDir).b
   );
 
-  // Multi-octave Dual Kawase bloom — smooth logarithmic growth as shards stack.
-  vec3 bloom = texture(u_bloom, v_uv).rgb;
-  float bloomGain = (0.58 + 0.52 * log(1.0 + u_intensity * 2.4)) * u_bloom_scale;
+  // Multi-octave Dual Kawase bloom — capped smoothly so late-game storms stay crisp & colorful!
+  vec3 rawBloom = texture(u_bloom, v_uv).rgb;
+  // Soft-compress bloom energy BEFORE adding so bloom never washes out the whole screen in white.
+  float bloomPeak = max(rawBloom.r, max(rawBloom.g, rawBloom.b));
+  vec3 bloom = rawBloom / (1.0 + bloomPeak * 0.55);
+  float bloomGain = (0.46 + 0.28 * log(1.0 + u_intensity * 1.8)) * u_bloom_scale;
 
-  // Temporal light persistence (silky laser afterglow without muddy trails).
+  // Temporal light persistence (silky laser afterglow without milky fog).
   vec3 prev = texture(u_prev, v_uv).rgb;
-  float persist = (0.14 + u_intensity * 0.06) * clamp(u_bloom_scale, 0.35, 1.0);
+  float prevPeak = max(prev.r, max(prev.g, prev.b));
+  vec3 prevSafe = prev / (1.0 + prevPeak * 0.85);
+  float persist = (0.11 + u_intensity * 0.04) * clamp(u_bloom_scale, 0.35, 1.0);
 
-  vec3 hdr = scene + bloom * bloomGain + prev * persist;
+  vec3 hdr = scene + bloom * bloomGain + prevSafe * persist;
 
   // Prismatic milestone / level-up / shield-break flash.
   if (u_screen_flash > 0.001) {
     float radialFlash = smoothstep(0.95, 0.05, sqrt(r2));
-    hdr += vec3(0.42, 0.86, 1.0) * u_screen_flash * (0.16 + 0.24 * radialFlash);
+    hdr += vec3(0.32, 0.82, 1.0) * u_screen_flash * (0.12 + 0.18 * radialFlash);
   }
 
   // Damage flash & low-HP heartbeat crimson vignette.
@@ -709,9 +747,9 @@ void main() {
   float vig = 1.0 - r2 * 0.46;
   hdr *= clamp(vig, 0.48, 1.0);
 
-  // ACES Filmic tone mapping + crisp sRGB gamma.
-  vec3 mapped = acesFilmic(hdr * 1.08);
-  vec3 srgb = pow(mapped, vec3(1.0 / 2.2));
+  // Chroma-Preserving Optical Interference Tonemap + crisp sRGB gamma.
+  vec3 mapped = opticalPrismTonemap(hdr * 1.05, v_uv, u_time);
+  vec3 srgb = pow(clamp(mapped, 0.0, 1.0), vec3(1.0 / 2.2));
 
   fragColor = vec4(srgb, 1.0);
 }

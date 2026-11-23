@@ -99,6 +99,7 @@ export class Renderer {
   private uBeamShake!: WebGLUniformLocation | null;
   private uBeamRadius!: WebGLUniformLocation | null;
   private uBeamTime!: WebGLUniformLocation | null;
+  private uBeamDensity!: WebGLUniformLocation | null;
 
   private uPreTex!: WebGLUniformLocation | null;
   private uPreTexel!: WebGLUniformLocation | null;
@@ -201,6 +202,7 @@ export class Renderer {
     this.uBeamShake = gl.getUniformLocation(this.beamProg, 'u_shake');
     this.uBeamRadius = gl.getUniformLocation(this.beamProg, 'u_arena_radius');
     this.uBeamTime = gl.getUniformLocation(this.beamProg, 'u_time');
+    this.uBeamDensity = gl.getUniformLocation(this.beamProg, 'u_beam_density');
 
     this.uPreTex = gl.getUniformLocation(this.prefilterProg, 'u_tex');
     this.uPreTexel = gl.getUniformLocation(this.prefilterProg, 'u_texel');
@@ -457,12 +459,16 @@ export class Renderer {
     }
 
     if (beamCount > 0) {
+      // Auto-attenuate per-beam HDR intensity when hundreds of beams overlap so late-game
+      // refraction storms build vibrant layered spectral ribbons instead of flat whiteout!
+      const beamDensity = 1.0 / Math.sqrt(1.0 + Math.max(0, beamCount - 14) / 34.0);
       gl.useProgram(this.beamProg);
       gl.uniform2f(this.uBeamRes, viewW, viewH);
       gl.uniform2f(this.uBeamCam, camera[0], camera[1]);
       gl.uniform2f(this.uBeamShake, shake[0], shake[1]);
       gl.uniform1f(this.uBeamRadius, arenaRadius);
       gl.uniform1f(this.uBeamTime, time);
+      gl.uniform1f(this.uBeamDensity, beamDensity);
       gl.bindVertexArray(this.beamVao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.beamInstanceBuf);
       gl.bufferData(

@@ -47,6 +47,21 @@ pub struct DamagePopup {
     pub kind: f32,
 }
 
+/// Per-frame FPS Aim-Trainer Resonance Target record. 8 × f32 = 32 bytes.
+/// `kind`: 0 = Flick Chain, 1 = Smooth Track Orb, 2 = Micro-Cluster.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct AimTargetInstance {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    pub kind: f32,
+    pub progress: f32,
+    pub life_frac: f32,
+    pub step: f32,
+    pub total: f32,
+}
+
 /// GPU instance data for a colored, glowing beam (capsule). 10 × f32 = 40 bytes.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -89,6 +104,18 @@ impl Game {
         self.inner.set_dash_input(pressed);
     }
 
+    pub fn set_aim_input(
+        &mut self,
+        offset_x: f32,
+        offset_y: f32,
+        active: bool,
+        clicked: bool,
+        held: bool,
+    ) {
+        self.inner
+            .set_aim_input(offset_x, offset_y, active, clicked, held);
+    }
+
     pub fn player_altitude(&self) -> f32 {
         self.inner.player_altitude()
     }
@@ -122,6 +149,51 @@ impl Game {
     }
     pub fn popups_len(&self) -> usize {
         self.inner.popups().len()
+    }
+    pub fn aim_targets_ptr(&self) -> *const AimTargetInstance {
+        self.inner.aim_targets().as_ptr()
+    }
+    pub fn aim_targets_len(&self) -> usize {
+        self.inner.aim_targets().len()
+    }
+
+    // --- FPS Aim-Trainer telemetry ---
+
+    pub fn aim_tier(&self) -> u32 {
+        self.inner.aim_tier()
+    }
+    pub fn aim_combo(&self) -> u32 {
+        self.inner.aim_combo()
+    }
+    pub fn peak_aim_combo(&self) -> u32 {
+        self.inner.peak_aim_combo()
+    }
+    pub fn aim_hits(&self) -> u32 {
+        self.inner.aim_hits()
+    }
+    pub fn aim_shots(&self) -> u32 {
+        self.inner.aim_shots()
+    }
+    pub fn aim_drills_completed(&self) -> u32 {
+        self.inner.aim_drills_completed()
+    }
+    pub fn aim_tracking_active(&self) -> bool {
+        self.inner.aim_tracking_active()
+    }
+    pub fn aim_track_progress(&self) -> f32 {
+        self.inner.aim_track_progress()
+    }
+    pub fn aim_last_hit_x(&self) -> f32 {
+        self.inner.aim_last_hit_camera_pos().x
+    }
+    pub fn aim_last_hit_y(&self) -> f32 {
+        self.inner.aim_last_hit_camera_pos().y
+    }
+    pub fn aim_has_prev_link(&self) -> bool {
+        self.inner.aim_has_prev_link()
+    }
+    pub fn aim_hovering_target(&self) -> bool {
+        self.inner.aim_hovering_target()
     }
 
     // --- Combat juice, telemetry & endless mode ---
